@@ -6,6 +6,7 @@ members = [
     "crates/ai-task-agent",
     "crates/ai-task-exec",
     "crates/ai-task-mcp",
+    "crates/ai-task-runtime",
 ]
 resolver = "3"
 

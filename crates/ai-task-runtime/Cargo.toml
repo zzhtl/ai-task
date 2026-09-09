@@ -1,0 +1,36 @@
+[package]
+name = "ai-task-runtime"
+description = "cron 调度器、DAG 引擎、策略引擎"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ai-task-core.workspace = true
+ai-task-agent.workspace = true
+ai-task-exec.workspace = true
+ai-task-proto.workspace = true
+ai-task-store.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+chrono-tz.workspace = true
+croner.workspace = true
+rand.workspace = true
+sqlx.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+sqlx.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
