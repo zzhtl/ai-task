@@ -30,6 +30,18 @@ pub struct Inner {
     pub host_exec: Option<ai_task_runtime::HostExecConfig>,
     /// 是否强制登录。关掉时所有请求以 admin 身份通过。
     pub require_auth: bool,
+    /// 口令最小长度。只有回环部署才允许低于默认值，由启动校验保证。
+    pub min_password_len: usize,
+}
+
+/// 从配置里来的那部分。收成一个结构体，让调用点能一眼看出谁是谁
+/// ——一串位置参数里把两个 bool 写反了是不会被编译器发现的。
+pub struct Settings {
+    pub workspace_id: WorkspaceId,
+    pub internal_token: String,
+    pub host_exec: Option<ai_task_runtime::HostExecConfig>,
+    pub require_auth: bool,
+    pub min_password_len: usize,
 }
 
 impl AppState {
@@ -38,11 +50,15 @@ impl AppState {
         store: ai_task_store::Store,
         bus: EventBus,
         engine: RunEngine,
-        workspace_id: WorkspaceId,
-        internal_token: String,
-        host_exec: Option<ai_task_runtime::HostExecConfig>,
-        require_auth: bool,
+        settings: Settings,
     ) -> Self {
+        let Settings {
+            workspace_id,
+            internal_token,
+            host_exec,
+            require_auth,
+            min_password_len,
+        } = settings;
         Self(Arc::new(Inner {
             store,
             bus,
@@ -51,6 +67,7 @@ impl AppState {
             internal_token,
             host_exec,
             require_auth,
+            min_password_len,
         }))
     }
 

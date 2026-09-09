@@ -132,7 +132,41 @@ pub async fn update(
     Ok((out, Json(task_summary(&task, None))))
 }
 
-/// `GET /api/v1/tasks`/// `GET /api/v1/tasks`
+/// `DELETE /api/v1/tasks/{id}`
+///
+/// **级联删掉这个任务的全部执行历史。**那些 run 里有成本记录和完整事件流，
+/// 是审计材料；这个操作没有撤销键，所以响应里报出实际删掉了多少。
+pub async fn delete(
+    State(state): State<AppState>,
+    Path(id): Path<TaskId>,
+) -> Result<impl IntoResponse, AppError> {
+    let task = state
+        .store
+        .get_task(state.workspace_id, id)
+        .await
+        .map_err(|e| map_not_found(e, "task", &id.to_string()))?;
+    let runs = state.store.count_runs_of(state.workspace_id, id).await?;
+
+    if !state.store.delete_task(state.workspace_id, id).await? {
+        return Err(AppError::NotFound(format!("任务 {id} 不存在")));
+    }
+
+    // before 里留下名字和被牵连的 run 数——删除之后，审计是唯一还能回答
+    // "这里原来有什么"的地方
+    state
+        .audit(
+            "task.delete",
+            "task",
+            id.to_string(),
+            Some(serde_json::json!({ "name": task.name, "runs_deleted": runs })),
+            None,
+        )
+        .await;
+
+    Ok(Json(serde_json::json!({ "deleted_runs": runs })))
+}
+
+/// `GET /api/v1/tasks`/// `GET /api/v1/tasks`/// `GET /api/v1/tasks`
 pub async fn list(
     State(state): State<AppState>,
     Query(page): Query<PageQuery>,

@@ -118,6 +118,9 @@ pub struct HostSummary {
     pub agent_version: Option<String>,
     /// 资源归因档位：`systemd` / `proc` / `none`。
     pub cgroup_mode: Option<String>,
+    /// 这台机器上探测到的 AI CLI。界面据此决定"能不能在这台机器上直接跑 AI"。
+    /// **是上次连接时的快照**，会过期；真正执行前还会再验一次。
+    pub ai_clis: serde_json::Value,
     /// 归因不完整、**且资源上限没有被强制**。界面要显式标出来。
     pub degraded: bool,
     pub last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -142,6 +145,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<Page<HostSummary
                 // 没探测过就还不知道，不能当成"没降级"
                 degraded: h.cgroup_mode.as_deref().is_some_and(|m| m != "systemd"),
                 cgroup_mode: h.cgroup_mode,
+                ai_clis: h.ai_clis,
                 last_seen_at: h.last_seen_at,
             })
             .collect(),
@@ -223,6 +227,7 @@ mod tests {
             tags: vec!["prod".into()],
             agent_version: None,
             cgroup_mode: None,
+            ai_clis: serde_json::json!([]),
             degraded: false,
             last_seen_at: None,
         })
@@ -244,6 +249,7 @@ mod tests {
                 "tags",
                 "agent_version",
                 "cgroup_mode",
+                "ai_clis",
                 "degraded",
                 "last_seen_at"
             ],

@@ -97,7 +97,7 @@ pub async fn me(
         .await?
         .ok_or(AppError::Unauthorized("尚未登录"))?;
     Ok(Json(Identity {
-        email: None,
+        email: Some(principal.email),
         display_name: principal.display_name,
         role: principal.role.as_str().to_owned(),
     }))
@@ -124,11 +124,14 @@ pub async fn bootstrap(
             "已经有用户了。加人请让管理员在界面上操作".into(),
         ));
     }
-    if body.password.chars().count() < 12 {
+    if body.password.chars().count() < state.min_password_len {
         return Err(AppError::Validation(vec![ai_task_proto::FieldError {
             field: "password".into(),
             code: "too_short".into(),
-            message: "管理员口令至少 12 个字符：这个账号能 SSH 到任意机器执行命令".into(),
+            message: format!(
+                "管理员口令至少 {} 个字符：这个账号能 SSH 到任意机器执行命令",
+                state.min_password_len
+            ),
         }]));
     }
 

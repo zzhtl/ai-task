@@ -13,9 +13,6 @@ use serde::{Deserialize, Serialize};
 use crate::error::AppError;
 use crate::state::AppState;
 
-/// 口令下限。这个账号能让系统 SSH 到任意机器执行命令。
-const MIN_PASSWORD_CHARS: usize = 12;
-
 #[derive(Debug, Serialize)]
 pub struct UserSummary {
     pub id: String,
@@ -66,10 +63,11 @@ pub async fn create(
     if !body.email.contains('@') {
         return Err(invalid("email", "不像是一个邮箱地址"));
     }
-    if body.password.chars().count() < MIN_PASSWORD_CHARS {
+    let floor = state.min_password_len;
+    if body.password.chars().count() < floor {
         return Err(invalid(
             "password",
-            &format!("至少 {MIN_PASSWORD_CHARS} 个字符：这个账号能让系统 SSH 到任意机器执行命令"),
+            &format!("至少 {floor} 个字符：这个账号能让系统 SSH 到任意机器执行命令"),
         ));
     }
 

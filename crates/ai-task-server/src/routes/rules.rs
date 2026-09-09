@@ -3,7 +3,7 @@
 use ai_task_core::PolicyRule;
 use ai_task_proto::{FieldError, Page};
 use ai_task_store::{NewRule, NewSkill, RuleKind};
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::{Json, response::IntoResponse};
 use serde::{Deserialize, Serialize};
@@ -53,6 +53,77 @@ pub struct PolicyRuleBody {
 #[derive(Debug, Serialize)]
 pub struct RuleCreated {
     pub id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuleView {
+    pub id: String,
+    pub name: String,
+    /// `prompt` 软规则 / `policy` 硬策略。两者语义完全不同，界面上要分开显示。
+    pub kind: String,
+    /// `global` 对所有任务生效 / `task` 只对显式挂上它的任务生效。
+    pub scope: String,
+    pub spec: serde_json::Value,
+    pub priority: i32,
+    pub enabled: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// `GET /api/v1/rules` —— 列出全部规则。
+///
+/// 建完看不见的规则等于没有：既不知道有哪些能挂到任务上，也不知道某条为什么
+/// 没生效。不分页，规则是人手工维护的东西。
+pub async fn list_rules(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
+    let items: Vec<RuleView> = state
+        .store
+        .list_rules(state.workspace_id)
+        .await?
+        .into_iter()
+        .map(|r| RuleView {
+            id: r.id.to_string(),
+            name: r.name,
+            kind: r.kind,
+            scope: r.scope,
+            spec: r.spec,
+            priority: r.priority,
+            enabled: r.enabled,
+            created_at: r.created_at,
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "items": items })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetEnabled {
+    pub enabled: bool,
+}
+
+/// `PUT /api/v1/rules/{id}/enabled` —— 停用 / 启用一条规则。
+///
+/// 只有停用，没有删除：规则文本进过 `runs.rules_hash`，删掉之后历史 run 就
+/// 解释不了了，而"当时是哪版规则产生了这个行为"是漂移排查的第一个问题。
+pub async fn set_rule_enabled(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+    Json(body): Json<SetEnabled>,
+) -> Result<impl IntoResponse, AppError> {
+    if !state
+        .store
+        .set_rule_enabled(state.workspace_id, ai_task_proto::RuleId(id), body.enabled)
+        .await?
+    {
+        return Err(AppError::NotFound(format!("规则 {id} 不存在")));
+    }
+    state
+        .audit(
+            "rule.enabled",
+            "rule",
+            id.to_string(),
+            None,
+            Some(serde_json::json!({ "enabled": body.enabled })),
+        )
+        .await;
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 pub async fn create_rule(

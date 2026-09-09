@@ -10,12 +10,13 @@ pub mod policy;
 pub mod remote;
 pub mod rules;
 pub mod runs;
+pub mod schedules;
 pub mod sse;
 pub mod tasks;
 pub mod users;
 
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use tower::{Layer as _, ServiceBuilder};
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::compression::CompressionLayer;
@@ -45,15 +46,27 @@ fn build_router(state: AppState) -> Router {
         .route("/healthz", get(health::healthz))
         .route("/readyz", get(health::readyz))
         .route("/tasks", get(tasks::list).post(tasks::create))
-        .route("/tasks/{id}", get(tasks::get).put(tasks::update))
+        .route(
+            "/tasks/{id}",
+            get(tasks::get).put(tasks::update).delete(tasks::delete),
+        )
         .route("/tasks/{id}/runs", post(tasks::trigger))
         .route("/runs", get(runs::list))
-        .route("/runs/{id}", get(runs::get))
+        .route("/runs/{id}", get(runs::get).delete(runs::delete))
         .route("/runs/{id}/cancel", post(runs::cancel))
         .route("/runs/{id}/events", get(sse::stream))
         .route("/runs/{id}/metrics", get(hosts::metrics))
         .route("/runs/{id}/drift", get(drift::compare))
         .route("/hosts", get(hosts::list).post(hosts::create))
+        .route("/schedules", get(schedules::list).post(schedules::create))
+        .route(
+            "/schedules/{id}",
+            axum::routing::put(schedules::update).delete(schedules::delete),
+        )
+        .route(
+            "/schedules/{id}/enabled",
+            axum::routing::put(schedules::set_enabled),
+        )
         .route("/approvals", get(approvals::list))
         .route("/audit", get(audit::list))
         .route("/auth/login", post(auth::login))
@@ -68,7 +81,8 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/users/{id}/revoke-sessions", post(users::revoke_sessions))
         .route("/approvals/{id}/decide", post(approvals::decide))
-        .route("/rules", post(rules::create_rule))
+        .route("/rules", get(rules::list_rules).post(rules::create_rule))
+        .route("/rules/{id}/enabled", put(rules::set_rule_enabled))
         .route("/skills", get(rules::list_skills).post(rules::create_skill));
 
     // 内部接口：只有 run 工作目录里的 hook 配置知道令牌。

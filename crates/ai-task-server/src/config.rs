@@ -105,7 +105,18 @@ pub struct AppConfig {
     /// 机器执行命令，没有认证等于把那台机器交出去。启动时会检查这一点。
     #[arg(long, env = "AI_TASK_REQUIRE_AUTH", default_value_t = false, action = clap::ArgAction::Set)]
     pub require_auth: bool,
+
+    /// 口令的最小长度。
+    ///
+    /// 默认 12：这个账号能让系统 SSH 到任意机器执行命令。
+    /// **只有监听在回环上时才允许调低**——本机开发实例上逼着记一串长口令是
+    /// 纯粹的摩擦，但那个理由在对外暴露时完全不成立，所以启动时会拒绝。
+    #[arg(long, env = "AI_TASK_MIN_PASSWORD_LEN", default_value_t = 12)]
+    pub min_password_len: usize,
 }
+
+/// 口令下限的默认值，同时也是对外暴露时不可放宽的底线。
+pub const DEFAULT_MIN_PASSWORD_LEN: usize = 12;
 
 impl AppConfig {
     #[must_use]
@@ -134,6 +145,13 @@ impl AppConfig {
     ///
     /// 比"启动了但不安全"好：后者要等出事才被发现。
     pub fn validate(&self) -> Result<(), String> {
+        if !self.listen.ip().is_loopback() && self.min_password_len < DEFAULT_MIN_PASSWORD_LEN {
+            return Err(format!(
+                "监听在 {} 却把口令下限调到了 {}。放宽下限的理由只在本机开发时成立，\n\
+                 对外暴露时不成立。",
+                self.listen, self.min_password_len
+            ));
+        }
         if !self.listen.ip().is_loopback() && !self.require_auth {
             return Err(format!(
                 "监听在 {} 却没开认证。这个服务能 SSH 到任意机器执行命令，\n\
@@ -213,6 +231,43 @@ mod tests {
 
         // 回环上不强制：单人自托管时逼着先建账号是纯粹的摩擦
         assert!(AppConfig::parse_from(["ai-task"]).validate().is_ok());
+    }
+
+    #[test]
+    fn the_password_floor_can_only_be_lowered_on_loopback() {
+        // 本机开发实例上逼着记一串长口令是纯粹的摩擦；
+        // 但那个理由在对外暴露时完全不成立。
+        let dev = AppConfig::parse_from(["ai-task", "--min-password-len", "5"]);
+        assert!(dev.validate().is_ok(), "回环上允许调低");
+
+        let exposed = AppConfig::parse_from([
+            "ai-task",
+            "--listen",
+            "0.0.0.0:8930",
+            "--require-auth",
+            "true",
+            "--min-password-len",
+            "5",
+        ]);
+        let err = exposed.validate().expect_err("对外暴露时必须拒绝");
+        assert!(err.contains("口令下限"), "{err}");
+
+        // 不动它的话，对外暴露照常可以起来
+        assert!(
+            AppConfig::parse_from([
+                "ai-task",
+                "--listen",
+                "0.0.0.0:8930",
+                "--require-auth",
+                "true",
+            ])
+            .validate()
+            .is_ok()
+        );
+        assert_eq!(
+            AppConfig::parse_from(["ai-task"]).min_password_len,
+            DEFAULT_MIN_PASSWORD_LEN
+        );
     }
 
     #[test]

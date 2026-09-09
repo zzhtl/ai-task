@@ -181,10 +181,13 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
         store.clone(),
         bus,
         engine,
-        workspace_id,
-        internal_token.clone(),
-        Some(config.host_exec()),
-        config.require_auth,
+        crate::state::Settings {
+            workspace_id,
+            internal_token: internal_token.clone(),
+            host_exec: Some(config.host_exec()),
+            require_auth: config.require_auth,
+            min_password_len: config.min_password_len,
+        },
     );
 
     // 调度器和 HTTP 服务共享一个关停信号

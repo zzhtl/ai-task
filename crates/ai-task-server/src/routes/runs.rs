@@ -64,6 +64,57 @@ pub async fn get(
 }
 
 /// `POST /api/v1/runs/{id}/cancel`
+/// `DELETE /api/v1/runs/{id}` —— 删掉一次执行记录连同它的事件流和资源采样。
+///
+/// 不做软删除：run 里的成本和策略判决是审计材料，"删了但还在"比真删更糟——
+/// 它会让每一条按 run 聚合的查询都得记得加 `WHERE NOT deleted`，漏一个地方
+/// 就是数字对不上。要留痕的是**这次删除本身**，那条记录在 audit_log 里。
+pub async fn delete(
+    State(state): State<AppState>,
+    Path(id): Path<RunId>,
+) -> Result<impl IntoResponse, AppError> {
+    // 先取快照：删完就没得取了，而审计要记下删掉的是什么
+    let run = state
+        .store
+        .get_run(state.workspace_id, id)
+        .await
+        .map_err(|e| map_not_found(e, id))?;
+
+    match state
+        .store
+        .delete_run(state.workspace_id, id)
+        .await
+        .map_err(AppError::from)?
+    {
+        // 刚才 get_run 还拿得到，现在没了：有人在同时删同一条。
+        // 结果和自己删掉是一样的，别报错。
+        //
+        // （单纯重复调用不会走到这里——上面的 get_run 会先返回 404。
+        //   DELETE 的幂等在这两条路径上都成立：不会 500，也不会有副作用。）
+        None => Ok(StatusCode::NO_CONTENT),
+        Some(false) => Err(AppError::Conflict(format!(
+            "run 还在 {:?}，执行器仍在往它的事件流里写。先取消，跑完了再删",
+            run.status
+        ))),
+        Some(true) => {
+            state
+                .audit(
+                    "run.delete",
+                    "run",
+                    id.to_string(),
+                    Some(serde_json::json!({
+                        "task_id": run.task_id.to_string(),
+                        "status": run.status,
+                        "cost_usd": run.cost,
+                    })),
+                    None,
+                )
+                .await;
+            Ok(StatusCode::NO_CONTENT)
+        }
+    }
+}
+
 pub async fn cancel(
     State(state): State<AppState>,
     Path(id): Path<RunId>,
