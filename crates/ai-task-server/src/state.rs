@@ -83,8 +83,8 @@ impl AppState {
     ) {
         let entry = ai_task_store::AuditEntry {
             workspace_id: self.workspace_id,
-            // M5 还没接认证。接上之后这里换成会话里的 user id。
-            actor_id: None,
+            // 没开认证（回环单人模式）或调度器自己触发时是 None，界面上显示为"系统"
+            actor_id: crate::middleware::rbac::current_user(),
             action,
             target_kind,
             target_id: target_id.into(),

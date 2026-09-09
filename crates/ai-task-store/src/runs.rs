@@ -304,17 +304,22 @@ impl Store {
     ///
     /// 实测（100k 行）游标 6 buffers / 0.16ms，`OFFSET 50000` 是
     /// 1732 buffers / 15.3ms，而且随深度线性变差。
+    /// `status` 为 `None` 表示不按状态过滤；给了空切片会一条都不返回——
+    /// 「筛选条件为空」和「没有筛选」是两回事，不该把前者悄悄当成后者。
     pub async fn list_runs(
         &self,
         workspace_id: WorkspaceId,
         task_id: Option<TaskId>,
+        status: Option<&[RunStatus]>,
         cursor: Option<(DateTime<Utc>, RunId)>,
         limit: i64,
     ) -> Result<Vec<RunRecord>, StoreError> {
+        let statuses = status.map(|s| s.iter().copied().map(status_str).collect::<Vec<_>>());
         let rows = run_query(
             "workspace_id = $1
              AND ($2::uuid IS NULL OR task_id = $2)
              AND ($3::timestamptz IS NULL OR (created_at, id) < ($3, $4))
+             AND ($6::text[] IS NULL OR status = ANY($6))
              ORDER BY created_at DESC, id DESC LIMIT $5",
         )
         .bind(uuid::Uuid::from(workspace_id))
@@ -322,6 +327,7 @@ impl Store {
         .bind(cursor.map(|(ts, _)| ts))
         .bind(cursor.map(|(_, id)| uuid::Uuid::from(id)))
         .bind(limit)
+        .bind(statuses)
         .fetch_all(self.pool())
         .await?;
         rows.into_iter().map(run_from_row).collect()

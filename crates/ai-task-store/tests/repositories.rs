@@ -393,7 +393,7 @@ db_test!(run_listing_uses_a_keyset_cursor, |f| {
     }
     let page1 = f
         .store
-        .list_runs(f.workspace, None, None, 10)
+        .list_runs(f.workspace, None, None, None, 10)
         .await
         .expect("第一页");
     assert_eq!(page1.len(), 10);
@@ -401,7 +401,13 @@ db_test!(run_listing_uses_a_keyset_cursor, |f| {
     let last = page1.last().expect("非空");
     let page2 = f
         .store
-        .list_runs(f.workspace, None, Some((last.created_at, last.id)), 10)
+        .list_runs(
+            f.workspace,
+            None,
+            None,
+            Some((last.created_at, last.id)),
+            10,
+        )
         .await
         .expect("第二页");
     assert_eq!(page2.len(), 10);
@@ -411,4 +417,58 @@ db_test!(run_listing_uses_a_keyset_cursor, |f| {
         .filter(|r| page1.iter().any(|p| p.id == r.id))
         .collect();
     assert!(overlap.is_empty(), "游标分页不能重复返回同一行");
+});
+
+db_test!(run_listing_filters_by_status, |f| {
+    let queued = f.seed_run().await;
+    let done = f.seed_run().await;
+    f.store
+        .finish_run(
+            done.id,
+            RunOutcome {
+                status: RunStatus::Succeeded,
+                cost: UsdMicros::ZERO,
+                output: None,
+                error: None,
+                cli_version: None,
+                output_digest: None,
+            },
+            PendingEvent::run(RunEventBody::RunFinished {
+                status: RunStatus::Succeeded,
+                error: None,
+                cost_usd: UsdMicros::ZERO,
+            }),
+        )
+        .await
+        .expect("结束");
+
+    let only_done = f
+        .store
+        .list_runs(f.workspace, None, Some(&[RunStatus::Succeeded]), None, 10)
+        .await
+        .expect("按状态筛");
+    assert!(only_done.iter().any(|r| r.id == done.id));
+    assert!(!only_done.iter().any(|r| r.id == queued.id));
+
+    let several = f
+        .store
+        .list_runs(
+            f.workspace,
+            None,
+            Some(&[RunStatus::Queued, RunStatus::Succeeded]),
+            None,
+            10,
+        )
+        .await
+        .expect("多状态");
+    assert!(several.iter().any(|r| r.id == queued.id));
+    assert!(several.iter().any(|r| r.id == done.id));
+
+    // 空列表是"什么都不要"，不是"不过滤"
+    let none = f
+        .store
+        .list_runs(f.workspace, None, Some(&[]), None, 10)
+        .await
+        .expect("空筛选");
+    assert!(none.is_empty());
 });

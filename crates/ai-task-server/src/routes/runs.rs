@@ -20,6 +20,12 @@ use crate::state::AppState;
 pub struct ListQuery {
     #[serde(default)]
     pub task_id: Option<ai_task_proto::TaskId>,
+    /// 逗号分隔的状态列表，如 `failed,timed_out`。
+    ///
+    /// 用逗号而不是重复的 `status=` 键：`serde_urlencoded` 不认重复键，
+    /// 而一个拼错的状态名必须是 422，不能悄悄变成「不过滤」。
+    #[serde(default)]
+    pub status: Option<String>,
     #[serde(default)]
     pub cursor: Option<String>,
     #[serde(default)]
@@ -33,10 +39,17 @@ pub async fn list(
 ) -> Result<Json<Page<RunSummary>>, AppError> {
     let limit = i64::from(query.limit.unwrap_or(50).clamp(1, 200));
     let cursor = query.cursor.as_deref().map(decode_cursor).transpose()?;
+    let status = query.status.as_deref().map(parse_statuses).transpose()?;
 
     let runs = state
         .store
-        .list_runs(state.workspace_id, query.task_id, cursor, limit)
+        .list_runs(
+            state.workspace_id,
+            query.task_id,
+            status.as_deref(),
+            cursor,
+            limit,
+        )
         .await?;
 
     // 取满一页才给游标；不满说明到底了，给 next_cursor 会让客户端白跑一次
@@ -171,6 +184,23 @@ pub fn to_summary(run: &RunRecord) -> RunSummary {
 /// 对客户端不透明——里面是什么、怎么编码，随时可以变。
 fn encode_cursor(created_at: DateTime<Utc>, id: RunId) -> String {
     format!("{}|{id}", created_at.timestamp_micros())
+}
+
+/// `failed,timed_out` → 状态列表。任何一段认不出来整个请求就 422。
+fn parse_statuses(raw: &str) -> Result<Vec<ai_task_proto::RunStatus>, AppError> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            serde_json::from_value(serde_json::Value::String(s.to_owned())).map_err(|_| {
+                AppError::Validation(vec![ai_task_proto::FieldError {
+                    field: "status".into(),
+                    code: "invalid".into(),
+                    message: format!("不认识的状态：{s}"),
+                }])
+            })
+        })
+        .collect()
 }
 
 fn decode_cursor(cursor: &str) -> Result<(DateTime<Utc>, RunId), AppError> {

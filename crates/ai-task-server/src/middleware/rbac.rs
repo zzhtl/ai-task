@@ -7,6 +7,7 @@
 //! `AI_TASK_REQUIRE_AUTH=false` 可以整体关掉（默认关，见 config.rs 的说明）。
 //! 关掉时所有请求以 admin 身份通过——**这只适用于回环上的单人部署**。
 
+use ai_task_proto::UserId;
 use ai_task_store::Role;
 use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode};
@@ -33,6 +34,17 @@ const ADMIN_ONLY: &[&str] = &[
     "/api/v1/rules",
     "/api/v1/users",
 ];
+
+tokio::task_local! {
+    /// 这次请求是谁发的。审计写入时读它，免得把 principal 塞进每个 handler 的签名。
+    static CURRENT_USER: Option<UserId>;
+}
+
+/// 当前请求的用户。没开认证、或不在请求上下文里时为 `None`。
+#[must_use]
+pub fn current_user() -> Option<UserId> {
+    CURRENT_USER.try_with(|u| *u).ok().flatten()
+}
 
 pub async fn layer(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let path = request.uri().path();
@@ -68,7 +80,9 @@ pub async fn layer(State(state): State<AppState>, request: Request, next: Next) 
             .into_response();
     }
 
-    next.run(request).await
+    CURRENT_USER
+        .scope(Some(principal.user_id), next.run(request))
+        .await
 }
 
 /// 这个请求需要哪一档。
