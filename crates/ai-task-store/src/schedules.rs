@@ -140,6 +140,67 @@ impl Store {
         Ok(id)
     }
 
+    /// 改一条定时配置。`next_fire_at` 由调用方按新表达式算好。
+    ///
+    /// `next_claim_at` 跟着一起改：它是加了 jitter 的抢占时刻，不改的话
+    /// 新表达式要等到下一个旧触发点之后才真正生效。
+    pub async fn update_schedule(
+        &self,
+        workspace_id: WorkspaceId,
+        id: ScheduleId,
+        new: &NewSchedule,
+    ) -> Result<bool, StoreError> {
+        let done = sqlx::query(
+            "UPDATE schedules
+             SET cron = $3, timezone = $4, misfire = $5, overlap = $6, jitter_s = $7,
+                 enabled = $8, next_fire_at = $9, next_claim_at = $10
+             WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(uuid::Uuid::from(id))
+        .bind(uuid::Uuid::from(workspace_id))
+        .bind(&new.cron)
+        .bind(&new.timezone)
+        .bind(enum_str(new.misfire))
+        .bind(enum_str(new.overlap))
+        .bind(i32::try_from(new.jitter_s).unwrap_or(0))
+        .bind(new.enabled)
+        .bind(new.next_fire_at)
+        .bind(new.next_claim_at)
+        .execute(self.pool())
+        .await?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    /// 启用/停用。停用不删记录，`next_fire_at` 原样保留。
+    pub async fn set_schedule_enabled(
+        &self,
+        workspace_id: WorkspaceId,
+        id: ScheduleId,
+        enabled: bool,
+    ) -> Result<bool, StoreError> {
+        let done =
+            sqlx::query("UPDATE schedules SET enabled = $3 WHERE id = $1 AND workspace_id = $2")
+                .bind(uuid::Uuid::from(id))
+                .bind(uuid::Uuid::from(workspace_id))
+                .bind(enabled)
+                .execute(self.pool())
+                .await?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    pub async fn delete_schedule(
+        &self,
+        workspace_id: WorkspaceId,
+        id: ScheduleId,
+    ) -> Result<bool, StoreError> {
+        let done = sqlx::query("DELETE FROM schedules WHERE id = $1 AND workspace_id = $2")
+            .bind(uuid::Uuid::from(id))
+            .bind(uuid::Uuid::from(workspace_id))
+            .execute(self.pool())
+            .await?;
+        Ok(done.rows_affected() > 0)
+    }
+
     pub async fn list_schedules(
         &self,
         workspace_id: WorkspaceId,

@@ -214,6 +214,77 @@ db_test!(event_replay_query_does_not_degrade_to_a_seq_scan, |f| {
     assert!(!plan.contains("Seq Scan"), "续传查询出现顺序扫描：\n{plan}");
 });
 
+db_test!(deleting_a_run_takes_its_event_stream_with_it, |f| {
+    // run_events / run_metrics 是分区表且没有指向 runs 的外键，级联是手写的。
+    // 漏掉的话事件表里会留下永远读不到、也永远不会变小的孤儿行——而界面上
+    // 明明写着"会同时删掉它们的完整事件流"。
+    let ids = seed(&f).await;
+    let run = insert_finished_run(&f, &ids).await;
+    insert_event(&f, run, 1).await;
+    insert_event(&f, run, 2).await;
+    insert_metric(&f, run).await;
+
+    let done = f
+        .store
+        .delete_run(f.workspace, ai_task_proto::RunId(run))
+        .await
+        .expect("删 run");
+    assert_eq!(done, Some(true));
+
+    assert_eq!(orphans(&f).await, (0, 0), "事件或采样没被一起删掉");
+});
+
+db_test!(deleting_a_task_takes_its_runs_event_streams_with_it, |f| {
+    let ids = seed(&f).await;
+    let run = insert_finished_run(&f, &ids).await;
+    insert_event(&f, run, 1).await;
+    insert_metric(&f, run).await;
+
+    assert!(
+        f.store
+            .delete_task(f.workspace, ai_task_proto::TaskId(ids.task))
+            .await
+            .expect("删任务")
+    );
+
+    // runs 随 tasks 级联走了，事件和采样必须跟着一起走
+    assert_eq!(orphans(&f).await, (0, 0), "删任务留下了孤儿事件");
+});
+
+db_test!(a_running_run_refuses_to_be_deleted, |f| {
+    // 执行器还在往它的事件流里写。删掉之后那些写入就成了新的孤儿
+    let ids = seed(&f).await;
+    let run = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO runs (id, workspace_id, task_id, task_version_id, status, trigger)
+         VALUES ($1,$2,$3,$4,'running','manual')",
+    )
+    .bind(run)
+    .bind(ids.workspace)
+    .bind(ids.task)
+    .bind(ids.version)
+    .execute(f.store.pool())
+    .await
+    .expect("插 run");
+
+    let done = f
+        .store
+        .delete_run(f.workspace, ai_task_proto::RunId(run))
+        .await
+        .expect("删 run");
+    assert_eq!(done, Some(false), "正在跑的 run 不该被删掉");
+});
+
+db_test!(deleting_a_run_that_is_already_gone_is_not_an_error, |f| {
+    // 重复 DELETE 要幂等：调用方要的结果已经达成了
+    let done = f
+        .store
+        .delete_run(f.workspace, ai_task_proto::RunId(uuid::Uuid::now_v7()))
+        .await
+        .expect("删不存在的 run");
+    assert_eq!(done, None);
+});
+
 // ---------------------------------------------------------------- 夹具
 
 struct Ids {
@@ -221,6 +292,63 @@ struct Ids {
     task: uuid::Uuid,
     version: uuid::Uuid,
     schedule: uuid::Uuid,
+}
+
+/// 已经跑完的 run。只有终态才允许删。
+async fn insert_finished_run(f: &common::Fixture, ids: &Ids) -> uuid::Uuid {
+    let run = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO runs (id, workspace_id, task_id, task_version_id, status, trigger, finished_at)
+         VALUES ($1,$2,$3,$4,'succeeded','manual', now())",
+    )
+    .bind(run)
+    .bind(ids.workspace)
+    .bind(ids.task)
+    .bind(ids.version)
+    .execute(f.store.pool())
+    .await
+    .expect("插 run");
+    run
+}
+
+async fn insert_event(f: &common::Fixture, run: uuid::Uuid, seq: i64) {
+    sqlx::query(
+        "INSERT INTO run_events (run_id, seq, ts, kind, payload)
+         VALUES ($1,$2, now(), 'log', '{\"kind\":\"log\"}')",
+    )
+    .bind(run)
+    .bind(seq)
+    .execute(f.store.pool())
+    .await
+    .expect("插事件");
+}
+
+async fn insert_metric(f: &common::Fixture, run: uuid::Uuid) {
+    sqlx::query(
+        "INSERT INTO run_metrics (run_id, node_key, ts, cpu_usec, rss_bytes)
+         VALUES ($1,'probe', now(), 1, 1)",
+    )
+    .bind(run)
+    .execute(f.store.pool())
+    .await
+    .expect("插采样");
+}
+
+/// (孤儿事件数, 孤儿采样数)
+async fn orphans(f: &common::Fixture) -> (i64, i64) {
+    let events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM run_events e WHERE NOT EXISTS (SELECT 1 FROM runs r WHERE r.id = e.run_id)",
+    )
+    .fetch_one(f.store.pool())
+    .await
+    .expect("数孤儿事件");
+    let metrics: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM run_metrics m WHERE NOT EXISTS (SELECT 1 FROM runs r WHERE r.id = m.run_id)",
+    )
+    .fetch_one(f.store.pool())
+    .await
+    .expect("数孤儿采样");
+    (events, metrics)
 }
 
 /// 在夹具的默认 workspace 下建一套 task / version / schedule。

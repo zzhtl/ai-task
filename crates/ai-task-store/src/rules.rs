@@ -37,6 +37,21 @@ pub struct Skill {
     pub content_hash: String,
 }
 
+/// 规则列表里的一行。软规则和硬策略共用一张表，`kind` 区分。
+#[derive(Debug, Clone)]
+pub struct RuleRow {
+    pub id: RuleId,
+    pub name: String,
+    /// `prompt`（软规则，注入 system prompt）或 `policy`（硬策略，工具调用边界强制）。
+    pub kind: String,
+    /// `global`（对所有任务生效）或 `task`（只对显式挂上它的任务生效）。
+    pub scope: String,
+    pub spec: serde_json::Value,
+    pub priority: i32,
+    pub enabled: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// 新建规则的入参。
 #[derive(Debug, Clone)]
 pub struct NewRule {
@@ -100,6 +115,59 @@ impl Store {
     ///
     /// 全局规则始终生效；任务级规则按名字挑。任务级的优先级统一加 1000，
     /// 保证它能覆盖同名的全局规则——「针对这个任务的特例」就该压过通用规则。
+    /// 列出这个 workspace 的全部规则。
+    ///
+    /// 不分页：规则是人手工维护的策略，几十条已经算多——真到需要翻页的量级，
+    /// 说明该先把它们合并掉。上限 500 兜底，防止有人脚本刷进来一堆。
+    pub async fn list_rules(&self, workspace_id: WorkspaceId) -> Result<Vec<RuleRow>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, name, kind, scope, spec, priority, enabled, created_at
+             FROM rules WHERE workspace_id = $1
+             ORDER BY kind, priority DESC, name
+             LIMIT 500",
+        )
+        .bind(uuid::Uuid::from(workspace_id))
+        .fetch_all(self.pool())
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(RuleRow {
+                    id: RuleId(row.try_get("id")?),
+                    name: row.try_get("name")?,
+                    kind: row.try_get("kind")?,
+                    scope: row.try_get("scope")?,
+                    spec: row.try_get("spec")?,
+                    priority: row.try_get("priority")?,
+                    enabled: row.try_get("enabled")?,
+                    created_at: row.try_get("created_at")?,
+                })
+            })
+            .collect()
+    }
+
+    /// 开关一条规则。返回 `false` 表示这条规则不在。
+    ///
+    /// 停用而不是删除：规则文本进过 `runs.rules_hash`，删掉之后历史 run 就
+    /// 解释不了了——"当时是哪版规则产生了这个行为"是漂移排查的第一个问题。
+    pub async fn set_rule_enabled(
+        &self,
+        workspace_id: WorkspaceId,
+        id: RuleId,
+        enabled: bool,
+    ) -> Result<bool, StoreError> {
+        let done = sqlx::query(
+            "UPDATE rules SET enabled = $3, updated_at = now()
+             WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(uuid::Uuid::from(id))
+        .bind(uuid::Uuid::from(workspace_id))
+        .bind(enabled)
+        .execute(self.pool())
+        .await?;
+        Ok(done.rows_affected() > 0)
+    }
+
     pub async fn policy_rules_for(
         &self,
         workspace_id: WorkspaceId,

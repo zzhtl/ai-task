@@ -244,6 +244,44 @@ impl Store {
         row.map(run_from_row).transpose()
     }
 
+    /// 删掉一个 run 连同它的全部痕迹。返回 `false` 表示这个 run 不在。
+    ///
+    /// **终态才允许删。**删一个正在跑的 run，执行器还在往它的事件流里写——
+    /// 结果是刚删完又冒出几条孤儿事件。先取消，跑完了再删。
+    pub async fn delete_run(
+        &self,
+        workspace_id: WorkspaceId,
+        id: RunId,
+    ) -> Result<Option<bool>, StoreError> {
+        let mut tx = self.pool().begin().await?;
+
+        // 行锁住再判终态：否则判完到删掉之间 run 可能刚好开始跑
+        let row =
+            sqlx::query("SELECT status FROM runs WHERE id = $1 AND workspace_id = $2 FOR UPDATE")
+                .bind(uuid::Uuid::from(id))
+                .bind(uuid::Uuid::from(workspace_id))
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some(row) = row else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        let status: String = row.try_get("status")?;
+        if !parse_status(&status)?.is_terminal() {
+            tx.rollback().await?;
+            return Ok(Some(false));
+        }
+
+        purge_run_children(&mut tx, &[uuid::Uuid::from(id)]).await?;
+        sqlx::query("DELETE FROM runs WHERE id = $1 AND workspace_id = $2")
+            .bind(uuid::Uuid::from(id))
+            .bind(uuid::Uuid::from(workspace_id))
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(Some(true))
+    }
+
     pub async fn get_run(
         &self,
         workspace_id: WorkspaceId,
@@ -384,6 +422,32 @@ fn trigger_str(trigger: TriggerKind) -> String {
         .ok()
         .and_then(|v| v.as_str().map(str::to_owned))
         .unwrap_or_else(|| "manual".into())
+}
+
+/// 删掉这些 run 的事件流和资源采样。
+///
+/// `run_events` / `run_metrics` 是分区表且**没有指向 runs 的外键**——加外键要在
+/// 每条事件插入时多一次父行检查，而那是这个系统最热的写路径。代价是级联得手写。
+///
+/// **所有删 run 的路径都必须先调它。**漏掉的话事件表里会留下一批永远读不到、
+/// 也永远不会变小的孤儿行（读路径一律按 run_id 过滤）。
+pub(crate) async fn purge_run_children(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    run_ids: &[uuid::Uuid],
+) -> Result<(), StoreError> {
+    if run_ids.is_empty() {
+        return Ok(());
+    }
+    // 按 run_id 走 (run_id, seq) 主键，逐分区索引扫，不会全表
+    sqlx::query("DELETE FROM run_metrics WHERE run_id = ANY($1)")
+        .bind(run_ids)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM run_events WHERE run_id = ANY($1)")
+        .bind(run_ids)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -70,6 +70,8 @@ pub struct UserRecord {
 pub struct Principal {
     pub user_id: UserId,
     pub workspace_id: WorkspaceId,
+    /// 团队里真正能区分人的东西。display_name 可以重、可以等于角色名。
+    pub email: String,
     pub display_name: String,
     /// 该用户在这个 workspace 里的最高角色。
     pub role: Role,
@@ -141,7 +143,7 @@ impl Store {
         password: &str,
     ) -> Result<Option<(String, Principal)>, StoreError> {
         let row = sqlx::query(
-            "SELECT id, display_name, password_hash, disabled_at FROM users
+            "SELECT id, email, display_name, password_hash, disabled_at FROM users
              WHERE workspace_id = $1 AND email = $2",
         )
         .bind(uuid::Uuid::from(workspace_id))
@@ -188,6 +190,7 @@ impl Store {
             Principal {
                 user_id,
                 workspace_id,
+                email: row.try_get("email")?,
                 display_name: row.try_get("display_name")?,
                 role,
             },
@@ -197,7 +200,7 @@ impl Store {
     /// 用 token 换回调用方身份。过期或不存在都返回 `None`。
     pub async fn principal_for(&self, token: &str) -> Result<Option<Principal>, StoreError> {
         let row = sqlx::query(
-            "SELECT u.id, u.workspace_id, u.display_name
+            "SELECT u.id, u.workspace_id, u.email, u.display_name
              FROM sessions s
              JOIN users u ON u.id = s.user_id
              WHERE s.token_hash = $1 AND s.expires_at > now() AND u.disabled_at IS NULL",
@@ -212,6 +215,7 @@ impl Store {
         Ok(Some(Principal {
             user_id,
             workspace_id,
+            email: row.try_get("email")?,
             display_name: row.try_get("display_name")?,
             role: self
                 .highest_role(user_id, workspace_id)

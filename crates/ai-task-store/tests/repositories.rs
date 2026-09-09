@@ -19,6 +19,7 @@ fn spec(prompt: &str) -> DagSpec {
             config: NodeConfig::Ai(AiNode {
                 prompt: prompt.into(),
                 executor: ExecutorKind::ClaudeCode,
+                cli: None,
                 model: Some("claude-haiku-4-5".into()),
                 effort: None,
                 skills: vec![],

@@ -165,6 +165,60 @@ impl Store {
         ))
     }
 
+    /// 删任务。**级联删掉它的全部版本、定时配置和执行历史。**
+    ///
+    /// 返回会被一起删掉的 run 数，调用方要把这个数字摆到人眼前——
+    /// 那些 run 里有成本记录和完整事件流，是审计材料，删了没有撤销键。
+    pub async fn count_runs_of(
+        &self,
+        workspace_id: WorkspaceId,
+        task_id: TaskId,
+    ) -> Result<i64, StoreError> {
+        let row =
+            sqlx::query("SELECT count(*) AS n FROM runs WHERE workspace_id = $1 AND task_id = $2")
+                .bind(uuid::Uuid::from(workspace_id))
+                .bind(uuid::Uuid::from(task_id))
+                .fetch_one(self.pool())
+                .await?;
+        row.try_get("n").map_err(StoreError::from)
+    }
+
+    pub async fn delete_task(
+        &self,
+        workspace_id: WorkspaceId,
+        task_id: TaskId,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.pool().begin().await?;
+
+        // runs 会随 tasks 级联删掉，但它们的事件流和采样不会——那两张表是分区表，
+        // 没有指向 runs 的外键（见 `purge_run_children` 里的理由）。不显式删的话，
+        // 界面上明明写着"会同时删掉它们的完整事件流"，实际留了一堆孤儿行。
+        let run_ids: Vec<uuid::Uuid> =
+            sqlx::query_scalar("SELECT id FROM runs WHERE task_id = $1 AND workspace_id = $2")
+                .bind(uuid::Uuid::from(task_id))
+                .bind(uuid::Uuid::from(workspace_id))
+                .fetch_all(&mut *tx)
+                .await?;
+        crate::runs::purge_run_children(&mut tx, &run_ids).await?;
+
+        // current_version_id 指向 task_versions，而后者又 CASCADE 于 tasks：
+        // 先断开这个引用，否则删除会撞上那条延迟外键。
+        sqlx::query(
+            "UPDATE tasks SET current_version_id = NULL WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(uuid::Uuid::from(task_id))
+        .bind(uuid::Uuid::from(workspace_id))
+        .execute(&mut *tx)
+        .await?;
+        let done = sqlx::query("DELETE FROM tasks WHERE id = $1 AND workspace_id = $2")
+            .bind(uuid::Uuid::from(task_id))
+            .bind(uuid::Uuid::from(workspace_id))
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(done.rows_affected() > 0)
+    }
+
     pub async fn create_task(
         &self,
         new: NewTask,

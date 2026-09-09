@@ -141,6 +141,7 @@ pub fn minimal_spec() -> DagSpec {
             config: NodeConfig::Ai(AiNode {
                 prompt: "hi".into(),
                 executor: ExecutorKind::ClaudeCode,
+                cli: None,
                 model: None,
                 effort: None,
                 skills: vec![],
