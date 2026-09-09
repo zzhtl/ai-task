@@ -1,0 +1,53 @@
+[package]
+name = "ai-task-server"
+description = "axum 入口：路由、认证、SSE、静态资源"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ai-task"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+ai-task-core.workspace = true
+ai-task-agent.workspace = true
+ai-task-exec.workspace = true
+ai-task-mcp.workspace = true
+ai-task-proto.workspace = true
+ai-task-runtime.workspace = true
+ai-task-store.workspace = true
+anyhow.workspace = true
+# SSE 的流式响应体：手写 Stream 状态机不如生成器可读
+async-stream.workspace = true
+axum.workspace = true
+blake3.workspace = true
+futures-util.workspace = true
+rand.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
+sqlx.workspace = true
+tokio-util.workspace = true
+chrono.workspace = true
+clap.workspace = true
+mime_guess.workspace = true
+rust-embed.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[build-dependencies]
+anyhow.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
