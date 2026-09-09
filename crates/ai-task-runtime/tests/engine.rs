@@ -28,6 +28,8 @@ struct ScriptedExecutor {
     script: Vec<ExecEvent>,
     /// 每条事件之间的间隔，用来测取消。
     delay: std::time::Duration,
+    /// spawn 直接失败，模拟"目标上根本没有这个 CLI"。
+    unstartable: bool,
 }
 
 impl ScriptedExecutor {
@@ -35,6 +37,7 @@ impl ScriptedExecutor {
         Self {
             script,
             delay: std::time::Duration::ZERO,
+            unstartable: false,
         }
     }
 
@@ -42,6 +45,16 @@ impl ScriptedExecutor {
         Self {
             script,
             delay: std::time::Duration::from_millis(200),
+            unstartable: false,
+        }
+    }
+
+    /// 起不来的执行器：CLI 没装、workdir 不在，都是这个形状。
+    fn unstartable() -> Self {
+        Self {
+            script: Vec::new(),
+            delay: std::time::Duration::ZERO,
+            unstartable: true,
         }
     }
 }
@@ -52,7 +65,14 @@ impl Executor for ScriptedExecutor {
         "scripted"
     }
 
+    fn command_line(&self, request: &ExecRequest) -> String {
+        format!("scripted --node {}", request.node_key)
+    }
+
     async fn spawn(&self, _request: ExecRequest) -> Result<ExecHandle, ExecError> {
+        if self.unstartable {
+            return Err(ExecError::MissingWorkdir("/nonexistent".into()));
+        }
         let (tx, rx) = mpsc::channel(64);
         let cancel = CancellationToken::new();
         let script = self.script.clone();
@@ -233,6 +253,7 @@ fn spec() -> ai_task_proto::DagSpec {
             config: NodeConfig::Ai(AiNode {
                 prompt: "统计行数".into(),
                 executor: ExecutorKind::ClaudeCode,
+                cli: None,
                 model: Some("claude-haiku-4-5".into()),
                 effort: None,
                 skills: vec![],
@@ -563,4 +584,76 @@ engine_test!(restart_reaps_orphaned_runs_and_preserves_their_spend, |h| {
             .expect("再扫"),
         0
     );
+});
+
+engine_test!(
+    the_command_is_on_the_record_even_when_the_cli_never_starts,
+    |h| {
+        let run = h.seed_run().await;
+        h.engine(ScriptedExecutor::unstartable())
+            .execute(h.workspace, run.id, CancellationToken::new())
+            .await;
+
+        let events = h
+            .store
+            .read_events_after(run.id, 0, 100_000)
+            .await
+            .expect("读事件");
+
+        // 起不来的时候恰恰是最需要看这条命令的时候。发在 spawn 之后
+        // 就等于永远看不到——这个断言是那个设计决定的全部理由。
+        let invoked: Vec<(i64, &str)> = events
+            .iter()
+            .filter_map(|e| match &e.body {
+                RunEventBody::AgentInvoked { command, .. } => Some((e.seq, command.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(invoked.len(), 1, "没留下命令：{events:#?}");
+        assert!(
+            invoked[0].1.contains("--node probe"),
+            "命令不像是这个节点的：{}",
+            invoked[0].1
+        );
+
+        let failed_at = events
+            .iter()
+            .find(|e| matches!(e.body, RunEventBody::NodeFinished { .. }))
+            .map(|e| e.seq)
+            .expect("有 node_finished");
+        assert!(invoked[0].0 < failed_at, "命令得排在失败之前");
+
+        let state = h.replay(run.id).await;
+        assert_eq!(state.status, RunStatus::Failed);
+    }
+);
+
+engine_test!(the_recorded_command_is_the_one_that_actually_ran, |h| {
+    let run = h.seed_run().await;
+    h.engine(ScriptedExecutor::new(vec![
+        started(),
+        ExecEvent::Text { text: "4".into() },
+        ExecEvent::Finished(ExecOutcome::Success {
+            result: "4".into(),
+            turns: 1,
+        }),
+    ]))
+    .execute(h.workspace, run.id, CancellationToken::new())
+    .await;
+
+    let events = h
+        .store
+        .read_events_after(run.id, 0, 100_000)
+        .await
+        .expect("读事件");
+    let invoked = events
+        .iter()
+        .find_map(|e| match &e.body {
+            RunEventBody::AgentInvoked { command, ran_on } => Some((command.clone(), *ran_on)),
+            _ => None,
+        })
+        .expect("有 agent_invoked");
+    assert!(invoked.0.contains("--node probe"), "{}", invoked.0);
+    // 中心驱动：进程跑在中心，不该指向任何主机
+    assert_eq!(invoked.1, None);
 });

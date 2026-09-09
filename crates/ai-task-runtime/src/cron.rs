@@ -67,6 +67,17 @@ impl CronSchedule {
         Ok(schedule)
     }
 
+    /// 把一个 UTC 时刻按本条配置的时区格式化。
+    ///
+    /// 界面上要显示「接下来什么时候触发」。给 UTC 的话，配了 `Asia/Shanghai`
+    /// 的人得自己在脑子里加八小时——那正是最容易把 cron 写错的地方。
+    #[must_use]
+    pub fn format_local(&self, at: DateTime<Utc>) -> String {
+        at.with_timezone(&self.tz)
+            .format("%Y-%m-%d %H:%M:%S %Z")
+            .to_string()
+    }
+
     /// `after` **之后**的第一个触发点（不含 `after` 本身）。
     #[must_use]
     pub fn next_after(&self, after: DateTime<Utc>) -> Option<DateTime<Utc>> {

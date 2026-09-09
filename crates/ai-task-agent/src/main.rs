@@ -17,12 +17,13 @@ mod cgroup;
 mod fsops;
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ai_task_agent::protocol::{
-    AgentInfo, CgroupMode, Envelope, ExecRequest, ExecResult, OpResult, PROTOCOL_VERSION, Request,
-    Response, Sample,
+    AgentInfo, AiCli, CgroupMode, Envelope, ExecRequest, ExecResult, OpResult, PROTOCOL_VERSION,
+    Request, Response, Sample,
 };
 use cgroup::Scope;
 use fsops::Roots;
@@ -103,6 +104,7 @@ fn main() {
                         hostname: hostname(),
                         cgroup_mode: mode,
                         cgroup_detail: detail.clone(),
+                        ai_clis: detect_ai_clis(),
                     }),
                 );
                 send(
@@ -265,6 +267,64 @@ fn exec(
         stderr_truncated,
         resource: last_sample,
     })
+}
+
+/// 探测这台机器上能直接跑的 AI CLI。
+///
+/// 名单是写死的：让调用方传名字进来等于允许在目标机上执行任意名字的东西，
+/// 而这个探测本身是在 hello 阶段做的，没有经过策略层。
+const KNOWN_AI_CLIS: &[&str] = &[
+    "claude",
+    "codex",
+    "gemini",
+    "aider",
+    "cursor-agent",
+    "amp",
+    "q",
+];
+
+fn detect_ai_clis() -> Vec<AiCli> {
+    KNOWN_AI_CLIS
+        .iter()
+        .filter_map(|name| {
+            // `command -v` 是 POSIX 的，`which` 在精简镜像里经常没有
+            let found = Command::new("sh")
+                .arg("-c")
+                .arg(format!("command -v {name} 2>/dev/null"))
+                .output()
+                .ok()?;
+            let path = String::from_utf8_lossy(&found.stdout).trim().to_string();
+            if path.is_empty() {
+                return None;
+            }
+            // 版本取不到不代表它不存在——不同 CLI 的版本参数不一样，
+            // 而且有些会等在交互提示上，所以给个短超时的下限：只试一次。
+            let version = Command::new(&path)
+                .arg("--version")
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| {
+                    // **只取第一行、且截断。** 有些 CLI 的 --version 会打一大段
+                    // （帮助、横幅，甚至像我们的测试替身那样直接开工），
+                    // 原样存进去就是往数据库和界面里灌垃圾。
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .trim()
+                        .chars()
+                        .take(120)
+                        .collect::<String>()
+                })
+                .filter(|v| !v.is_empty());
+            Some(AiCli {
+                name: (*name).to_string(),
+                path,
+                version,
+            })
+        })
+        .collect()
 }
 
 #[cfg(unix)]

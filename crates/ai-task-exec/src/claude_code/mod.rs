@@ -51,6 +51,10 @@ impl Executor for ClaudeCodeExecutor {
         "claude_code"
     }
 
+    fn command_line(&self, request: &ExecRequest) -> String {
+        Invocation::build(request).command_line(&self.program)
+    }
+
     async fn spawn(&self, request: ExecRequest) -> Result<ExecHandle, ExecError> {
         if !request.workdir.is_dir() {
             return Err(ExecError::MissingWorkdir(request.workdir.clone()));
@@ -62,7 +66,7 @@ impl Executor for ClaudeCodeExecutor {
         tracing::debug!(
             target: "claude_code::invocation",
             node = %request.node_key,
-            args = ?invocation.args(),
+            command = %invocation.command_line(&self.program),
             "启动 claude"
         );
         let mut command = Command::new(&self.program);

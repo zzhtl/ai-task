@@ -20,6 +20,8 @@ pub struct Host {
     pub agent_sha256: Option<String>,
     /// 上次探测到的资源归因档位。降级了界面上要标出来。
     pub cgroup_mode: Option<String>,
+    /// 上次探测到的 AI CLI。**是快照，会过期**——真正执行前还会再验一次。
+    pub ai_clis: serde_json::Value,
     pub last_seen_at: Option<DateTime<Utc>>,
 }
 
@@ -94,7 +96,7 @@ impl Store {
         id: HostId,
     ) -> Result<(Host, String), StoreError> {
         let row = sqlx::query(
-            "SELECT h.id, h.name, h.address, h.port, h.username, h.tags, h.agent_sha256,
+            "SELECT h.id, h.name, h.address, h.port, h.username, h.tags, h.agent_sha256, h.ai_clis,
                     h.cgroup_mode, h.last_seen_at, c.ciphertext, c.nonce, c.key_version
              FROM hosts h
              LEFT JOIN credentials c ON c.id = h.credential_id
@@ -153,7 +155,8 @@ impl Store {
 
     pub async fn list_hosts(&self, workspace_id: WorkspaceId) -> Result<Vec<Host>, StoreError> {
         let rows = sqlx::query(
-            "SELECT id, name, address, port, username, tags, agent_sha256, cgroup_mode, last_seen_at
+            "SELECT id, name, address, port, username, tags, agent_sha256, ai_clis, cgroup_mode,
+                    last_seen_at
              FROM hosts WHERE workspace_id = $1 ORDER BY name",
         )
         .bind(uuid::Uuid::from(workspace_id))
@@ -168,14 +171,17 @@ impl Store {
         id: HostId,
         agent_sha256: &str,
         cgroup_mode: &str,
+        ai_clis: &serde_json::Value,
     ) -> Result<(), StoreError> {
         sqlx::query(
-            "UPDATE hosts SET agent_sha256 = $2, cgroup_mode = $3, last_seen_at = now()
+            "UPDATE hosts SET agent_sha256 = $2, cgroup_mode = $3, ai_clis = $4,
+                    last_seen_at = now()
              WHERE id = $1",
         )
         .bind(uuid::Uuid::from(id))
         .bind(agent_sha256)
         .bind(cgroup_mode)
+        .bind(ai_clis)
         .execute(self.pool())
         .await?;
         Ok(())
@@ -256,6 +262,7 @@ fn host_from_row(row: &sqlx::postgres::PgRow) -> Result<Host, StoreError> {
         tags: row.try_get("tags")?,
         agent_sha256: row.try_get("agent_sha256")?,
         cgroup_mode: row.try_get("cgroup_mode")?,
+        ai_clis: row.try_get("ai_clis")?,
         last_seen_at: row.try_get("last_seen_at")?,
     })
 }

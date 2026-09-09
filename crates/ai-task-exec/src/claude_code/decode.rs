@@ -183,11 +183,13 @@ fn assistant(value: &Value) -> Vec<ExecEvent> {
     blocks
         .iter()
         .filter_map(|block| match block.get("type").and_then(Value::as_str) {
-            Some("thinking") => Some(ExecEvent::Thinking {
-                text: string_at(block, "thinking")
-                    .or_else(|| string_at(block, "text"))
-                    .unwrap_or_default(),
-            }),
+            // 内容为空的 thinking 块（非 summarized 时 CLI 只给签名）和下面的
+            // redacted_thinking 是同一回事：没有可读内容。写进 append-only 的
+            // 事件日志只是每个 run 多几行噪音，界面上还会渲染成空白块。
+            Some("thinking") => string_at(block, "thinking")
+                .or_else(|| string_at(block, "text"))
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| ExecEvent::Thinking { text }),
             Some("text") => Some(ExecEvent::Text {
                 text: string_at(block, "text").unwrap_or_default(),
             }),
@@ -371,6 +373,25 @@ mod tests {
         let events =
             decode(r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":12}"#);
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn thinking_blocks_without_readable_content_are_dropped() {
+        // 非 summarized 时 CLI 只给签名，thinking 字段是空的。写进事件日志的话
+        // 每个 run 多几行空事件，界面上还会渲染成一个什么都没有的"思考"块。
+        let empty = decode(
+            r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":""}]}}"#,
+        );
+        assert!(empty.is_empty(), "{empty:?}");
+
+        // 有内容的照常留下——丢掉的是空壳，不是思考本身
+        let real = decode(
+            r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"先找 .rs 文件"}]}}"#,
+        );
+        assert!(
+            matches!(real.as_slice(), [ExecEvent::Thinking { text }] if text == "先找 .rs 文件"),
+            "{real:?}"
+        );
     }
 
     #[test]

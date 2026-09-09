@@ -15,6 +15,7 @@
 pub mod claude_code;
 pub mod event;
 pub mod remote;
+pub mod remote_cli;
 pub mod workdir;
 
 pub use event::{ExecEvent, ExecOutcome, ToolOutcome};
@@ -83,6 +84,12 @@ pub trait Executor: Send + Sync {
 
     /// 用于日志和 `runs.cli_version` 之类的诊断字段。
     fn name(&self) -> &'static str;
+
+    /// 这次执行**将要**跑的命令行，参数已按 shell 规则引好。
+    ///
+    /// 不放在事件流里由 `spawn` 产出：CLI 起不来的时候恰恰是最需要看这条
+    /// 命令的时候，而那时事件流还不存在。
+    fn command_line(&self, request: &ExecRequest) -> String;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -103,4 +110,10 @@ pub enum ExecError {
 
     #[error("工作目录 {0} 不存在")]
     MissingWorkdir(std::path::PathBuf),
+
+    /// 目标机上的执行失败。**不复用 `Spawn`**：那个变体带一个
+    /// `std::io::Error`，而远端的失败来自 agent 协议，硬凑一个 io 错误
+    /// 只会让日志里出现一个假的 errno。
+    #[error("目标机上执行失败：{0}")]
+    Remote(String),
 }

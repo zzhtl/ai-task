@@ -85,6 +85,25 @@ pub struct AgentInfo {
     /// 降级的原因。`cgroup_mode` 不是 `Systemd` 时才有值。
     #[serde(default)]
     pub cgroup_detail: Option<String>,
+    /// 这台机器上能直接跑的 AI CLI。
+    ///
+    /// 界面据此决定"这台机器能不能选"——让人选一个装都没装的 CLI，
+    /// 失败会发生在凌晨两点，而不是配置的时候。
+    #[serde(default)]
+    pub ai_clis: Vec<AiCli>,
+}
+
+/// 目标机上探测到的一个 AI CLI。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiCli {
+    /// 可执行文件名，如 `claude`、`codex`。
+    pub name: String,
+    /// 解析出来的绝对路径。
+    pub path: String,
+    /// `--version` 的输出。取不到时为 `None`——**不能因此就当它不存在**，
+    /// 有些 CLI 的版本参数不一样。
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 /// 资源归因的能力档位。

@@ -41,9 +41,21 @@ fn hermetic_run_decodes_to_the_expected_event_sequence() {
     assert_eq!(model, "claude-haiku-4-5");
     assert!(!session_id.is_empty());
 
+    // 样本里有 5 个 thinking 块，但**每一个的 thinking 字段都是空串**——
+    // 非 summarized 模式下 CLI 只给签名。所以一条 Thinking 事件都不该产生：
+    // 空事件写进 append-only 日志只是每个 run 多几行噪音。
+    //
+    // 两个数一起断言，是为了在 CLI 哪天真的开始给内容时能看出区别：
+    // 那时块数不变而事件数会跟着变，这组测试就该红。
+    assert_eq!(
+        HERMETIC.matches(r#""type":"thinking""#).count(),
+        5,
+        "样本里的 thinking 块数变了，重新录过？"
+    );
     assert_eq!(
         count(&events, |e| matches!(e, ExecEvent::Thinking { .. })),
-        5
+        0,
+        "样本里的 thinking 块全是签名，不该产生事件"
     );
     assert_eq!(count(&events, |e| matches!(e, ExecEvent::Text { .. })), 1);
     assert_eq!(

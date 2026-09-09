@@ -83,6 +83,7 @@ impl RemoteAgent {
             io,
             // 握手前先放一个占位；下面立刻会被真实值替换
             info: AgentInfo {
+                ai_clis: Vec::new(),
                 protocol: 0,
                 agent_version: String::new(),
                 arch: String::new(),

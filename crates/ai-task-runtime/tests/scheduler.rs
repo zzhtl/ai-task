@@ -206,6 +206,7 @@ fn spec() -> ai_task_proto::DagSpec {
             config: NodeConfig::Ai(AiNode {
                 prompt: "x".into(),
                 executor: ExecutorKind::ClaudeCode,
+                cli: None,
                 model: None,
                 effort: None,
                 skills: vec![],

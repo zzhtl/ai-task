@@ -113,6 +113,20 @@ impl Invocation {
         Self { args }
     }
 
+    /// 渲染成一条可以直接复制去复现的命令行。
+    ///
+    /// **参数按 shell 规则引好**：提示词里几乎必然有换行、引号、反引号，
+    /// 不引的话复制出去的那条命令跑起来是另一回事——而这个功能的全部意义
+    /// 就是「照着这条命令能复现刚才发生的事」。
+    #[must_use]
+    pub fn command_line(&self, program: &str) -> String {
+        std::iter::once(program)
+            .chain(self.args.iter().map(String::as_str))
+            .map(shell_quote)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     #[must_use]
     pub fn args(&self) -> &[String] {
         &self.args
@@ -140,6 +154,21 @@ fn effort_flag(effort: ai_task_proto::Effort) -> &'static str {
         Effort::High => "high",
         Effort::Xhigh => "xhigh",
         Effort::Max => "max",
+    }
+}
+
+/// 单引号包裹。POSIX shell 里单引号内没有任何转义，唯一要处理的是单引号本身。
+///
+/// 不带特殊字符的短参数不加引号——一整行全是引号的命令没人愿意读。
+fn shell_quote(value: &str) -> String {
+    let plain = !value.is_empty()
+        && value.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ',' | '=' | ':')
+        });
+    if plain {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', r"'\''"))
     }
 }
 
@@ -192,6 +221,62 @@ mod tests {
             Some("/tmp/run/.claude/mcp-probe.json")
         );
         assert!(inv.has_flag("--strict-mcp-config"));
+    }
+
+    #[test]
+    fn quoting_survives_a_real_shell() {
+        // 断言语义而不是字面量：换个等价引法时测试不该红
+        for value in ["a b", "'; id #", "$(id)", "换行\n还有", "反引号 `x`"] {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("printf %s {}", shell_quote(value)))
+                .output()
+                .expect("跑 sh");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                value,
+                "{value} 经过 shell 变了样"
+            );
+        }
+    }
+
+    #[test]
+    fn the_rendered_command_line_can_be_pasted_into_a_shell() {
+        // 这个功能的全部意义是「照着这条命令能复现刚才发生的事」。
+        // 引错了的话复制出去跑的是另一回事，比不给还糟。
+        let mut req = request();
+        req.prompt = "看看这个'; rm -rf /tmp/x; echo '\n还有 `id` 和 $(whoami)".into();
+        let line = Invocation::build(&req).command_line("claude");
+
+        let script =
+            format!("claude() {{ for a in \"$@\"; do printf '%s\\036' \"$a\"; done; }}\n{line}");
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("跑 sh");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let args: Vec<&str> = stdout.trim_end_matches('\u{1e}').split('\u{1e}').collect();
+        let at = args.iter().position(|a| *a == "-p").expect("有 -p");
+        assert_eq!(args[at + 1], req.prompt, "提示词没有原样到达：{args:?}");
+    }
+
+    #[test]
+    fn a_readable_command_does_not_quote_every_single_token() {
+        // 一整行全是引号的命令没人愿意读，也就失去了"给人看"的意义
+        let line = Invocation::build(&request()).command_line("claude");
+        assert!(line.starts_with("claude -p "), "{line}");
+        assert!(line.contains(" --output-format stream-json "), "{line}");
+        assert!(
+            !line.contains("'--verbose'"),
+            "简单参数不该被引起来：{line}"
+        );
     }
 
     #[test]

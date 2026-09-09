@@ -408,6 +408,45 @@ impl RunEngine {
     }
 }
 
+/// AI 跑在目标机上时，把请求里所有"中心本地"的东西摘掉。
+///
+/// `settings_path` 和 `mcp_config` 都是**中心文件系统上的路径**，目标机上不存在；
+/// 带着它们下发，CLI 会指着两个不存在的文件启动。工具白名单同理：远端节点的
+/// 白名单里是中心 MCP 代理的工具名，目标机上没有对应实现，结果是 CLI
+/// **一个能用的工具都没有**——而且不报错，只是什么也做不了。
+///
+/// 这不是"少了一道防线"：这条路径下策略层本来就管不到 CLI 的内置工具，
+/// 引擎会为此单独发一条 warn 事件。假装带着策略配置才是骗人。
+fn strip_center_local(request: &mut ExecRequest, on_host_tools: &[String]) {
+    request.settings_path = None;
+    request.mcp_config = None;
+    request.tools = (!on_host_tools.is_empty()).then(|| on_host_tools.to_vec());
+}
+
+/// 命令行进事件日志前的长度上限。
+///
+/// 提示词会把命令撑得很大，而 `run_events` 是 append-only 的，map 节点扇出时
+/// 还要乘以实例数。超了就截断，并且**说明白截了**——一条看着完整、实际少了
+/// 一半的命令比不给更糟：照着它跑出来的是另一回事。
+const MAX_COMMAND_BYTES: usize = 16 * 1024;
+
+fn cap_command(mut command: String) -> String {
+    if command.len() <= MAX_COMMAND_BYTES {
+        return command;
+    }
+    let dropped = command.len() - MAX_COMMAND_BYTES;
+    let mut at = MAX_COMMAND_BYTES;
+    // 提示词是中文的居多，不能从多字节字符中间切
+    while !command.is_char_boundary(at) {
+        at -= 1;
+    }
+    command.truncate(at);
+    command.push_str(&format!(
+        " …（命令过长，已截断 {dropped} 字节，不能直接复制运行）"
+    ));
+    command
+}
+
 /// 把 DAG 编排要跑的节点分派到具体执行器。
 struct ClaudeNodeRunner<'a> {
     executor: Arc<dyn Executor>,
@@ -438,6 +477,102 @@ impl NodeRunner for ClaudeNodeRunner<'_> {
 }
 
 impl ClaudeNodeRunner<'_> {
+    /// 在目标机上起一个 AI CLI，把它的 stream-json 变成和本机执行一样的事件流。
+    ///
+    /// 返回的 [`ExecHandle`] 和 `Executor::spawn` 的形状完全一致，所以
+    /// `run_ai` 后面那段消费循环、取消处理、成本累加都不用分叉。
+    async fn spawn_host_cli(
+        &self,
+        ai: &ai_task_proto::AiNode,
+        ctx: &NodeRunContext<'_>,
+        request: ExecRequest,
+    ) -> Result<ai_task_exec::ExecHandle, String> {
+        let node = ctx.node;
+        let Some(config) = self.env.host_exec else {
+            return Err("这个部署没有配置 agent 二进制，目标机执行不可用".into());
+        };
+        let Some(ai_task_proto::HostSelector::Host { host_id }) = node.host else {
+            return Err(
+                "executor 选了 host_cli，但这个节点没有指定主机。要在哪台机器上跑 AI？".into(),
+            );
+        };
+        let cli = ai
+            .cli
+            .clone()
+            .ok_or("executor 选了 host_cli，但没说用哪个 CLI（claude / codex / …）")?;
+
+        let mut agent = crate::host_exec::connect_remote(
+            self.env.store,
+            config,
+            self.env.workspace_id,
+            host_id,
+            // 空 roots：CLI 自己在目标机上读写文件，不走 agent 的文件操作
+            &[],
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+
+        // 目标机上到底装没装，连上之后才知道得准。保存时校验过一次，
+        // 但机器上的东西会变——这里是最后一道，报错要说清楚有什么可选。
+        if !ai_task_exec::remote_cli::cli_available(&agent.info().ai_clis, &cli) {
+            let found: Vec<&str> = agent
+                .info()
+                .ai_clis
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect();
+            return Err(if found.is_empty() {
+                format!("目标机上没有找到 {cli}，也没有找到任何其它 AI CLI")
+            } else {
+                format!("目标机上没有 {cli}。它上面有的是：{}", found.join("、"))
+            });
+        }
+
+        let _ = self
+            .sink
+            .lock()
+            .await
+            .node(
+                &node.key,
+                RunEventBody::Log {
+                    level: LogLevel::Warn,
+                    // 这件事必须写进事件日志：这条路径下 CLI 的内置工具直接在
+                    // 目标机上落地，策略层看不见也拦不住
+                    message: format!("AI 直接跑在目标机上（{cli}）。它的内置工具不经过策略层。"),
+                },
+            )
+            .await;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let child_cancel = cancel.clone();
+        let cli_config = ai_task_exec::remote_cli::RemoteCliConfig {
+            cli,
+            // CLI 在目标机上自己开工作目录。用 . 就是登录用户的家目录
+            // ——中心的 run workdir 在那台机器上不存在。
+            workdir: ".".to_owned(),
+            timeout_s: node.timeout_s.unwrap_or(30 * 60),
+        };
+
+        tokio::spawn(async move {
+            if let Err(err) =
+                ai_task_exec::remote_cli::run(&mut agent, &cli_config, &request, &tx, &child_cancel)
+                    .await
+            {
+                let _ = tx
+                    .send(ai_task_exec::ExecEvent::Finished(
+                        ai_task_exec::ExecOutcome::Failed {
+                            reason: err.to_string(),
+                        },
+                    ))
+                    .await;
+            }
+            let _ = agent.shutdown().await;
+        });
+
+        Ok(ai_task_exec::ExecHandle { events: rx, cancel })
+    }
+
     /// 审批门：挂起，直到有人点头或者到点。
     ///
     /// **默认动作是拒绝。**超时放行会把审批门变成一个延迟 15 分钟的空操作，
@@ -685,6 +820,8 @@ impl ClaudeNodeRunner<'_> {
 
         let prompt = compose_prompt(&ai.prompt, ctx);
 
+        let on_target = matches!(ai.executor, ai_task_proto::ExecutorKind::HostCli);
+
         // 远端节点：只给远端工具，**本地的 Bash/Read/Write 一律去掉**。
         // 留着的话模型会在中心机上老老实实执行本地工具——而它以为自己
         // 操作的是目标机。这类错误没有任何报错，只有做错了的事。
@@ -698,27 +835,75 @@ impl ClaudeNodeRunner<'_> {
         } else {
             (!ai.tools.is_empty()).then(|| ai.tools.clone())
         };
-        let handle = match self
-            .executor
-            .spawn(ExecRequest {
-                node_key: node.key.clone(),
-                prompt,
-                workdir: self.env.workdir.to_path_buf(),
-                model: ai.model.clone(),
-                effort: ai.effort,
-                tools,
-                output_schema: node.output_schema.clone(),
-                budget_usd: ai.budget_usd,
-                system_append: self.env.system_append.map(str::to_owned),
-                session_id: uuid::Uuid::now_v7(),
-                settings_path: self.env.settings_path.map(std::path::Path::to_path_buf),
-                has_skills: !self.env.skills.is_empty(),
-                mcp_config: mcp_config.cloned(),
+        let request = ExecRequest {
+            node_key: node.key.clone(),
+            prompt,
+            workdir: self.env.workdir.to_path_buf(),
+            model: ai.model.clone(),
+            effort: ai.effort,
+            tools,
+            output_schema: node.output_schema.clone(),
+            budget_usd: ai.budget_usd,
+            system_append: self.env.system_append.map(str::to_owned),
+            session_id: uuid::Uuid::now_v7(),
+            settings_path: self.env.settings_path.map(std::path::Path::to_path_buf),
+            has_skills: !self.env.skills.is_empty(),
+            mcp_config: mcp_config.cloned(),
+        };
+        let mut request = request;
+        if on_target {
+            strip_center_local(&mut request, &ai.tools);
+        }
+
+        // 到底拿什么命令去拉起 AI，在**启动之前**就写进事件流。
+        // 起不来的时候（没装、版本不对、workdir 不存在）这条命令是唯一能查的
+        // 东西——放在"启动成功之后"的事件里就等于没有。
+        let invoked = if on_target {
+            // 没说用哪个 CLI 时不猜一个填上去：那会让人照着一条我们根本
+            // 不会执行的命令去复现。这种配置错误由 spawn_host_cli 报。
+            ai.cli.as_deref().map(|cli| {
+                let ran_on = match node.host {
+                    Some(ai_task_proto::HostSelector::Host { host_id }) => Some(host_id),
+                    _ => None,
+                };
+                (
+                    ai_task_exec::remote_cli::build_command(cli, &request),
+                    ran_on,
+                )
             })
-            .await
-        {
+        } else {
+            // 中心驱动：进程跑在中心，**哪怕节点绑着远程主机**——
+            // 下发过去的只有工具调用。
+            Some((self.executor.command_line(&request), None))
+        };
+        if let Some((command, ran_on)) = invoked {
+            let _ = self
+                .sink
+                .lock()
+                .await
+                .node(
+                    &node.key,
+                    RunEventBody::AgentInvoked {
+                        command: cap_command(command),
+                        ran_on,
+                    },
+                )
+                .await;
+        }
+
+        // 两种模式：AI 跑在中心（默认），还是跑在目标机上。
+        // 后者需要那台机器装了对应的 CLI；它的内置工具**不经过策略层**。
+        let spawned = if on_target {
+            self.spawn_host_cli(ai, ctx, request).await
+        } else {
+            self.executor
+                .spawn(request)
+                .await
+                .map_err(|err| err.to_string())
+        };
+        let handle = match spawned {
             Ok(handle) => handle,
-            Err(err) => return NodeResult::failed(err.to_string()),
+            Err(err) => return NodeResult::failed(err),
         };
 
         let mut events = handle.events;
@@ -731,6 +916,7 @@ impl ClaudeNodeRunner<'_> {
 
         // 取消只处理一次：`cancelled()` 一旦就绪就永远立刻返回，配上 `biased`
         // 会把事件分支饿死，表现是 100% CPU 空转。
+        let mut tool_clock = ToolClock::default();
         let mut cancel_signalled = false;
         let mut cancel_deadline: Option<tokio::time::Instant> = None;
 
@@ -758,7 +944,7 @@ impl ClaudeNodeRunner<'_> {
                         _ => {}
                     }
                     let mut sink = self.sink.lock().await;
-                    for body in translate(&event) {
+                    for body in translate(&event, &mut tool_clock) {
                         if sink.node(&node.key, body).await.is_err() {
                             break;
                         }
@@ -897,8 +1083,16 @@ fn parse_output(result: &str) -> Option<serde_json::Value> {
 /// 执行器事件 → run 事件。
 ///
 /// 这里刻意**不**发 `AgentTurnStarted`：CLI 的流里没有可靠的轮次边界，
+/// 工具调用的计时。
+///
+/// `translate` 本身是纯函数，量不了时间——所以计时状态由消费循环持有。
+/// 量的是**从请求到结果的整段**：中间要过策略层、过 MCP 代理、远端节点还要
+/// 走一趟 SSH。那才是"这次工具调用花了多久"的实际含义。
+#[derive(Default)]
+struct ToolClock(std::collections::HashMap<String, std::time::Instant>);
+
 /// `num_turns` 只在终态才有。编一个出来会让时间轴显示错误的轮次划分。
-fn translate(event: &ExecEvent) -> Vec<RunEventBody> {
+fn translate(event: &ExecEvent, clock: &mut ToolClock) -> Vec<RunEventBody> {
     match event {
         ExecEvent::Started {
             session_id,
@@ -919,21 +1113,33 @@ fn translate(event: &ExecEvent) -> Vec<RunEventBody> {
             tool_use_id,
             tool,
             input,
-        } => vec![RunEventBody::ToolRequested {
-            tool_use_id: tool_use_id.clone(),
-            tool: tool.clone(),
-            input: input.clone(),
-        }],
+        } => {
+            clock
+                .0
+                .insert(tool_use_id.clone(), std::time::Instant::now());
+            vec![RunEventBody::ToolRequested {
+                tool_use_id: tool_use_id.clone(),
+                tool: tool.clone(),
+                input: input.clone(),
+            }]
+        }
         ExecEvent::ToolCompleted {
             tool_use_id,
             outcome,
             output_preview,
-        } => vec![RunEventBody::ToolCompleted {
-            tool_use_id: tool_use_id.clone(),
-            ok: *outcome == ToolOutcome::Ok,
-            output_preview: output_preview.clone(),
-            duration_ms: 0,
-        }],
+        } => {
+            // 配不上请求时报 0：那说明事件流不完整（重放了一半、或者 CLI 只给了
+            // 结果没给请求）。编一个数出来会让人以为这个工具真的是瞬间返回的。
+            let duration_ms = clock.0.remove(tool_use_id).map_or(0, |at| {
+                u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX)
+            });
+            vec![RunEventBody::ToolCompleted {
+                tool_use_id: tool_use_id.clone(),
+                ok: *outcome == ToolOutcome::Ok,
+                output_preview: output_preview.clone(),
+                duration_ms,
+            }]
+        }
         // CLI 自己的权限层拒绝也要进审计。M2 起我们的策略层会在它之前先判一道，
         // 但两者的判决都落在同一种事件上，界面不用区分。
         ExecEvent::PermissionDenied {
@@ -1074,6 +1280,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn nothing_that_only_exists_on_the_center_gets_shipped_to_the_target() {
+        // 引擎给远端节点准备的那份请求：MCP 代理 + hook settings + 中心的
+        // MCP 工具名。这三样在目标机上一样都不存在。
+        let mut request = ExecRequest {
+            node_key: ai_task_proto::NodeKey("step-1".into()),
+            prompt: "看一眼这台机器".into(),
+            workdir: std::path::PathBuf::from("/tmp/center/run-1"),
+            model: None,
+            effort: None,
+            tools: Some(vec![
+                "mcp__ai_task_remote__remote_bash".into(),
+                "Task".into(),
+            ]),
+            output_schema: None,
+            budget_usd: None,
+            system_append: None,
+            session_id: uuid::Uuid::now_v7(),
+            settings_path: Some("/tmp/center/run-1/.claude/hook-settings.json".into()),
+            has_skills: false,
+            mcp_config: Some("/tmp/center/run-1/.claude/mcp-step-1.json".into()),
+        };
+
+        strip_center_local(&mut request, &["Read".to_owned(), "Bash".to_owned()]);
+
+        // 断言落在**真正下发出去的那条命令**上，而不是中间结构体的字段：
+        // 命令才是目标机看得见的东西。
+        let command = ai_task_exec::remote_cli::build_command("claude", &request);
+        assert!(
+            !command.contains("--mcp-config"),
+            "MCP 配置是中心的文件路径，目标机上不存在：{command}"
+        );
+        assert!(
+            !command.contains("--settings"),
+            "hook settings 同理：{command}"
+        );
+        assert!(
+            !command.contains("mcp__"),
+            "白名单里全是目标机上不存在的工具名，CLI 会一个工具都用不了：{command}"
+        );
+        assert!(
+            command.contains("--tools Read,Bash"),
+            "得换成目标机上真实存在的工具：{command}"
+        );
+    }
+
+    #[test]
     fn a_shadow_run_touches_nothing_outside_the_model() {
         use ai_task_proto::{ApprovalNode, ApprovalTimeout, ShellNode};
 
@@ -1103,6 +1355,7 @@ mod tests {
         let ai = NodeConfig::Ai(ai_task_proto::AiNode {
             prompt: "x".into(),
             executor: ai_task_proto::ExecutorKind::ClaudeCode,
+            cli: None,
             model: None,
             effort: None,
             skills: vec![],
@@ -1152,6 +1405,7 @@ mod tests {
             config: NodeConfig::Ai(AiNode {
                 prompt: "x".into(),
                 executor: ExecutorKind::default(),
+                cli: None,
                 model: None,
                 effort: None,
                 skills: vec![],
@@ -1207,16 +1461,69 @@ mod tests {
     #[test]
     fn terminal_exec_events_do_not_translate_to_run_events() {
         // 终态得由调用方转成 NodeFinished，它才知道 attempt
-        assert!(translate(&ExecEvent::Finished(ExecOutcome::Cancelled)).is_empty());
+        assert!(
+            translate(
+                &ExecEvent::Finished(ExecOutcome::Cancelled),
+                &mut ToolClock::default()
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_tool_call_reports_how_long_it_actually_took() {
+        let mut clock = ToolClock::default();
+        translate(
+            &ExecEvent::ToolRequested {
+                tool_use_id: "t1".into(),
+                tool: "Bash".into(),
+                input: serde_json::json!({"command": "df"}),
+            },
+            &mut clock,
+        );
+        std::thread::sleep(std::time::Duration::from_millis(12));
+        let events = translate(
+            &ExecEvent::ToolCompleted {
+                tool_use_id: "t1".into(),
+                outcome: ToolOutcome::Ok,
+                output_preview: "24%".into(),
+            },
+            &mut clock,
+        );
+        let [RunEventBody::ToolCompleted { duration_ms, .. }] = events.as_slice() else {
+            panic!("{events:?}");
+        };
+        // 曾经这里是硬编码的 0：那个字段一直在撒谎，而界面照着它显示 0.0s
+        assert!(*duration_ms >= 10, "耗时没量出来：{duration_ms}ms");
+    }
+
+    #[test]
+    fn an_unmatched_completion_reports_zero_rather_than_a_made_up_number() {
+        // 配不上请求说明事件流不完整。编个数出来会让人以为工具是瞬间返回的
+        let events = translate(
+            &ExecEvent::ToolCompleted {
+                tool_use_id: "ghost".into(),
+                outcome: ToolOutcome::Ok,
+                output_preview: String::new(),
+            },
+            &mut ToolClock::default(),
+        );
+        let [RunEventBody::ToolCompleted { duration_ms, .. }] = events.as_slice() else {
+            panic!("{events:?}");
+        };
+        assert_eq!(*duration_ms, 0);
     }
 
     #[test]
     fn cli_permission_denials_land_in_the_audit_trail() {
-        let events = translate(&ExecEvent::PermissionDenied {
-            tool_use_id: "t1".into(),
-            tool: "Bash".into(),
-            reason: "Contains command_substitution".into(),
-        });
+        let events = translate(
+            &ExecEvent::PermissionDenied {
+                tool_use_id: "t1".into(),
+                tool: "Bash".into(),
+                reason: "Contains command_substitution".into(),
+            },
+            &mut ToolClock::default(),
+        );
         let [RunEventBody::PolicyDecided { effect, reason, .. }] = events.as_slice() else {
             panic!("权限拒绝必须落成策略判决：{events:?}");
         };

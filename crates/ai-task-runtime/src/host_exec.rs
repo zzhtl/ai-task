@@ -201,7 +201,7 @@ pub async fn run_command(
     })
 }
 
-async fn connect_remote(
+pub(crate) async fn connect_remote(
     store: &Store,
     config: &HostExecConfig,
     workspace_id: ai_task_proto::WorkspaceId,
@@ -249,7 +249,9 @@ async fn connect_remote(
     let agent = RemoteAgent::start(&session, &deployed.path, roots).await?;
     // 记下这次探到的能力，界面上据此标出降级的主机
     let mode = format!("{:?}", agent.info().cgroup_mode).to_lowercase();
-    let _ = store.record_host_probe(host_id, &sha, &mode).await;
+    let clis =
+        serde_json::to_value(&agent.info().ai_clis).unwrap_or_else(|_| serde_json::json!([]));
+    let _ = store.record_host_probe(host_id, &sha, &mode, &clis).await;
 
     // session 要活到 agent 用完为止。RemoteAgent 持有 channel，
     // 而 channel 的生命周期绑在 handle 上，所以这里把 session 泄漏给它。
