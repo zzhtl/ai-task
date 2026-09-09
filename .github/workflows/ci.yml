@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+        working-directory: web
+      - run: bun run check
+        working-directory: web
+      - run: bun run build
+        working-directory: web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: crates/ai-task-server/dist
+          retention-days: 1
+
+  backend:
+    runs-on: ubuntu-latest
+    needs: frontend
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ai_task
+          POSTGRES_PASSWORD: ai_task
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ai_task"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      # 前端已由上一个 job 构建，这里复用 artifact，不重复跑 bun
+      AI_TASK_SKIP_WEB_BUILD: "1"
+      AI_TASK_TEST_DATABASE_URL: postgres://ai_task:ai_task@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: crates/ai-task-server/dist
+
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # 资源采样的端到端测试要驱动真实的 agent 二进制。不先建好的话
+      # 它们会安静地跳过——"测试全绿"和"测试没跑"在日志里长得一样。
+      - run: cargo build -p ai-task-agent
+
+      - run: cargo test --workspace --locked
+
+      # 改了 Rust 的线上类型却忘了重新生成 TS，在这里失败。
+      # 生成产物是提交进仓库的，见 docs/adr/0003-generated-frontend-types.md
+      - name: 生成的 TypeScript 类型必须是最新的
+        run: |
+          cargo test -p ai-task-proto --quiet
+          # 用 git status 而不是 git diff：diff 看不见**新增**的未跟踪文件，
+          # 而「加了个 Rust 类型但没提交生成的 .ts」正是要抓的情况之一
+          changed=$(git status --porcelain -- web/src/lib/api/types)
+          if [ -n "$changed" ]; then
+            echo "::error::ai-task-proto 的类型变了但 web/src/lib/api/types 没同步；本地跑 cargo test -p ai-task-proto 后提交"
+            echo "$changed"
+            exit 1
+          fi

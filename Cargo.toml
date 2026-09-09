@@ -1,0 +1,136 @@
+[workspace]
+members = [
+    "crates/ai-task-proto",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+ai-task-core = { path = "crates/ai-task-core" }
+ai-task-proto = { path = "crates/ai-task-proto" }
+ai-task-store = { path = "crates/ai-task-store" }
+ai-task-exec = { path = "crates/ai-task-exec" }
+ai-task-agent = { path = "crates/ai-task-agent" }
+ai-task-mcp = { path = "crates/ai-task-mcp" }
+ai-task-runtime = { path = "crates/ai-task-runtime" }
+
+anyhow = "1.0"
+async-trait = "0.1"
+async-stream = "0.3"
+axum = { version = "0.8", features = ["macros", "http2"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+# 口令哈希。argon2id 是当前的推荐算法（Password Hashing Competition 优胜者），
+# 抗 GPU/ASIC 并行爆破；bcrypt 的内存占用固定，扛不住现代显卡。
+argon2 = "0.6"
+blake3 = "1.5"
+# russh 已经把 sha2 0.11 编进来了，直接依赖不增加编译量；
+# agent 二进制的名字要和目标机 `sha256sum` 对得上，只能是 SHA-256
+sha2 = "0.11"
+# 凭据静态加密。AEAD 而不是纯流密码：改一个字节就该解不开，而不是解出垃圾。
+chacha20poly1305 = "0.11"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+# 调度器要按目标时区算下次触发点，DST 的跳过/重复时刻必须由时区库判定，不能用固定 offset。
+chrono-tz = "0.10"
+# cron 表达式。选型对比见 docs/adr/0005-cron-library.md：
+# croner 是唯一同时支持 5/6 段、L、# 且时区正确的（cron 拒收 5 段且没有 L/#，
+# saffron 只有 UTC 且 # 的星期编号是错的）。
+croner = "4"
+clap = { version = "4.5", features = ["derive", "env"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# 节点输出契约用 JSON Schema 校验；校验错误要能回喂给模型，所以需要结构化的错误列表。
+jsonschema = { version = "0.46", default-features = false }
+mime_guess = "2"
+# 只用来给触发点加抖动，避免整点惊群。不需要密码学强度。
+rand = { version = "0.9", default-features = false, features = ["std", "std_rng", "thread_rng"] }
+# 纯 Rust 的 SSH 实现，不依赖 libssh2。目标机侧只需要 sshd。
+russh = "0.62"
+rust-embed = { version = "8", features = ["interpolate-folder-path"] }
+# 策略匹配。regex crate 的匹配是线性时间的，用户写的表达式不会造成 ReDoS；
+# 只需要限制编译期的大小，防止一个巨大的模式吃光内存。
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-perl"] }
+# hook 子进程用阻塞客户端打一次回环请求；短命进程起 tokio 运行时不划算。
+# 判决接口只在回环上，不需要 TLS，也不需要读系统证书库。
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+# MCP server。远端工具代理必须是 MCP server 而不是只靠 hook：
+# 这个进程是我们自己的，每个远端动作必然流经它，策略绕不过去。
+rmcp = { version = "3.1", features = ["server", "macros", "transport-io"] }
+schemars = "1.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+# 节点 inputs 用 JSONPath 引用上游输出（RFC 9535 语义）。
+serde_json_path = "0.7"
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring-native-roots",
+    "postgres",
+    "chrono",
+    "json",
+    "uuid",
+    "macros",
+    "migrate",
+] }
+thiserror = "2.0"
+tokio = { version = "1.53", features = [
+    "fs",
+    "io-util",
+    "macros",
+    "net",
+    "process",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = [
+    "catch-panic",
+    "compression-gzip",
+    "cors",
+    "normalize-path",
+    "request-id",
+    "trace",
+] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# 前后端共享类型的唯一来源：RunEvent 有 18 个 variant，手写 TS 镜像必然漂移。
+# no-serde-warnings：deny_unknown_fields 只影响反序列化，对生成的 TS 类型无意义，
+# ts-rs 却会为每个用到它的结构体报一次 warning。真正的形状保证由
+# ai-task-proto 里的 JSON 断言测试提供，不依赖这些 warning。
+ts-rs = { version = "12", features = [
+    "chrono-impl",
+    "no-serde-warnings",
+    "serde-json-impl",
+    "uuid-impl",
+] }
+uuid = { version = "1.24", features = ["serde", "v4", "v7"] }
+
+# dev-dependencies
+tempfile = "3"
+wiremock = "0.6"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"
+
+# 目标机上的 agent 越小越好：每次上传都要过 SSH，且要嵌进 server 二进制。
+[profile.agent-release]
+inherits = "release"
+lto = "fat"
+opt-level = "z"
+panic = "abort"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"

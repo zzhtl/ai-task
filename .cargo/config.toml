@@ -1,0 +1,22 @@
+[env]
+# ts-rs 的 #[ts(export)] 默认写到 ./bindings。指到前端源码树里，
+# 生成的 .ts 直接被 Vite 消费，不需要额外的拷贝步骤。
+# relative = true → 相对本文件所在目录（workspace 根）解析。
+TS_RS_EXPORT_DIR = { value = "web/src/lib/api/types", relative = true }
+
+# i64 默认被映射成 TS 的 `bigint`，但 `JSON.parse` 实际给的是 `number`——
+# 那个类型在运行时是错的，任何算术都会 TypeError。
+#
+# 线上的 i64 只有三处：事件 seq、runs.max_seq、任务的乐观锁版本号。
+# 三者都是单调计数器，离 2^53 差着十几个数量级，用 `number` 既安全又如实。
+# 金额没有走这条路——它是十进制字符串（见 UsdMicros）。
+TS_RS_LARGE_INT = "number"
+
+# agent 要经 SSH 推到目标机上执行，必须是完全静态的：目标机上可能没有
+# 匹配的 glibc，也不该为了跑一个探针去装运行时。
+[target.x86_64-unknown-linux-musl]
+linker = "x86_64-linux-musl-gcc"
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static"]

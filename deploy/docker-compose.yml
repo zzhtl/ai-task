@@ -1,0 +1,27 @@
+# 本地开发用的 PostgreSQL。
+#
+# 生产不要把 PgBouncer 以 transaction 模式挡在前面：本服务用 LISTEN/NOTIFY 做
+# 跨副本的事件扇出，transaction pooling 会直接破坏 LISTEN 的会话语义。
+# 需要连接池代理时用 session 模式，或者让监听走独立直连。
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ai-task-pg
+    environment:
+      POSTGRES_USER: ai_task
+      POSTGRES_PASSWORD: ai_task_dev
+      POSTGRES_DB: ai_task
+      # 开发库，本机 loopback 才能访问，不用 scram 的额外往返。
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - ai-task-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ai_task -d ai_task"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  ai-task-pgdata:
