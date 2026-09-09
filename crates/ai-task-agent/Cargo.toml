@@ -1,0 +1,28 @@
+[package]
+name = "ai-task-agent"
+description = "目标机上的轻量执行体（musl 静态二进制）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ai_task_agent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ai-task-agent"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+# 这个二进制要经 SSH 推到目标机上，还要被嵌进 server 二进制里，所以越小越好：
+# 不用 tokio（阻塞 IO + 两个线程就够），不用 anyhow，不用 tracing。
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

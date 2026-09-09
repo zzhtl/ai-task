@@ -3,6 +3,7 @@ members = [
     "crates/ai-task-proto",
     "crates/ai-task-core",
     "crates/ai-task-store",
+    "crates/ai-task-agent",
 ]
 resolver = "3"
 
