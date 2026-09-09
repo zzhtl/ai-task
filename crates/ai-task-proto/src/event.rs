@@ -138,6 +138,20 @@ pub enum RunEventBody {
     },
 
     // ---- AI 执行内部 ----
+    /// 真正拉起 AI 的那条命令行，参数已按 shell 规则引好，可以直接复制去复现。
+    ///
+    /// **在 spawn 之前发。**CLI 起不来的时候（没装、版本不对、workdir 不存在），
+    /// 这条命令是唯一能查的东西——藏在"启动成功之后"的事件里就等于没有。
+    AgentInvoked {
+        command: String,
+        /// 这条命令**实际**在哪台机器上跑。`None` = 中心。
+        ///
+        /// 不等于节点的 host：中心驱动模式下节点绑在远程主机上，但 `claude`
+        /// 进程跑在中心，只有工具调用下发过去。混淆这两者会让人照着命令
+        /// 在错误的机器上复现。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ran_on: Option<HostId>,
+    },
     AgentTurnStarted {
         turn: u32,
     },
@@ -228,6 +242,7 @@ impl RunEventBody {
             Self::DriftDetected { .. } => "drift_detected",
             Self::ResourceDegraded { .. } => "resource_degraded",
             Self::MapExpanded { .. } => "map_expanded",
+            Self::AgentInvoked { .. } => "agent_invoked",
             Self::AgentTurnStarted { .. } => "agent_turn_started",
             Self::AgentThinking { .. } => "agent_thinking",
             Self::AgentText { .. } => "agent_text",

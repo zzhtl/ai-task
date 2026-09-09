@@ -5,6 +5,13 @@ import type { UsdMicros } from "./UsdMicros";
 
 export type AiNode = { prompt: string, executor: ExecutorKind, 
 /**
+ * `executor = host_cli` 时用哪个 CLI（`claude` / `codex` / …）。
+ *
+ * 保存任务时会对着目标机上报的清单校验一次：让人选一个装都没装的 CLI，
+ * 失败会发生在凌晨两点，而不是配置的时候。
+ */
+cli?: string | null, 
+/**
  * 模型 ID。`None` 时由 executor 取默认值（CLI 用 opus，API 用 haiku）。
  */
 model?: string | null, effort?: Effort | null, 

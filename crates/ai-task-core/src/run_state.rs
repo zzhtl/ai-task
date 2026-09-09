@@ -298,7 +298,8 @@ impl RunState {
             }
 
             // 纯展示类事件，不参与状态推导
-            RunEventBody::AgentTurnStarted { .. }
+            RunEventBody::AgentInvoked { .. }
+            | RunEventBody::AgentTurnStarted { .. }
             | RunEventBody::AgentThinking { .. }
             | RunEventBody::AgentText { .. }
             | RunEventBody::ToolCompleted { .. }

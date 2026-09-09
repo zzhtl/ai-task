@@ -43,7 +43,8 @@ pub struct NodeSpec {
     ///
     /// 刻意**不用** `#[serde(flatten)]` 把 `kind` 提到顶层：serde 的 `flatten`
     /// 与 `deny_unknown_fields` 互斥，一旦 flatten 就必须放弃整个 spec 的字段
-    /// 拼写检查。这是人手写的 YAML，「配了但没生效」是最坏的失败模式，
+    /// 拼写检查。界面生成的 spec 不会拼错，但接口是公开的、可以直接手写，
+    /// 而「配了但没生效」是最坏的失败模式，
     /// 换一层嵌套换全量拼写检查是划算的。
     pub config: NodeConfig,
     /// 节点输入：名字 → 取值来源。名字会以变量形式出现在 prompt / command 里。
@@ -127,6 +128,12 @@ pub struct AiNode {
     pub prompt: String,
     #[serde(default)]
     pub executor: ExecutorKind,
+    /// `executor = host_cli` 时用哪个 CLI（`claude` / `codex` / …）。
+    ///
+    /// 保存任务时会对着目标机上报的清单校验一次：让人选一个装都没装的 CLI，
+    /// 失败会发生在凌晨两点，而不是配置的时候。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli: Option<String>,
     /// 模型 ID。`None` 时由 executor 取默认值（CLI 用 opus，API 用 haiku）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -371,11 +378,20 @@ pub enum HostSelector {
 #[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutorKind {
-    /// 驱动 Claude Code CLI。开放式任务用这个。
+    /// 在**中心**驱动 Claude Code CLI。开放式任务的默认选择。
+    ///
+    /// 节点声明了 `host` 时，模型通过 `remote_*` 工具操作那台机器，每次调用
+    /// 都回中心过策略。目标机上什么都不用装。
     #[default]
     ClaudeCode,
     /// 自建 Messages API 循环。分类/抽取/判断这类封闭式推理用这个，更便宜更快。
     Api,
+    /// 在**目标机上**直接跑 AI CLI。
+    ///
+    /// 需要那台机器装了对应的 CLI 和它的凭据。换来的是"文件就在本地"，
+    /// 代价是**策略层管不到 CLI 的内置工具**——它的 Bash/Write 直接在那台机器上
+    /// 落地，中心只看得见 stdout。这条路径必须由人显式选择。
+    HostCli,
 }
 
 /// 思考深度。对应 Messages API 的 `output_config.effort`。
@@ -513,6 +529,7 @@ mod tests {
             config: NodeConfig::Ai(AiNode {
                 prompt: prompt.into(),
                 executor: ExecutorKind::default(),
+                cli: None,
                 model: None,
                 effort: None,
                 skills: vec![],

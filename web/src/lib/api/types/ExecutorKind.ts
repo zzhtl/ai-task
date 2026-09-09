@@ -3,4 +3,4 @@
 /**
  * AI 执行内核。
  */
-export type ExecutorKind = "claude_code" | "api";
+export type ExecutorKind = "claude_code" | "api" | "host_cli";

@@ -21,7 +21,8 @@ name?: string | null,
  *
  * 刻意**不用** `#[serde(flatten)]` 把 `kind` 提到顶层：serde 的 `flatten`
  * 与 `deny_unknown_fields` 互斥，一旦 flatten 就必须放弃整个 spec 的字段
- * 拼写检查。这是人手写的 YAML，「配了但没生效」是最坏的失败模式，
+ * 拼写检查。界面生成的 spec 不会拼错，但接口是公开的、可以直接手写，
+ * 而「配了但没生效」是最坏的失败模式，
  * 换一层嵌套换全量拼写检查是划算的。
  */
 config: NodeConfig, 

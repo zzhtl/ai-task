@@ -386,6 +386,7 @@ mod tests {
             config: NodeConfig::Ai(AiNode {
                 prompt: "x".into(),
                 executor: ExecutorKind::default(),
+                cli: None,
                 model: None,
                 effort: None,
                 skills: vec![],

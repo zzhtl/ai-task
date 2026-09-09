@@ -264,6 +264,7 @@ mod tests {
                 config: NodeConfig::Ai(AiNode {
                     prompt: prompt.into(),
                     executor: ExecutorKind::ClaudeCode,
+                    cli: None,
                     model: model.map(str::to_owned),
                     effort: None,
                     skills: vec![],

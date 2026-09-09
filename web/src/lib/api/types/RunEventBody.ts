@@ -58,7 +58,15 @@ detail?: string | null, } | { "kind": "map_expanded", count: number,
 /**
  * 上游数组的真实长度。被 `max_items` 截断时会大于 `count`。
  */
-available: number, } | { "kind": "agent_turn_started", turn: number, } | { "kind": "agent_thinking", text: string, } | { "kind": "agent_text", text: string, } | { "kind": "tool_requested", tool_use_id: string, tool: string, input: JsonValue, } | { "kind": "policy_decided", tool_use_id: string, effect: PolicyEffect, 
+available: number, } | { "kind": "agent_invoked", command: string, 
+/**
+ * 这条命令**实际**在哪台机器上跑。`None` = 中心。
+ *
+ * 不等于节点的 host：中心驱动模式下节点绑在远程主机上，但 `claude`
+ * 进程跑在中心，只有工具调用下发过去。混淆这两者会让人照着命令
+ * 在错误的机器上复现。
+ */
+ran_on?: HostId | null, } | { "kind": "agent_turn_started", turn: number, } | { "kind": "agent_thinking", text: string, } | { "kind": "agent_text", text: string, } | { "kind": "tool_requested", tool_use_id: string, tool: string, input: JsonValue, } | { "kind": "policy_decided", tool_use_id: string, effect: PolicyEffect, 
 /**
  * 命中的规则。没有规则命中（走默认策略）时为 `None`。
  */
