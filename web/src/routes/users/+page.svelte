@@ -2,6 +2,7 @@
   // 用户与角色管理。整页都要 admin —— 后端也拦，这里只是别让人白点。
   import { api, ApiFailure } from '$api/client';
   import { session } from '$lib/auth/session.svelte';
+  import PageHeader from '$lib/ui/PageHeader.svelte';
 
   interface User {
     id: string;
@@ -86,10 +87,11 @@
   });
 </script>
 
-<header>
-  <a href="/" class="muted">← 返回</a>
-  <h1>用户</h1>
-</header>
+<PageHeader title="用户">
+  {#snippet sub()}
+    <span>改角色立刻生效，不用重新登录；停用会连带吊销该用户所有会话。</span>
+  {/snippet}
+</PageHeader>
 
 {#if !session.can('admin')}
   <p class="bad">需要管理员权限。</p>
@@ -120,12 +122,12 @@
             {user.active_sessions}
             {#if user.active_sessions > 0}
               <!-- 改口令不会让已发出的 token 失效，泄漏时要能主动踢下线 -->
-              <button class="link" disabled={busy} onclick={() => revoke(user)}>踢下线</button>
+              <button class="btn-ghost btn-sm" disabled={busy} onclick={() => revoke(user)}>踢下线</button>
             {/if}
           </td>
-          <td>{user.disabled ? '已停用' : '正常'}</td>
+          <td>{#if user.disabled}<span class="tag danger">已停用</span>{:else}<span class="tag ok">正常</span>{/if}</td>
           <td>
-            <button disabled={busy} onclick={() => toggleDisabled(user)}>
+            <button class="btn-sm" disabled={busy} onclick={() => toggleDisabled(user)}>
               {user.disabled ? '恢复' : '停用'}
             </button>
           </td>
@@ -136,7 +138,7 @@
     </tbody>
   </table>
 
-  <section class="new">
+  <section class="new card">
     <h2>加人</h2>
     <div class="row">
       <input bind:value={email} placeholder="邮箱" type="email" />
@@ -145,34 +147,15 @@
       <select bind:value={role}>
         {#each ROLES as r (r)}<option value={r}>{r}</option>{/each}
       </select>
-      <button onclick={create} disabled={busy || !email || !password}>创建</button>
+      <button class="btn-primary" onclick={create} disabled={busy || !email || !password}>创建</button>
     </div>
     <p class="muted">{role}：{WHAT_EACH_ROLE_CAN_DO[role]}</p>
   </section>
 {/if}
 
 <style>
-  h1 { margin: 0.5rem 0 1rem; font-size: 1.4rem; }
-  h2 { font-size: 0.95rem; margin: 0 0 0.5rem; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
-  th { text-align: left; color: var(--muted); font-weight: 500; padding: 0.3rem 0.6rem 0.3rem 0; }
-  td { padding: 0.35rem 0.6rem 0.35rem 0; border-top: 1px solid var(--line); }
+  .new { margin-top: var(--s5); }
+  .row { display: flex; gap: var(--s2); flex-wrap: wrap; align-items: center; }
+  .row input { flex: 1; min-width: 10rem; }
   tr.disabled { opacity: 0.5; }
-  .new { margin-top: 1.5rem; }
-  .row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
-  input, select, button {
-    padding: 0.35rem 0.6rem;
-    border: 1px solid var(--line);
-    border-radius: 0.4rem;
-    background: var(--card);
-    color: var(--fg);
-    font: inherit;
-  }
-  input { flex: 1; min-width: 10rem; }
-  button { cursor: pointer; }
-  button:disabled { cursor: default; opacity: 0.5; }
-  button.link { border: none; background: none; color: var(--muted); font-size: 0.8rem; padding: 0; }
-  .muted { color: var(--muted); }
-  .bad { color: var(--bad); }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 </style>
