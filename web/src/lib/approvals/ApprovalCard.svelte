@@ -128,14 +128,17 @@
 
 <style>
   article {
-    border: 1px solid var(--line);
-    border-left: 3px solid var(--muted);
-    border-radius: 0.75rem;
-    padding: 0.8rem 1rem;
-    background: var(--card);
+    border: 1px solid color-mix(in srgb, var(--warn) 30%, var(--line));
+    border-left: 3px solid var(--warn);
+    border-radius: var(--r3);
+    padding: var(--s3) var(--s4);
+    background: color-mix(in srgb, var(--warn) 4%, var(--surface-1));
   }
+  /* 最后一分钟变红。审批卡是会过期的，而过期等于拒绝 */
   article.expiring {
+    border-color: color-mix(in srgb, var(--bad) 45%, var(--line));
     border-left-color: var(--bad);
+    background: color-mix(in srgb, var(--bad) 5%, var(--surface-1));
   }
   article.expired {
     opacity: 0.55;
@@ -153,7 +156,7 @@
   .clock {
     font-variant-numeric: tabular-nums;
     font-size: 0.85rem;
-    color: var(--muted);
+    color: var(--fg-dim);
   }
   article.expiring .clock {
     color: var(--bad);
@@ -170,7 +173,7 @@
     font-size: 0.85rem;
   }
   dt {
-    color: var(--muted);
+    color: var(--fg-dim);
     white-space: nowrap;
   }
   dd {
@@ -194,7 +197,7 @@
     flex: 1;
     padding: 0.35rem 0.6rem;
     border: 1px solid var(--line);
-    border-radius: 0.4rem;
+    border-radius: var(--r2);
     background: var(--bg);
     color: var(--fg);
     font: inherit;
@@ -202,7 +205,7 @@
   button {
     padding: 0.35rem 1rem;
     border: 1px solid var(--line);
-    border-radius: 0.4rem;
+    border-radius: var(--r2);
     background: var(--bg);
     color: var(--fg);
     font: inherit;
@@ -213,18 +216,18 @@
     opacity: 0.5;
   }
   .approve {
-    border-color: var(--ok);
+    border-color: color-mix(in srgb, var(--ok) 50%, var(--line-strong));
     color: var(--ok);
   }
   .deny {
-    border-color: var(--bad);
+    border-color: color-mix(in srgb, var(--bad) 50%, var(--line-strong));
     color: var(--bad);
   }
   .bad {
     color: var(--bad);
   }
   .muted {
-    color: var(--muted);
+    color: var(--fg-dim);
   }
   .mono {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

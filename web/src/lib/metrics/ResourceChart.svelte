@@ -175,9 +175,9 @@
   }
   article {
     border: 1px solid var(--line);
-    border-radius: 0.75rem;
+    border-radius: var(--r3);
     padding: 0.6rem 0.9rem;
-    background: var(--card);
+    background: var(--surface-1);
   }
   article + article {
     margin-top: 0.6rem;

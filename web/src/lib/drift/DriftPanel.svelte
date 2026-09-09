@@ -95,9 +95,9 @@
   .drift {
     margin-top: 1.25rem;
     border: 1px solid var(--line);
-    border-radius: 0.75rem;
+    border-radius: var(--r3);
     padding: 0.6rem 0.9rem;
-    background: var(--card);
+    background: var(--surface-1);
   }
   .drift.alarming { border-color: var(--bad); }
   h2 { font-size: 0.95rem; margin: 0 0 0.5rem; }
@@ -105,7 +105,7 @@
     margin-left: 0.5rem;
     font-weight: 400;
     font-size: 0.78rem;
-    color: var(--muted);
+    color: var(--fg-dim);
     border: 1px solid var(--line);
     border-radius: 999px;
     padding: 0 0.5rem;
@@ -113,12 +113,12 @@
   .verdict { margin: 0 0 0.5rem; font-size: 0.88rem; }
   .verdict a { margin-left: 0.5rem; }
   table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
-  th { text-align: left; color: var(--muted); font-weight: 500; padding: 0.2rem 0.5rem 0.2rem 0; }
+  th { text-align: left; color: var(--fg-dim); font-weight: 500; padding: 0.2rem 0.5rem 0.2rem 0; }
   td { padding: 0.2rem 0.5rem 0.2rem 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
-  .before { color: var(--muted); }
+  .before { color: var(--fg-dim); }
   .after { color: var(--fg); font-weight: 500; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .muted { color: var(--muted); }
+  .muted { color: var(--fg-dim); }
   .bad { color: var(--bad); }
   .ok { color: var(--ok); }
 </style>

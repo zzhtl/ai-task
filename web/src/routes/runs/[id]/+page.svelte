@@ -7,10 +7,14 @@
   import type { RunEvent } from '$api/types/RunEvent';
   import type { RunSummary } from '$api/types/RunSummary';
   import type { TaskDetail } from '$api/types/TaskDetail';
-  import DagCanvas from '$lib/dag/DagCanvas.svelte';
   import ResourceChart from '$lib/metrics/ResourceChart.svelte';
   import DriftPanel from '$lib/drift/DriftPanel.svelte';
+  import Process from '$lib/runs/Process.svelte';
   import ApprovalCard from '$lib/approvals/ApprovalCard.svelte';
+  import PageHeader from '$lib/ui/PageHeader.svelte';
+  import StatusPill from '$lib/ui/StatusPill.svelte';
+  import Confirm from '$lib/ui/Confirm.svelte';
+  import { duration, money, stamp } from '$lib/ui/format';
 
   const runId = $derived(page.params.id ?? '');
 
@@ -41,14 +45,23 @@
     return () => stream?.close();
   });
 
-  const shown = $derived(events.filter((e) => e.body.kind !== 'agent_thinking'));
+  // 原始事件流是排查用的，**不过滤**：过滤掉的那类事件恰恰是出问题时想看的。
+  // 给人读的版本在「执行过程」里。
+  const shown = $derived(events);
 
   // 编排图 + 实时状态叠在同一张图上：看一个正在跑的 run 时，
   // 不用在"图"和"事件流"之间来回对照。
   let task = $state<TaskDetail | null>(null);
+  let hosts = $state<Array<{ id: string; name: string }>>([]);
   $effect(() => {
     if (!run?.task_id) return;
     api<TaskDetail>(`/api/v1/tasks/${run.task_id}`).then((t) => (task = t)).catch(() => {});
+  });
+  $effect(() => {
+    // 主机是 admin 才能读；读不到就在过程里显示短 id，不该报错
+    api<{ items: Array<{ id: string; name: string }> }>('/api/v1/hosts')
+      .then((p) => (hosts = p.items))
+      .catch(() => {});
   });
 
   const nodeStatus = $derived.by(() => {
@@ -106,6 +119,17 @@
     }>
   >([]);
 
+  /** 删这次执行记录。连事件流和资源采样一起，不可恢复。 */
+  let confirming = $state(false);
+  async function removeRun() {
+    try {
+      await api(`/api/v1/runs/${runId}`, { method: 'DELETE' });
+      location.href = '/runs';
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   async function loadApprovals() {
     try {
       const page = await api<{ items: typeof pending }>('/api/v1/approvals');
@@ -144,6 +168,12 @@
       case 'map_expanded': return `展开 ${b.count} 个实例（上游共 ${b.available} 项）`;
       case 'agent_text': return b.text;
       case 'agent_thinking': return b.text;
+      // 提示词里的换行会把这一行撑成一屏。事件流是时间轴，一条事件一行；
+      // 完整命令在上面的「执行命令」里
+      case 'agent_invoked': {
+        const flat = b.command.replace(/\s+/g, ' ');
+        return `启动 AI：${flat.slice(0, 96)}${flat.length > 96 ? '…' : ''}`;
+      }
       case 'agent_turn_started': return `第 ${b.turn} 轮`;
       case 'tool_requested': return `调用 ${b.tool} ${JSON.stringify(b.input).slice(0, 160)}`;
       case 'tool_completed': return `${b.ok ? '完成' : '失败'}：${b.output_preview}`;
@@ -157,75 +187,139 @@
   }
 </script>
 
-<header>
-  <div>
-    <a href="/" class="muted">← 返回</a>
-    <h1>Run <span class="mono">{runId.slice(0, 8)}</span></h1>
+<PageHeader title="Run {runId.slice(0, 8)}" crumb="← 执行记录" crumbHref="/runs">
+  {#snippet sub()}
     {#if run}
-      <p class="sub">
-        <span class="status {run.status}">{run.status}</span>
-        · ${cost} · {events.length} 事件
-        <span class="conn {status}">{status === 'open' ? '实时' : status === 'connecting' ? '连接中' : '已结束'}</span>
-      </p>
+      <StatusPill status={run.status} />
+      <span>{money(cost)}</span>
+      <span>{duration(run.started_at, run.finished_at)}</span>
+      <span>{events.length} 事件</span>
+      {#if run.dry_run}<span class="tag">影子执行</span>{/if}
+      <!-- 连接状态要一直可见：断开时看到的是一份不再更新的快照，
+           不标出来的话人会以为"这个 run 卡住了" -->
+      <span class="tag" class:accent={status === 'open'}>
+        {status === 'open' ? '实时' : status === 'connecting' ? '连接中' : '已结束'}
+      </span>
     {/if}
-  </div>
-  {#if run && !['succeeded', 'failed', 'cancelled', 'timed_out', 'budget_exceeded', 'resource_exceeded'].includes(run.status)}
-    <button onclick={() => cancelRun(runId).catch((e) => (error = String(e)))}>取消</button>
-  {/if}
-</header>
+  {/snippet}
+  {#snippet actions()}
+    {#if run && !['succeeded', 'failed', 'cancelled', 'timed_out', 'budget_exceeded', 'resource_exceeded'].includes(run.status)}
+      <button class="btn-danger" onclick={() => cancelRun(runId).catch((e) => (error = String(e)))}>
+        取消执行
+      </button>
+    {/if}
+    {#if run}<a class="btn" href="/tasks/{run.task_id}">任务定义</a>{/if}
+    {#if run?.status && !['running', 'queued'].includes(run.status)}
+      <button class="btn-danger" onclick={() => (confirming = true)}>删除</button>
+    {/if}
+  {/snippet}
+</PageHeader>
+
+<Confirm bind:open={confirming} title="删除这次执行记录？" danger confirmText="删除" onconfirm={removeRun}>
+  <p>
+    连同它的 {events.length} 条事件和资源采样一起删掉。那里面有成本记录和策略判决，是审计材料。
+  </p>
+  <p class="warn-line">删掉之后拿不回来。</p>
+</Confirm>
 
 {#if error}<p class="bad">{error}</p>{/if}
 
-{#if task}
-  <DagCanvas spec={task.spec} status={nodeStatus} {expanded} />
-{/if}
-
 {#if pending.length}
   <section class="gate">
-    <h2>这个 run 正在等人点头</h2>
     {#each pending as approval (approval.id)}
       <ApprovalCard {approval} ondecided={loadApprovals} />
     {/each}
   </section>
 {/if}
 
+<Process {events} spec={task?.spec ?? null} {hosts} />
+
 <ResourceChart {runId} revision={metricsRevision} {degraded} />
 <DriftPanel {runId} revision={metricsRevision} />
 
-<ol class="events">
-  {#each shown as event (event.seq)}
-    <li class="{event.body.kind} {event.body.kind === 'policy_decided'
-      ? `effect-${event.body.effect}`
-      : ''}">
-      <span class="seq mono">{event.seq}</span>
-      <span class="kind">{event.body.kind}</span>
-      {#if event.node_key}<span class="node">{event.node_key}</span>{/if}
-      <span class="text">{summarize(event)}</span>
-    </li>
-  {:else}
-    <li class="muted">等待事件…</li>
-  {/each}
-</ol>
+<details class="events-block">
+  <summary>
+    <h2>原始事件流 <span class="faint">{shown.length}</span></h2>
+    <span class="faint">按 seq 排、不合并、不过滤。排查用。</span>
+  </summary>
+  <ol class="events">
+    {#each shown as event (event.seq)}
+      <li
+        class="{event.body.kind} {event.body.kind === 'policy_decided'
+          ? `effect-${event.body.effect}`
+          : ''}"
+      >
+        <span class="seq mono">{event.seq}</span>
+        <time class="mono" title={event.ts}>{stamp(event.ts).slice(11)}</time>
+        <span class="kind">{event.body.kind}</span>
+        <span class="node mono">{event.node_key ?? ''}</span>
+        <span class="text">{summarize(event)}</span>
+      </li>
+    {:else}
+      <li class="waiting faint">等待事件…</li>
+    {/each}
+  </ol>
+</details>
 
 <style>
-  header { display: flex; align-items: flex-start; justify-content: space-between; }
-  h1 { margin: 0.5rem 0 0; font-size: 1.4rem; }
-  .sub { margin: 0.25rem 0 0; color: var(--muted); }
-  .conn { margin-left: 0.75rem; font-size: 0.8rem; }
-  .conn.open { color: var(--ok); }
-  .events { list-style: none; margin: 1.25rem 0 0; padding: 0; border: 1px solid var(--line); border-radius: 0.75rem; overflow: hidden; }
-  .events li { display: grid; grid-template-columns: 3rem 9rem auto 1fr; gap: 0.75rem; align-items: baseline; padding: 0.4rem 0.9rem; background: var(--card); }
+  .warn-line { color: var(--warn); margin-bottom: 0; }
+  .gate { margin-bottom: var(--s4); display: flex; flex-direction: column; gap: var(--s2); }
+
+  .events-block { margin-top: var(--s5); }
+  .events-block summary {
+    cursor: pointer;
+    display: flex;
+    align-items: baseline;
+    gap: var(--s2);
+    flex-wrap: wrap;
+    margin-bottom: var(--s2);
+  }
+  .events-block h2 { margin: 0; display: inline; }
+  .events {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: var(--r3);
+    overflow: hidden;
+    background: var(--surface-1);
+  }
+  .events li {
+    display: grid;
+    grid-template-columns: 3rem 4.5rem 9rem 6rem 1fr;
+    gap: var(--s3);
+    align-items: baseline;
+    padding: 0.35rem var(--s4);
+    font-size: 0.83rem;
+    /* 新事件从上方滑入。实时流里"有新东西来了"要看得见 */
+    animation: slide-in 0.18s ease-out;
+  }
+  @keyframes slide-in {
+    from { opacity: 0; transform: translateY(-3px); }
+  }
   .events li + li { border-top: 1px solid var(--line); }
-  .seq { color: var(--muted); font-size: 0.8rem; text-align: right; }
-  .kind { color: var(--muted); font-size: 0.8rem; }
-  .node { font-size: 0.8rem; opacity: 0.8; }
-  .text { white-space: pre-wrap; overflow-wrap: anywhere; }
-  .events li.drift_detected .text { color: var(--bad); font-weight: 500; }
+  .events li:hover { background: var(--surface-2); }
+  .seq { color: var(--fg-faint); font-size: 0.75rem; text-align: right; }
+  time { color: var(--fg-faint); font-size: 0.75rem; }
+  .kind { color: var(--fg-faint); font-size: 0.75rem; }
+  .node { color: var(--fg-dim); font-size: 0.75rem; overflow: hidden; text-overflow: ellipsis; }
+  .text { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg-dim); }
+  .waiting { display: block !important; padding: var(--s5) var(--s4); text-align: center; }
+
+  /* 需要被看见的几类事件。其余保持低对比，免得整屏都在喊 */
+  .events li.agent_text .text { color: var(--fg); }
+  .events li.run_finished .text,
+  .events li.node_finished .text { color: var(--fg); }
+  .events li.drift_detected .text,
+  .events li.resource_degraded .text { color: var(--warn); }
   /* 放行的判决不该是红的——审计里 allow 和 deny 一样多，全红就没有信号了 */
   .events li.effect-deny .text,
   .events li.effect-ask .text { color: var(--bad); }
+  .events li.effect-deny { background: color-mix(in srgb, var(--bad) 5%, transparent); }
   .events li.effect-allow .kind { color: var(--ok); }
-  .events li.agent_text .text { font-weight: 500; }
-  .gate { margin-top: 1.25rem; display: flex; flex-direction: column; gap: 0.6rem; }
-  .gate h2 { font-size: 0.95rem; margin: 0; }
+
+  @media (max-width: 900px) {
+    .events li { grid-template-columns: 2.5rem 1fr; }
+    .events li time, .events li .kind, .events li .node { display: none; }
+  }
 </style>

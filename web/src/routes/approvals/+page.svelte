@@ -1,6 +1,8 @@
 <script lang="ts">
   import { api } from '$api/client';
   import ApprovalCard from '$lib/approvals/ApprovalCard.svelte';
+  import PageHeader from '$lib/ui/PageHeader.svelte';
+  import Empty from '$lib/ui/Empty.svelte';
 
   interface Approval {
     id: string;
@@ -36,10 +38,14 @@
   });
 </script>
 
-<header>
-  <a href="/" class="muted">← 返回</a>
-  <h1>待审批 {#if items.length}<span class="count">{items.length}</span>{/if}</h1>
-</header>
+<PageHeader title="待审批">
+  {#snippet sub()}
+    <span>超时未决一律按<b>拒绝</b>处理——审批门的意义就在于「没人点头就不做」。</span>
+  {/snippet}
+  {#snippet actions()}
+    {#if items.length}<span class="tag danger">{items.length} 个等待中</span>{/if}
+  {/snippet}
+</PageHeader>
 
 {#if error}<p class="bad">{error}</p>{/if}
 
@@ -47,23 +53,10 @@
   {#each items as approval (approval.id)}
     <ApprovalCard {approval} ondecided={load} />
   {:else}
-    <p class="muted">没有待审批的操作。</p>
+    <Empty title="没有待审批的操作" hint="AI 命中 ask 策略、或者跑到 approval 节点时，卡片会出现在这里。" />
   {/each}
 </div>
 
 <style>
-  h1 { margin: 0.5rem 0 1rem; font-size: 1.4rem; }
-  .count {
-    display: inline-block;
-    min-width: 1.4rem;
-    padding: 0 0.4rem;
-    border-radius: 999px;
-    background: var(--bad);
-    color: #fff;
-    font-size: 0.85rem;
-    text-align: center;
-  }
-  .list { display: flex; flex-direction: column; gap: 0.75rem; }
-  .muted { color: var(--muted); }
-  .bad { color: var(--bad); }
+  .list { display: flex; flex-direction: column; gap: var(--s3); }
 </style>
