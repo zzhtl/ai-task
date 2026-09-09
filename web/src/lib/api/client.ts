@@ -21,6 +21,21 @@ export class ApiFailure extends Error {
   }
 }
 
+/**
+ * 把任何错误变成一句能贴在界面上的话。
+ *
+ * 校验失败时后端会**一次给全**字段级 details；只显示 message 的话，
+ * 人看到的是"校验失败"四个字，然后得猜是哪个字段。
+ */
+export function describeError(e: unknown): string {
+  if (e instanceof ApiFailure) {
+    const details = e.body.details;
+    if (details?.length) return details.map((d) => `${d.field}：${d.message}`).join('；');
+    return e.message;
+  }
+  return e instanceof Error ? e.message : String(e);
+}
+
 export interface RequestOptions {
   method?: string;
   body?: unknown;

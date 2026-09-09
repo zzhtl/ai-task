@@ -178,7 +178,7 @@
 
 <style>
   .process {
-    margin-top: var(--s5);
+    margin-top: var(--s4);
   }
   .head {
     display: flex;
@@ -382,6 +382,14 @@
     cursor: pointer;
     font-size: 0.78rem;
     color: var(--fg-faint);
+  }
+  .cmd summary::before,
+  .out-detail summary::before {
+    content: '▸ ';
+  }
+  .cmd[open] summary::before,
+  .out-detail[open] summary::before {
+    content: '▾ ';
   }
   .cmd-body {
     position: relative;

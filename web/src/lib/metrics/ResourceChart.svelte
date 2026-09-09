@@ -167,26 +167,29 @@
 
 <style>
   .metrics {
-    margin-top: 1.25rem;
+    margin-top: var(--s4);
   }
   h2 {
-    font-size: 0.95rem;
-    margin: 0 0 0.6rem;
+    margin: 0 0 var(--s3);
   }
   article {
     border: 1px solid var(--line);
     border-radius: var(--r3);
-    padding: 0.6rem 0.9rem;
+    padding: var(--s3) var(--s4);
     background: var(--surface-1);
   }
   article + article {
-    margin-top: 0.6rem;
+    margin-top: var(--s2);
   }
   header {
     display: flex;
-    gap: 0.75rem;
+    gap: var(--s3);
     align-items: baseline;
-    font-size: 0.85rem;
+    font-size: 0.84rem;
+    flex-wrap: wrap;
+  }
+  .node {
+    color: var(--fg);
   }
   svg {
     width: 100%;
@@ -200,10 +203,10 @@
     vector-effect: non-scaling-stroke;
   }
   path.cpu {
-    stroke: var(--accent, #4c8dff);
+    stroke: var(--accent);
   }
   path.rss {
-    stroke: var(--ok, #3fb950);
+    stroke: var(--ok);
     opacity: 0.75;
   }
   rect.span {
@@ -215,15 +218,19 @@
     font-size: 0.78rem;
     margin-left: 0.5rem;
   }
+  .muted {
+    color: var(--fg-faint);
+  }
   .degraded {
-    color: var(--bad);
+    color: var(--warn);
     font-size: 0.78rem;
   }
   footer {
-    font-size: 0.75rem;
+    font-size: 0.74rem;
     display: flex;
     gap: 0.4rem;
     align-items: center;
+    color: var(--fg-faint);
   }
   .swatch {
     display: inline-block;
@@ -231,10 +238,10 @@
     height: 2px;
   }
   .swatch.cpu {
-    background: var(--accent, #4c8dff);
+    background: var(--accent);
   }
   .swatch.rss {
-    background: var(--ok, #3fb950);
+    background: var(--ok);
     margin-left: 0.75rem;
   }
 </style>

@@ -26,7 +26,9 @@ export function duration(from?: string | null, to?: string | null): string {
   const s = ms / 1000;
   if (s < 60) return `${s.toFixed(1)}s`;
   const m = Math.floor(s / 60);
-  return `${m}m ${Math.floor(s % 60)}s`;
+  if (m < 60) return `${m}m ${Math.floor(s % 60)}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
 }
 
 /**
@@ -48,8 +50,53 @@ export function bytes(n: number): string {
   return `${(n / 1024 ** 3).toFixed(2)} GiB`;
 }
 
-/** 绝对时刻，本地时区，秒级。 */
+const two = (n: number) => String(n).padStart(2, '0');
+
+/**
+ * 绝对时刻，**本地时区**，秒级。
+ *
+ * 以前是直接把 ISO 串里的 `T`/`Z` 抠掉——那显示的是 UTC，在东八区看
+ * 每个时间都差 8 小时，排查时对不上日志。
+ */
 export function stamp(iso: string | null | undefined): string {
   if (!iso) return '—';
-  return iso.replace('T', ' ').replace('Z', '').slice(0, 19);
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${clock(iso)}`;
 }
+
+/** 只有时分秒（本地时区）。事件流一行一条，日期在页头已经写着了。 */
+export function clock(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`;
+}
+
+/** `分:秒`，倒计时用。 */
+export function mmss(total: number): string {
+  const m = Math.floor(total / 60);
+  return `${m}:${two(total % 60)}`;
+}
+
+/** UUID 的前 8 位。界面上够认，全量在 title / 复制里。 */
+export function shortId(id: string): string {
+  return id.slice(0, 8);
+}
+
+const TRIGGER: Record<string, string> = {
+  manual: '手动',
+  schedule: '定时',
+  api: 'API',
+  parent: '父 run'
+};
+export function triggerLabel(kind: string): string {
+  return TRIGGER[kind] ?? kind;
+}
+
+/** 终态：不会再变了。 */
+export function isTerminal(status: string): boolean {
+  return status !== 'queued' && status !== 'running';
+}
+/** 算作"坏了"的那几个终态。 */
+export const FAILED_STATUSES = ['failed', 'timed_out', 'budget_exceeded', 'resource_exceeded'];

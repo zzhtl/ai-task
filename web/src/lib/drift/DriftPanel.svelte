@@ -93,32 +93,56 @@
 
 <style>
   .drift {
-    margin-top: 1.25rem;
+    margin-top: var(--s4);
     border: 1px solid var(--line);
     border-radius: var(--r3);
-    padding: 0.6rem 0.9rem;
+    padding: var(--s4);
     background: var(--surface-1);
   }
-  .drift.alarming { border-color: var(--bad); }
-  h2 { font-size: 0.95rem; margin: 0 0 0.5rem; }
+  .drift.alarming {
+    border-color: color-mix(in srgb, var(--bad) 55%, var(--line));
+  }
+  h2 {
+    margin: 0 0 var(--s2);
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+  }
   .shadow {
-    margin-left: 0.5rem;
     font-weight: 400;
-    font-size: 0.78rem;
+    font-size: 0.72rem;
     color: var(--fg-dim);
     border: 1px solid var(--line);
     border-radius: 999px;
     padding: 0 0.5rem;
   }
-  .verdict { margin: 0 0 0.5rem; font-size: 0.88rem; }
-  .verdict a { margin-left: 0.5rem; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
-  th { text-align: left; color: var(--fg-dim); font-weight: 500; padding: 0.2rem 0.5rem 0.2rem 0; }
-  td { padding: 0.2rem 0.5rem 0.2rem 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
-  .before { color: var(--fg-dim); }
-  .after { color: var(--fg); font-weight: 500; }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .muted { color: var(--fg-dim); }
-  .bad { color: var(--bad); }
-  .ok { color: var(--ok); }
+  .verdict {
+    margin: 0 0 var(--s2);
+    font-size: 0.88rem;
+  }
+  .verdict a {
+    margin-left: 0.5rem;
+  }
+  table {
+    font-size: 0.82rem;
+  }
+  td {
+    overflow-wrap: anywhere;
+  }
+  .before {
+    color: var(--fg-dim);
+  }
+  .after {
+    color: var(--fg);
+    font-weight: 500;
+  }
+  .muted {
+    color: var(--fg-dim);
+  }
+  .bad {
+    color: var(--bad);
+  }
+  .ok {
+    color: var(--ok);
+  }
 </style>

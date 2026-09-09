@@ -27,7 +27,8 @@
     { href: '/approvals', label: '待审批', kind: '导航' },
     { href: '/hosts', label: '主机', hint: '加 SSH 机器', kind: '导航' },
     { href: '/rules', label: '规则与策略', kind: '导航' },
-    { href: '/users', label: '用户', kind: '导航' }
+    { href: '/users', label: '用户', kind: '导航' },
+    { href: '/audit', label: '审计', hint: '谁做了什么', kind: '导航' }
   ];
 
   let query = $state('');
@@ -59,7 +60,7 @@
         })),
         ...runs.items.map((r) => ({
           href: `/runs/${r.id}`,
-          label: `run ${r.id.slice(0, 8)}`,
+          label: `${tasks.items.find((t) => t.id === r.task_id)?.name ?? 'run'} · ${r.id.slice(0, 8)}`,
           hint: r.status,
           kind: '执行'
         }))
@@ -153,7 +154,7 @@
     background: var(--surface-2);
     border: 1px solid var(--line-strong);
     border-radius: var(--r3);
-    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+    box-shadow: var(--shadow-pop);
     overflow: hidden;
     animation: rise 0.13s ease-out;
   }
@@ -174,6 +175,8 @@
   }
   input:focus-visible {
     outline: none;
+    box-shadow: none;
+    border-color: var(--line);
   }
   ul {
     list-style: none;

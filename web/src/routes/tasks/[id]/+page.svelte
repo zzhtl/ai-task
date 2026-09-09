@@ -1,20 +1,29 @@
 <script lang="ts">
   /**
-   * 任务详情：这个任务会按什么顺序做什么。
+   * 任务详情：这个任务会按什么顺序做什么、什么时候自己跑、最近跑得怎么样。
    *
    * 这里**没有 YAML**。之前这个位置放的是一个假编辑器——一大块 YAML，改完
-   * 不保存，底下用小字写着"改动只影响画布预览"。它既拦住了看不懂 YAML 的人，
-   * 又骗了看得懂的人。现在上面是图，下面是步骤，要改就去编辑页。
+   * 不保存。它既拦住了看不懂 YAML 的人，又骗了看得懂的人。现在左边是步骤和
+   * 执行记录，右边是定时和元信息，要改就去编辑页。
    */
   import { page } from '$app/state';
-  import { api, ApiFailure } from '$api/client';
-  import { triggerRun } from '$api/runs';
+  import { goto } from '$app/navigation';
+  import { api, describeError } from '$api/client';
+  import { listRuns, triggerRun } from '$api/runs';
+  import { listHosts } from '$api/models';
   import type { TaskDetail } from '$api/types/TaskDetail';
+  import type { RunSummary } from '$api/types/RunSummary';
   import SchedulePanel from '$lib/schedules/SchedulePanel.svelte';
   import StepList from '$lib/tasks/StepList.svelte';
   import { fromSpec } from '$lib/tasks/compose';
   import PageHeader from '$lib/ui/PageHeader.svelte';
   import Confirm from '$lib/ui/Confirm.svelte';
+  import Dropdown from '$lib/ui/Dropdown.svelte';
+  import StatusPill from '$lib/ui/StatusPill.svelte';
+  import Empty from '$lib/ui/Empty.svelte';
+  import Loading from '$lib/ui/Loading.svelte';
+  import { toast, toastError } from '$lib/ui/toast.svelte';
+  import { ago, duration, money, stamp, triggerLabel } from '$lib/ui/format';
 
   const taskId = $derived(page.params.id ?? '');
 
@@ -22,34 +31,98 @@
   let error = $state<string | null>(null);
   let busy = $state(false);
   let hosts = $state<Array<{ id: string; name: string }>>([]);
+  let runs = $state<RunSummary[]>([]);
+  let runsCursor = $state<string | null>(null);
+  let runsLoaded = $state(false);
+
+  async function loadTask() {
+    try {
+      task = await api<TaskDetail>(`/api/v1/tasks/${taskId}`);
+      error = null;
+    } catch (e) {
+      error = describeError(e);
+    }
+  }
+
+  async function loadRuns() {
+    try {
+      const r = await listRuns({ taskId, limit: 20 });
+      runs = r.items;
+      runsCursor = r.next_cursor ?? null;
+    } catch {
+      /* 执行记录读不到不该把整个任务页弄坏 */
+    } finally {
+      runsLoaded = true;
+    }
+  }
+
+  async function moreRuns() {
+    if (!runsCursor) return;
+    const r = await listRuns({ taskId, limit: 50, cursor: runsCursor });
+    runs = [...runs, ...r.items];
+    runsCursor = r.next_cursor ?? null;
+  }
 
   $effect(() => {
     if (!taskId) return;
-    api<TaskDetail>(`/api/v1/tasks/${taskId}`)
-      .then((t) => (task = t))
-      .catch((e) => (error = describe(e)));
+    void loadTask();
+    void loadRuns();
     // 主机是 admin 才能读；operator 看任务时读不到不该报错
-    api<{ items: Array<{ id: string; name: string }> }>('/api/v1/hosts')
-      .then((p) => (hosts = p.items))
+    listHosts()
+      .then((h) => (hosts = h))
       .catch(() => {});
+    // 有 run 在跑时这页就是"看进度"的地方，得自己刷新
+    const timer = setInterval(loadRuns, 5000);
+    return () => clearInterval(timer);
   });
 
   // 步骤列表表示不了的编排（分支、并行、map）现在没有任何界面路径能创建，
   // 但接口收得下。这种情况下老实说"这里显示不了"，别假装。
   const comp = $derived(task ? fromSpec(task.spec) : null);
 
-  function describe(e: unknown): string {
-    return e instanceof ApiFailure ? `[${e.code}] ${e.message}` : String(e);
+  const stats = $derived.by(() => {
+    const done = runs.filter((r) => r.status !== 'queued' && r.status !== 'running');
+    const ok = done.filter((r) => r.status === 'succeeded').length;
+    const spend = runs.reduce((s, r) => s + Number(r.cost_usd), 0);
+    return { total: runs.length, ok, done: done.length, spend };
+  });
+
+  async function run(dryRun: boolean) {
+    busy = true;
+    try {
+      const r = await triggerRun(taskId, { dry_run: dryRun });
+      toast(dryRun ? '已触发影子执行' : '已触发执行');
+      await goto(`/runs/${r.id}`);
+    } catch (e) {
+      toastError(describeError(e));
+      busy = false;
+    }
   }
 
-  async function run() {
+  /**
+   * 停用 / 启用。停用的任务：定时到点不触发，手动也触发不了。
+   * PUT 是整体替换，所以把现有定义原样带回去，只翻 enabled 这一位。
+   */
+  async function setEnabled(enabled: boolean) {
+    if (!task) return;
     busy = true;
-    error = null;
     try {
-      const r = await triggerRun(taskId);
-      window.location.href = `/runs/${r.id}`;
+      await api(`/api/v1/tasks/${taskId}`, {
+        method: 'PUT',
+        body: {
+          name: task.name,
+          description: task.description ?? null,
+          spec: task.spec,
+          rules: task.rules ?? [],
+          enabled
+        },
+        ifMatch: String(task.version)
+      });
+      toast(enabled ? '任务已启用' : '任务已停用，定时不会再触发');
+      await loadTask();
     } catch (e) {
-      error = describe(e);
+      toastError(describeError(e));
+    } finally {
       busy = false;
     }
   }
@@ -70,8 +143,8 @@
   function askDelete() {
     confirming = true;
     affectedRuns = null;
-    void api<{ items: unknown[] }>(`/api/v1/runs?task_id=${taskId}&limit=1000`)
-      .then((p) => (affectedRuns = p.items.length))
+    void listRuns({ taskId, limit: 200 })
+      .then((p) => (affectedRuns = p.items.length + (p.next_cursor ? 1 : 0)))
       .catch(() => (affectedRuns = -1));
   }
 
@@ -79,27 +152,64 @@
     busy = true;
     try {
       await api(`/api/v1/tasks/${taskId}`, { method: 'DELETE' });
-      window.location.href = '/tasks';
+      toast(`已删除「${task?.name ?? ''}」`);
+      await goto('/tasks');
     } catch (e) {
-      error = describe(e);
+      toastError(describeError(e));
       busy = false;
+    }
+  }
+
+  async function copyId() {
+    try {
+      await navigator.clipboard.writeText(taskId);
+      toast('已复制任务 id');
+    } catch {
+      toastError('复制失败');
     }
   }
 </script>
 
-<PageHeader title={task?.name ?? '任务'} crumb="← 任务" crumbHref="/tasks">
+<PageHeader title={task?.name ?? '任务'} crumb="任务" crumbHref="/tasks">
+  {#if task && !task.enabled}<span class="tag danger">已停用</span>{/if}
   {#snippet sub()}
     {#if task}
-      <span>v{task.version_no}</span>
-      <span>{task.spec.nodes.length} 个步骤</span>
-      {#if task.rules?.length}<span>规则 {task.rules.join('、')}</span>{/if}
-      <span class="mono faint">{taskId.slice(0, 8)}</span>
+      {#if task.description}<span class="desc">{task.description}</span>{/if}
+      <span class="faint">v{task.version_no} · {task.spec.nodes.length} 个步骤</span>
+      <button class="idbtn mono faint" title="复制完整 id" onclick={copyId}>{taskId.slice(0, 8)}</button>
     {/if}
   {/snippet}
   {#snippet actions()}
-    <button class="btn-danger" onclick={askDelete} disabled={busy || !task}>删除</button>
+    <Dropdown label="更多" disabled={busy || !task}>
+      <a href="/tasks/new?id={taskId}" role="menuitem">
+        编辑定义
+        <span class="hint">保存会产生新版本</span>
+      </a>
+      {#if task?.enabled}
+        <button onclick={() => setEnabled(false)}>
+          停用任务
+          <span class="hint">定时不再触发，也不能手动运行</span>
+        </button>
+      {:else}
+        <button onclick={() => setEnabled(true)}>启用任务</button>
+      {/if}
+      <hr />
+      <button class="danger" onclick={askDelete}>
+        删除任务
+        <span class="hint">连同全部执行记录</span>
+      </button>
+    </Dropdown>
     <a class="btn" href="/tasks/new?id={taskId}">编辑</a>
-    <button class="btn-primary" onclick={run} disabled={busy || !task}>运行</button>
+    <Dropdown label="运行" primary disabled={busy || !task || !task.enabled}>
+      <button onclick={() => run(false)}>
+        立即执行
+        <span class="hint">真的会在目标机上动手</span>
+      </button>
+      <button onclick={() => run(true)}>
+        影子执行
+        <span class="hint">只记录意图不落地，用来验证提示词</span>
+      </button>
+    </Dropdown>
   {/snippet}
 </PageHeader>
 
@@ -108,75 +218,226 @@
   title="删除任务「{task?.name ?? ''}」？"
   danger
   confirmText="删除"
+  {busy}
   onconfirm={remove}
 >
   {#if affectedRuns === null}
     <p>正在数有多少条执行记录会被牵连…</p>
   {:else if affectedRuns > 0}
     <p>
-      会同时删掉 <b>{affectedRuns}</b> 次执行记录和它们的完整事件流。
-      那里面有成本记录和策略判决，是审计材料。
+      会同时删掉 <b>{affectedRuns > 200 ? '200 条以上' : `${affectedRuns} 次`}</b>
+      执行记录和它们的完整事件流。那里面有成本记录和策略判决，是审计材料。
     </p>
-    <p class="warn-line">删掉之后拿不回来。</p>
+    <p class="warn-text">删掉之后拿不回来。</p>
   {:else if affectedRuns < 0}
     <p>数不出有多少执行记录，但它们会跟着一起删掉。</p>
-    <p class="warn-line">删掉之后拿不回来。</p>
+    <p class="warn-text">删掉之后拿不回来。</p>
   {:else}
     <p>这个任务还没有执行记录。删掉之后拿不回来。</p>
   {/if}
 </Confirm>
 
-{#if error}<p class="bad">{error}</p>{/if}
+{#if error}<div class="banner">{error}</div>{/if}
 
-{#if taskId}
-  <SchedulePanel {taskId} />
+{#if task && !task.enabled}
+  <div class="callout warn">
+    <strong>这个任务已停用。</strong>定时到点不会触发，也不能手动运行。
+    在右上角「更多」里可以重新启用。
+  </div>
 {/if}
 
-{#if task}
-  <section class="steps-block">
-    <header>
-      <h2>执行步骤</h2>
-      <span class="faint">从上到下依次执行，每一步都能看到上一步的结果</span>
-    </header>
-    {#if comp}
-      <StepList {comp} {hosts} />
-      {#if comp.budgetUsd}
-        <p class="faint budget">
-          花费上限 <b>${comp.budgetUsd}</b>，累计到这个数就不再启动新步骤。
-        </p>
+<div class="layout">
+  <div class="main">
+    <section class="card">
+      <header class="card-head">
+        <h2>执行步骤</h2>
+        <span class="sub">从上到下依次执行，每一步都能看到它勾选的前几步的结果</span>
+      </header>
+      {#if !task}
+        <Loading rows={4} />
+      {:else if comp}
+        <StepList {comp} {hosts} />
+        {#if comp.budgetUsd}
+          <p class="faint small budget">
+            花费上限 <b>${comp.budgetUsd}</b>，累计到这个数就不再启动新步骤。
+          </p>
+        {/if}
+      {:else}
+        <div class="callout">
+          这个任务的编排里有分支、并行或 map 这类结构，步骤列表是一条直线，表示不了。
+          它是通过接口直接写进来的；界面上改不了它。
+        </div>
       {/if}
-    {:else}
-      <p class="faint">
-        这个任务的编排里有分支、并行或 map 这类结构，步骤列表是一条直线，表示不了。
-        上面的图是完整的；节点细节点图上的节点看。
-      </p>
+    </section>
+
+    <section class="card">
+      <header class="card-head">
+        <h2>执行记录</h2>
+        {#if runs.length}
+          <span class="sub">
+            最近 {stats.total} 次 · 成功 {stats.ok}/{stats.done} · 花费 {money(stats.spend)}
+          </span>
+        {/if}
+        <span class="spacer"></span>
+        <a class="btn btn-ghost btn-sm" href="/runs?task={taskId}">在执行记录页看</a>
+      </header>
+      {#if !runsLoaded}
+        <Loading rows={3} />
+      {:else if runs.length}
+        <ul class="runs">
+          {#each runs as r (r.id)}
+            <li>
+              <a href="/runs/{r.id}">
+                <StatusPill status={r.status} />
+                <span class="col">
+                  <span class="faint">{triggerLabel(r.trigger)}{r.dry_run ? ' · 影子' : ''}</span>
+                  {#if r.error}<span class="err ellipsis" title={r.error}>{r.error}</span>{/if}
+                </span>
+                <span class="spacer"></span>
+                <span class="faint">{duration(r.started_at, r.finished_at)}</span>
+                <span class="faint">{money(r.cost_usd)}</span>
+                <span class="faint" title={stamp(r.created_at)}>{ago(r.created_at)}</span>
+                <span class="mono faint">{r.id.slice(0, 8)}</span>
+              </a>
+            </li>
+          {/each}
+        </ul>
+        {#if runsCursor}
+          <div class="more"><button class="btn-ghost btn-sm" onclick={moreRuns}>更早的记录</button></div>
+        {/if}
+      {:else}
+        <Empty compact title="还没跑过" hint="点右上角「运行」，或者配一条定时。" />
+      {/if}
+    </section>
+  </div>
+
+  <aside class="side">
+    {#if taskId}
+      <SchedulePanel {taskId} taskEnabled={task?.enabled ?? true} />
     {/if}
-  </section>
-{/if}
+
+    {#if task}
+      <section class="card">
+        <header class="card-head"><h2>信息</h2></header>
+        <dl class="facts">
+          <dt>状态</dt>
+          <dd>{task.enabled ? '启用' : '已停用'}</dd>
+          <dt>定义版本</dt>
+          <dd>v{task.version_no}<span class="faint">（历史 run 绑的是各自的版本快照）</span></dd>
+          <dt>规则</dt>
+          <dd>
+            {#if task.rules?.length}
+              {#each task.rules as r (r)}<span class="tag">{r}</span>{/each}
+            {:else}
+              <span class="faint">只有全局规则</span>
+            {/if}
+          </dd>
+          <dt>花费上限</dt>
+          <dd>{task.spec.budget_usd ? `$${task.spec.budget_usd}` : '不设'}</dd>
+          <dt>更新</dt>
+          <dd title={stamp(task.updated_at)}>{ago(task.updated_at)}</dd>
+          <dt>创建</dt>
+          <dd>{stamp(task.created_at)}</dd>
+          <dt>id</dt>
+          <dd><code class="wrap">{task.id}</code></dd>
+        </dl>
+      </section>
+    {/if}
+  </aside>
+</div>
 
 <style>
-  .warn-line {
-    color: var(--warn);
-    margin-bottom: 0;
+  .desc {
+    color: var(--fg);
   }
-  .steps-block {
-    margin-top: var(--s5);
+  .idbtn {
+    border: none;
+    background: none;
+    padding: 0;
+    font-size: 0.8rem;
   }
-  .steps-block header {
+  .idbtn:hover {
+    color: var(--accent-fg);
+    background: none;
+  }
+  .callout {
+    margin-bottom: var(--s4);
+  }
+  .layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 340px;
+    gap: var(--s4);
+    align-items: start;
+  }
+  @media (max-width: 1100px) {
+    .layout {
+      grid-template-columns: 1fr;
+    }
+  }
+  .main,
+  .side {
     display: flex;
-    align-items: baseline;
-    gap: var(--s2);
-    flex-wrap: wrap;
-    margin-bottom: var(--s3);
-  }
-  .steps-block h2 {
-    margin: 0;
-  }
-  .faint {
-    font-size: 0.78rem;
+    flex-direction: column;
+    gap: var(--s4);
+    min-width: 0;
   }
   .budget {
-    margin: 0;
+    margin: var(--s2) 0 0;
     padding-left: calc(2rem + var(--s3));
+  }
+  .runs {
+    list-style: none;
+    margin: 0 calc(-1 * var(--s2));
+    padding: 0;
+  }
+  .runs a {
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+    padding: 0.45rem var(--s2);
+    border-radius: var(--r2);
+    font-size: 0.84rem;
+    color: inherit;
+  }
+  .runs a:hover {
+    background: var(--surface-2);
+  }
+  .col {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    line-height: 1.35;
+  }
+  .err {
+    font-size: 0.74rem;
+    color: var(--bad);
+    max-width: 40ch;
+  }
+  .more {
+    display: flex;
+    justify-content: center;
+    padding-top: var(--s2);
+  }
+  .facts {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.4rem var(--s3);
+    margin: 0;
+    font-size: 0.82rem;
+  }
+  .facts dt {
+    color: var(--fg-faint);
+    white-space: nowrap;
+  }
+  .facts dd {
+    margin: 0;
+    min-width: 0;
+    display: flex;
+    gap: var(--s1);
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .wrap {
+    overflow-wrap: anywhere;
   }
 </style>

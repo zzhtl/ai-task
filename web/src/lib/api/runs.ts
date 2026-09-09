@@ -3,6 +3,7 @@
 import { api } from './client';
 import type { CreateTask } from './types/CreateTask';
 import type { Page } from './types/Page';
+import type { RunStatus } from './types/RunStatus';
 import type { RunSummary } from './types/RunSummary';
 import type { TaskSummary } from './types/TaskSummary';
 import type { TriggerRun } from './types/TriggerRun';
@@ -20,8 +21,23 @@ export function createTask(body: CreateTask): Promise<TaskSummary> {
   });
 }
 
-export function listRuns(limit = 20): Promise<Page<RunSummary>> {
-  return api(`/api/v1/runs?limit=${limit}`);
+export interface RunListQuery {
+  limit?: number;
+  taskId?: string | null;
+  /** 只要这些状态。空数组会得到空结果——"筛选条件为空"不等于"不筛"。 */
+  status?: RunStatus[] | null;
+  /** 上一页的 `next_cursor`。 */
+  cursor?: string | null;
+}
+
+export function listRuns(query: number | RunListQuery = 20): Promise<Page<RunSummary>> {
+  const q: RunListQuery = typeof query === 'number' ? { limit: query } : query;
+  const params = new URLSearchParams();
+  params.set('limit', String(q.limit ?? 50));
+  if (q.taskId) params.set('task_id', q.taskId);
+  if (q.status) params.set('status', q.status.join(','));
+  if (q.cursor) params.set('cursor', q.cursor);
+  return api(`/api/v1/runs?${params}`);
 }
 
 export function getRun(id: string): Promise<RunSummary> {
@@ -38,6 +54,10 @@ export function triggerRun(taskId: string, body: TriggerRun = { dry_run: false }
 
 export function cancelRun(id: string): Promise<void> {
   return api(`/api/v1/runs/${id}/cancel`, { method: 'POST' });
+}
+
+export function deleteRun(id: string): Promise<void> {
+  return api(`/api/v1/runs/${id}`, { method: 'DELETE' });
 }
 
 /** 一份能直接跑起来的最小任务定义，用于首页的"新建"。 */

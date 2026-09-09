@@ -6,21 +6,16 @@
    * 必须看得见具体的东西：哪台机器、跑什么命令、改哪个文件。
    * 一段"我将执行一些维护操作"只会让审批退化成无脑点通过。
    */
-  import { api } from '$api/client';
+  import { api, describeError } from '$api/client';
+  import type { Approval } from '$api/models';
+  import { toast, toastError } from '$lib/ui/toast.svelte';
+  import { mmss } from '$lib/ui/format';
 
-  interface Approval {
-    id: string;
-    run_id: string;
-    node_key: string | null;
-    title: string;
-    intent: Record<string, unknown>;
-    rule_id: string | null;
-    requested_at: string;
-    expires_at: string;
-    expires_in_s: number;
-  }
-
-  let { approval, ondecided }: { approval: Approval; ondecided?: () => void } = $props();
+  let {
+    approval,
+    taskName = null,
+    ondecided
+  }: { approval: Approval; taskName?: string | null; ondecided?: () => void } = $props();
 
   let reason = $state('');
   let busy = $state(false);
@@ -47,18 +42,18 @@
     try {
       const result = await api<{ approved: boolean; was_first: boolean }>(
         `/api/v1/approvals/${approval.id}/decide`,
-        // body 传对象：api() 自己会 stringify，这里再 stringify 一次
-        // 发出去的就是一个 JSON 字符串而不是对象，服务端 422
         { method: 'POST', body: { approved, reason: reason || null } }
       );
       // 并发决策：两个人同时看到卡片是常态。生效的不是你那次时要说出来，
       // 否则点了"拒绝"的人会以为自己拦住了。
       if (!result.was_first) {
-        error = `已经有人先决策过了，实际生效的是「${result.approved ? '批准' : '拒绝'}」`;
+        toastError(`已经有人先决策过了，实际生效的是「${result.approved ? '批准' : '拒绝'}」`);
+      } else {
+        toast(approved ? '已批准，执行继续' : '已拒绝');
       }
       ondecided?.();
     } catch (e) {
-      error = String(e);
+      error = describeError(e);
     } finally {
       busy = false;
     }
@@ -81,48 +76,45 @@
         long: typeof value !== 'string' || value.length > 60
       }));
   });
-
-  function mmss(total: number): string {
-    const m = Math.floor(total / 60);
-    return `${m}:${String(total % 60).padStart(2, '0')}`;
-  }
 </script>
 
 <article class:expiring={remaining > 0 && remaining < 60} class:expired={remaining === 0}>
   <header>
-    <h3>{approval.title}</h3>
+    <div class="head-main">
+      <h3>{approval.title}</h3>
+      <p class="meta faint">
+        {#if taskName}<span>{taskName}</span> ·{/if}
+        <a href="/runs/{approval.run_id}">run {approval.run_id.slice(0, 8)}</a>
+        {#if approval.node_key}<span class="mono">· {approval.node_key}</span>{/if}
+        {#if approval.rule_id}<span>· 由策略 ask 触发</span>{:else}<span>· 审批节点</span>{/if}
+      </p>
+    </div>
     <span class="clock" title="超时后自动拒绝">
       {remaining === 0 ? '已超时（自动拒绝）' : `剩余 ${mmss(remaining)}`}
     </span>
   </header>
 
-  <p class="meta muted">
-    <a href="/runs/{approval.run_id}">run {approval.run_id.slice(0, 8)}</a>
-    {#if approval.node_key}<span class="mono">· {approval.node_key}</span>{/if}
-    {#if approval.rule_id}<span>· 由策略触发</span>{/if}
-  </p>
+  {#if rows.length}
+    <dl class="intent">
+      {#each rows as row (row.key)}
+        <dt>{row.key}</dt>
+        <dd class:block={row.long}><code>{row.text}</code></dd>
+      {/each}
+    </dl>
+  {:else}
+    <p class="faint small">这次审批没有附带结构化意图。</p>
+  {/if}
 
-  <dl class="intent">
-    {#each rows as row (row.key)}
-      <dt>{row.key}</dt>
-      <dd class:block={row.long}><code>{row.text}</code></dd>
-    {/each}
-  </dl>
-
-  {#if error}<p class="bad">{error}</p>{/if}
+  {#if error}<div class="banner">{error}</div>{/if}
 
   <div class="actions">
     <input
       bind:value={reason}
-      placeholder="理由（会作为 tool_result 回给模型，写清为什么比写不行有用）"
+      placeholder="理由（可留空；会作为 tool_result 回给模型）"
       disabled={busy || remaining === 0}
     />
-    <button onclick={() => decide(false)} disabled={busy || remaining === 0} class="deny">
-      拒绝
-    </button>
-    <button onclick={() => decide(true)} disabled={busy || remaining === 0} class="approve">
-      批准
-    </button>
+    <button onclick={() => decide(false)} disabled={busy || remaining === 0} class="btn-danger">拒绝</button>
+    <button onclick={() => decide(true)} disabled={busy || remaining === 0} class="approve">批准</button>
   </div>
 </article>
 
@@ -131,8 +123,11 @@
     border: 1px solid color-mix(in srgb, var(--warn) 30%, var(--line));
     border-left: 3px solid var(--warn);
     border-radius: var(--r3);
-    padding: var(--s3) var(--s4);
+    padding: var(--s4);
     background: color-mix(in srgb, var(--warn) 4%, var(--surface-1));
+    display: flex;
+    flex-direction: column;
+    gap: var(--s3);
   }
   /* 最后一分钟变红。审批卡是会过期的，而过期等于拒绝 */
   article.expiring {
@@ -146,39 +141,56 @@
   header {
     display: flex;
     justify-content: space-between;
-    align-items: baseline;
-    gap: 1rem;
+    align-items: flex-start;
+    gap: var(--s4);
+  }
+  .head-main {
+    min-width: 0;
   }
   h3 {
     margin: 0;
     font-size: 1rem;
   }
+  .meta {
+    margin: 2px 0 0;
+    font-size: 0.8rem;
+    display: flex;
+    gap: var(--s1);
+    flex-wrap: wrap;
+  }
   .clock {
-    font-variant-numeric: tabular-nums;
-    font-size: 0.85rem;
-    color: var(--fg-dim);
+    font-size: 0.84rem;
+    color: var(--warn);
+    white-space: nowrap;
+    font-weight: 500;
   }
   article.expiring .clock {
     color: var(--bad);
   }
-  .meta {
-    margin: 0.2rem 0 0.6rem;
-    font-size: 0.82rem;
-  }
   .intent {
     display: grid;
     grid-template-columns: auto 1fr;
-    gap: 0.25rem 0.75rem;
-    margin: 0 0 0.7rem;
+    gap: 0.3rem var(--s3);
+    margin: 0;
     font-size: 0.85rem;
+    padding: var(--s3);
+    background: var(--surface-2);
+    border-radius: var(--r2);
   }
   dt {
-    color: var(--fg-dim);
+    color: var(--fg-faint);
     white-space: nowrap;
+    font-size: 0.78rem;
+    padding-top: 2px;
   }
   dd {
     margin: 0;
     overflow-wrap: anywhere;
+    min-width: 0;
+  }
+  dd code {
+    font-size: 0.82rem;
+    color: var(--fg);
   }
   dd.block code {
     display: block;
@@ -186,50 +198,30 @@
     max-height: 12rem;
     overflow: auto;
   }
-  code {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
   .actions {
     display: flex;
-    gap: 0.5rem;
+    gap: var(--s2);
   }
-  input {
+  .actions input {
     flex: 1;
-    padding: 0.35rem 0.6rem;
-    border: 1px solid var(--line);
-    border-radius: var(--r2);
-    background: var(--bg);
-    color: var(--fg);
-    font: inherit;
-  }
-  button {
-    padding: 0.35rem 1rem;
-    border: 1px solid var(--line);
-    border-radius: var(--r2);
-    background: var(--bg);
-    color: var(--fg);
-    font: inherit;
-    cursor: pointer;
-  }
-  button:disabled {
-    cursor: default;
-    opacity: 0.5;
   }
   .approve {
     border-color: color-mix(in srgb, var(--ok) 50%, var(--line-strong));
     color: var(--ok);
   }
-  .deny {
-    border-color: color-mix(in srgb, var(--bad) 50%, var(--line-strong));
-    color: var(--bad);
+  .approve:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--ok) 12%, var(--surface-2));
+    color: var(--ok);
   }
-  .bad {
-    color: var(--bad);
+  .banner {
+    margin: 0;
   }
-  .muted {
-    color: var(--fg-dim);
-  }
-  .mono {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  @media (max-width: 700px) {
+    .actions {
+      flex-wrap: wrap;
+    }
+    .actions input {
+      flex-basis: 100%;
+    }
   }
 </style>

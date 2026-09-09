@@ -14,6 +14,7 @@
     title,
     danger = false,
     confirmText = '确认',
+    busy = false,
     onconfirm,
     children
   }: {
@@ -22,6 +23,8 @@
     /** 不可逆的操作用红色确认键。 */
     danger?: boolean;
     confirmText?: string;
+    /** 确认后的请求还在飞：按钮灰掉，免得点两次。 */
+    busy?: boolean;
     onconfirm: () => void;
     children?: import('svelte').Snippet;
   } = $props();
@@ -45,8 +48,8 @@
   <h2>{title}</h2>
   <div class="body">{@render children?.()}</div>
   <footer>
-    <button class="btn-ghost" onclick={() => done(false)}>取消</button>
-    <button class={danger ? 'btn-danger' : 'btn-primary'} onclick={() => done(true)}>
+    <button class="btn-ghost" onclick={() => done(false)} disabled={busy}>取消</button>
+    <button class={danger ? 'btn-danger' : 'btn-primary'} onclick={() => done(true)} disabled={busy}>
       {confirmText}
     </button>
   </footer>
@@ -55,12 +58,12 @@
 <style>
   dialog {
     width: min(28rem, calc(100vw - 2rem));
-    padding: var(--s4);
+    padding: var(--s5);
     border: 1px solid var(--line-strong);
     border-radius: var(--r3);
     background: var(--surface-1);
     color: var(--fg);
-    box-shadow: 0 24px 64px rgb(0 0 0 / 0.55);
+    box-shadow: var(--shadow-pop);
   }
   dialog::backdrop {
     background: rgb(0 0 0 / 0.55);
@@ -78,17 +81,20 @@
   }
   h2 {
     margin: 0 0 var(--s3);
-    font-size: 1rem;
+    font-size: 1.05rem;
   }
   .body {
     font-size: 0.86rem;
     line-height: 1.65;
     color: var(--fg-dim);
   }
+  .body :global(b) {
+    color: var(--fg);
+  }
   footer {
     display: flex;
     justify-content: flex-end;
     gap: var(--s2);
-    margin-top: var(--s4);
+    margin-top: var(--s5);
   }
 </style>

@@ -123,32 +123,35 @@
 
       <div class="body">
         <header>
-          <div class="kinds">
+          <div class="seg">
             {#each KINDS as k (k.id)}
-              <button
-                class="btn-sm"
-                class:on={step.kind === k.id}
-                title={k.hint}
-                onclick={() => (step.kind = k.id)}
-              >
+              <button class:on={step.kind === k.id} title={k.hint} onclick={() => (step.kind = k.id)}>
                 {k.label}
               </button>
             {/each}
           </div>
           <span class="spacer"></span>
-          <button class="btn-ghost btn-sm" disabled={i === 0} onclick={() => move(i, -1)} title="上移">↑</button>
+          <button class="btn-ghost btn-sm btn-icon" disabled={i === 0} onclick={() => move(i, -1)} title="上移" aria-label="上移">
+            <svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
+          </button>
           <button
-            class="btn-ghost btn-sm"
+            class="btn-ghost btn-sm btn-icon"
             disabled={i === comp.steps.length - 1}
             onclick={() => move(i, 1)}
-            title="下移">↓</button
+            title="下移"
+            aria-label="下移"
           >
+            <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12l7 7 7-7" /></svg>
+          </button>
           <button
-            class="btn-ghost btn-sm"
+            class="btn-ghost btn-sm btn-icon danger"
             disabled={comp.steps.length === 1}
             onclick={() => remove(i)}
-            title="删除这一步">✕</button
+            title="删除这一步"
+            aria-label="删除这一步"
           >
+            <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
+          </button>
         </header>
 
         <input class="title" bind:value={step.title} placeholder="这一步叫什么" />
@@ -308,9 +311,12 @@
 </div>
 
 <div class="add">
-  <span class="hint">加一步：</span>
+  <span class="hint">加一步</span>
   {#each KINDS as k (k.id)}
-    <button class="btn-sm" onclick={() => add(k.id)} title={k.hint}>+ {k.label}</button>
+    <button class="btn-sm" onclick={() => add(k.id)} title={k.hint}>
+      <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+      {k.label}
+    </button>
   {/each}
 </div>
 
@@ -362,32 +368,21 @@
     background: var(--surface-1);
     border: 1px solid var(--line);
     border-radius: var(--r3);
-    padding: var(--s3);
+    padding: var(--s3) var(--s4);
     margin-bottom: var(--s3);
     display: flex;
     flex-direction: column;
     gap: var(--s2);
+    min-width: 0;
+    transition: border-color 0.12s ease;
+  }
+  .body:focus-within {
+    border-color: var(--line-strong);
   }
   header {
     display: flex;
     align-items: center;
     gap: var(--s1);
-  }
-  .kinds {
-    display: flex;
-    gap: 2px;
-    background: var(--surface-2);
-    border-radius: var(--r2);
-    padding: 2px;
-  }
-  .kinds button {
-    border: none;
-    background: transparent;
-    color: var(--fg-dim);
-  }
-  .kinds button.on {
-    background: var(--surface-3);
-    color: var(--fg);
   }
   .title {
     font-size: 0.95rem;
@@ -398,6 +393,7 @@
   }
   .title:focus-visible {
     outline: none;
+    box-shadow: none;
     border-bottom: 1px solid var(--accent);
     border-radius: 0;
   }
@@ -480,6 +476,10 @@
     display: flex;
     gap: var(--s2);
     align-items: center;
-    padding-left: calc(2rem + var(--s3));
+    flex-wrap: wrap;
+    padding: var(--s3);
+    margin-left: calc(2rem + var(--s3));
+    border: 1px dashed var(--line-strong);
+    border-radius: var(--r3);
   }
 </style>

@@ -2,99 +2,169 @@
   /**
    * 执行记录。
    *
-   * 这是排查时最常来的地方，所以：状态可筛、行可扫、时间是相对的、
+   * 这是排查时最常来的地方，所以：状态可筛、任务可筛、行可扫、时间是相对的、
    * 失败原因**直接显示在列表里**——不该为了看一句「为什么失败」再点一次。
+   *
+   * 筛选在服务端做。以前是拉最近 100 条再在浏览器里过滤，翻不了页，
+   * 而且"失败 0"可能只是因为失败的那几条不在这 100 条里。
    */
-  import { listRuns, listTasks } from '$api/runs';
+  import { untrack } from 'svelte';
+  import { page } from '$app/state';
+  import { goto } from '$app/navigation';
+  import { deleteRun, listRuns, listTasks } from '$api/runs';
+  import { describeError } from '$api/client';
   import type { RunSummary } from '$api/types/RunSummary';
+  import type { RunStatus } from '$api/types/RunStatus';
   import type { TaskSummary } from '$api/types/TaskSummary';
   import PageHeader from '$lib/ui/PageHeader.svelte';
   import StatusPill from '$lib/ui/StatusPill.svelte';
   import Empty from '$lib/ui/Empty.svelte';
+  import Loading from '$lib/ui/Loading.svelte';
   import Confirm from '$lib/ui/Confirm.svelte';
-  import { api } from '$api/client';
-  import { ago, duration, money } from '$lib/ui/format';
+  import { toast, toastError } from '$lib/ui/toast.svelte';
+  import { ago, duration, money, stamp, triggerLabel, FAILED_STATUSES } from '$lib/ui/format';
 
-  const FILTERS = [
-    { key: 'all', label: '全部' },
-    { key: 'live', label: '进行中' },
-    { key: 'failed', label: '失败' },
-    { key: 'succeeded', label: '成功' }
-  ] as const;
+  type FilterKey = 'all' | 'live' | 'failed' | 'succeeded';
+  const FILTERS: Array<{ key: FilterKey; label: string; status: RunStatus[] | null }> = [
+    { key: 'all', label: '全部', status: null },
+    { key: 'live', label: '进行中', status: ['queued', 'running'] },
+    { key: 'failed', label: '失败', status: FAILED_STATUSES as RunStatus[] },
+    { key: 'succeeded', label: '成功', status: ['succeeded'] }
+  ];
+  const PAGE = 50;
 
-  let filter = $state<(typeof FILTERS)[number]['key']>('all');
+  const fromUrl = (key: string) => page.url.searchParams.get(key);
+  let filter = $state<FilterKey>(
+    (FILTERS.find((f) => f.key === fromUrl('status'))?.key ?? 'all') as FilterKey
+  );
+  let taskId = $state<string>(fromUrl('task') ?? '');
+
   let runs = $state<RunSummary[]>([]);
   let tasks = $state<TaskSummary[]>([]);
+  let nextCursor = $state<string | null>(null);
   let error = $state<string | null>(null);
+  let loaded = $state(false);
+  let loadingMore = $state(false);
 
-  async function refresh() {
+  const statusOf = (key: FilterKey) => FILTERS.find((f) => f.key === key)?.status ?? null;
+
+  /** 筛选变了就从第一页重来。 */
+  async function reload() {
+    loaded = false;
     try {
-      const [r, t] = await Promise.all([listRuns(100), listTasks()]);
+      const [r, t] = await Promise.all([
+        listRuns({ limit: PAGE, taskId: taskId || null, status: statusOf(filter) }),
+        listTasks()
+      ]);
       runs = r.items;
+      nextCursor = r.next_cursor ?? null;
       tasks = t.items;
       error = null;
     } catch (e) {
-      error = String(e);
+      error = describeError(e);
+    } finally {
+      loaded = true;
     }
   }
 
+  /**
+   * 轮询只刷第一页，**合并**进已有列表：已经翻出来的后几页保留，
+   * 已有的行按 id 更新状态，新出现的行插到最前。整表替换会把人翻到的位置冲掉。
+   */
+  async function poll() {
+    if (!loaded) return;
+    try {
+      const r = await listRuns({ limit: PAGE, taskId: taskId || null, status: statusOf(filter) });
+      const fresh = new Map(r.items.map((x) => [x.id, x]));
+      const kept = runs.map((x) => fresh.get(x.id) ?? x);
+      const known = new Set(kept.map((x) => x.id));
+      const added = r.items.filter((x) => !known.has(x.id));
+      runs = [...added, ...kept];
+      if (nextCursor === null) nextCursor = r.next_cursor ?? null;
+      error = null;
+    } catch (e) {
+      error = describeError(e);
+    }
+  }
+
+  async function more() {
+    if (!nextCursor || loadingMore) return;
+    loadingMore = true;
+    try {
+      const r = await listRuns({
+        limit: PAGE,
+        taskId: taskId || null,
+        status: statusOf(filter),
+        cursor: nextCursor
+      });
+      const known = new Set(runs.map((x) => x.id));
+      runs = [...runs, ...r.items.filter((x) => !known.has(x.id))];
+      nextCursor = r.next_cursor ?? null;
+    } catch (e) {
+      toastError(describeError(e));
+    } finally {
+      loadingMore = false;
+    }
+  }
+
+  // 筛选写回 URL：这一页的链接是拿来贴给同事的（"你看这几条失败"）
   $effect(() => {
-    void refresh();
-    const timer = setInterval(refresh, 4000);
+    const params = new URLSearchParams();
+    if (filter !== 'all') params.set('status', filter);
+    if (taskId) params.set('task', taskId);
+    const qs = params.toString();
+    const target = qs ? `/runs?${qs}` : '/runs';
+    // goto 之后 page.url 会变；不 untrack 的话这个 effect 会因此再跑一遍、多拉一次
+    const current = untrack(() => page.url.pathname + page.url.search);
+    if (current !== target) {
+      void goto(target, { replaceState: true, noScroll: true, keepFocus: true });
+    }
+    void reload();
+  });
+
+  $effect(() => {
+    const timer = setInterval(poll, 4000);
     return () => clearInterval(timer);
   });
 
-  const FAILED = ['failed', 'timed_out', 'budget_exceeded', 'resource_exceeded'];
-
-  const shown = $derived(
-    runs.filter((r) => {
-      if (filter === 'live') return r.status === 'running' || r.status === 'queued';
-      if (filter === 'failed') return FAILED.includes(r.status);
-      if (filter === 'succeeded') return r.status === 'succeeded';
-      return true;
-    })
-  );
-
   const taskName = (id: string) => tasks.find((t) => t.id === id)?.name ?? id.slice(0, 8);
+  const isLive = (r: RunSummary) => r.status === 'running' || r.status === 'queued';
 
   /**
    * 删执行记录。**连事件流和资源采样一起删，不可恢复。**
-   *
    * 只能删终态的：还在跑的 run，执行器仍在往它的事件流里写。
    */
   let pendingDelete = $state<RunSummary | null>(null);
   let busy = $state<string | null>(null);
 
-  const isLive = (r: RunSummary) => r.status === 'running' || r.status === 'queued';
-
   async function remove(run: RunSummary) {
     busy = run.id;
     try {
-      await api(`/api/v1/runs/${run.id}`, { method: 'DELETE' });
-      await refresh();
+      await deleteRun(run.id);
+      runs = runs.filter((r) => r.id !== run.id);
+      toast('已删除这条执行记录');
     } catch (e) {
-      error = String(e);
+      toastError(describeError(e));
     } finally {
       busy = null;
     }
   }
-
-  function count(key: (typeof FILTERS)[number]['key']): number {
-    if (key === 'live') return runs.filter((r) => ['running', 'queued'].includes(r.status)).length;
-    if (key === 'failed') return runs.filter((r) => FAILED.includes(r.status)).length;
-    if (key === 'succeeded') return runs.filter((r) => r.status === 'succeeded').length;
-    return runs.length;
-  }
 </script>
 
 <PageHeader title="执行记录">
+  {#snippet sub()}
+    <span>
+      已加载 {runs.length} 条{nextCursor ? '，还有更早的' : ''}
+    </span>
+  {/snippet}
   {#snippet actions()}
-    <div class="filters">
+    <select bind:value={taskId} class="task-pick" title="只看某个任务">
+      <option value="">所有任务</option>
+      {#each tasks as t (t.id)}<option value={t.id}>{t.name}</option>{/each}
+    </select>
+    <div class="seg">
       {#each FILTERS as f (f.key)}
-        <button class:on={filter === f.key} class="btn-ghost btn-sm" onclick={() => (filter = f.key)}>
-          {f.label}
-          <span class="faint">{count(f.key)}</span>
-        </button>
+        <button class:on={filter === f.key} onclick={() => (filter = f.key)}>{f.label}</button>
       {/each}
     </div>
   {/snippet}
@@ -116,101 +186,121 @@
       <b>{taskName(pendingDelete.task_id)}</b> · {ago(pendingDelete.created_at)} ·
       {money(pendingDelete.cost_usd)}
     </p>
-    <p>
-      连同它的完整事件流和资源采样一起删掉。那里面有成本记录和策略判决，是审计材料。
-    </p>
-    <p class="warn-line">删掉之后拿不回来。</p>
+    <p>连同它的完整事件流和资源采样一起删掉。那里面有成本记录和策略判决，是审计材料。</p>
+    <p class="warn-text">删掉之后拿不回来。</p>
   {/if}
 </Confirm>
 
-{#if error}<p class="bad">{error}</p>{/if}
+{#if error}<div class="banner">{error}</div>{/if}
 
-{#if shown.length}
-  <table>
-    <thead>
-      <tr>
-        <th>状态</th><th>任务</th><th>触发</th><th>耗时</th><th>花费</th><th>时间</th><th>id</th><th></th>
-      </tr>
-    </thead>
-    <tbody>
-      {#each shown as r (r.id)}
-        <tr onclick={() => (location.href = `/runs/${r.id}`)}>
-          <td><StatusPill status={r.status} /></td>
-          <td>
-            <a href="/runs/{r.id}">{taskName(r.task_id)}</a>
-            {#if r.dry_run}<span class="tag">影子</span>{/if}
-            {#if r.error}
-              <!-- 为了看一句「为什么失败」再点一次，是排查时最没必要的一次点击 -->
-              <div class="err" title={r.error}>{r.error}</div>
-            {/if}
-          </td>
-          <td class="faint">{r.trigger}</td>
-          <td class="faint">{duration(r.started_at, r.finished_at)}</td>
-          <td class="faint">{money(r.cost_usd)}</td>
-          <td class="faint">{ago(r.created_at)}</td>
-          <td class="mono faint">{r.id.slice(0, 8)}</td>
-          <td class="act">
-            <!-- 行本身是个链接，删除键不能顺带触发它 -->
-            <button
-              class="btn-ghost btn-sm danger"
-              title={isLive(r) ? '还在跑，先取消' : '删除这条执行记录'}
-              aria-label="删除执行记录"
-              disabled={isLive(r) || busy === r.id}
-              onclick={(e) => {
-                e.stopPropagation();
-                pendingDelete = r;
-              }}>✕</button
-            >
-          </td>
+{#if !loaded}
+  <div class="card"><Loading rows={5} /></div>
+{:else if runs.length}
+  <div class="card flush">
+    <table>
+      <thead>
+        <tr>
+          <th>状态</th>
+          <th>任务</th>
+          <th>触发</th>
+          <th>耗时</th>
+          <th>花费</th>
+          <th>时间</th>
+          <th>id</th>
+          <th class="act"></th>
         </tr>
-      {/each}
-    </tbody>
-  </table>
+      </thead>
+      <tbody>
+        {#each runs as r (r.id)}
+          <tr class="clickable" onclick={() => goto(`/runs/${r.id}`)}>
+            <td class="nowrap"><StatusPill status={r.status} /></td>
+            <td class="task-cell">
+              <a href="/runs/{r.id}" onclick={(e) => e.stopPropagation()}>{taskName(r.task_id)}</a>
+              {#if r.dry_run}<span class="tag">影子</span>{/if}
+              {#if r.error}
+                <!-- 为了看一句「为什么失败」再点一次，是排查时最没必要的一次点击 -->
+                <div class="err ellipsis" title={r.error}>{r.error}</div>
+              {/if}
+            </td>
+            <td class="faint nowrap">{triggerLabel(r.trigger)}</td>
+            <td class="faint nowrap">{duration(r.started_at, r.finished_at)}</td>
+            <td class="faint nowrap">{money(r.cost_usd)}</td>
+            <td class="faint nowrap" title={stamp(r.created_at)}>{ago(r.created_at)}</td>
+            <td class="mono faint" title={r.id}>{r.id.slice(0, 8)}</td>
+            <td class="act">
+              <!-- 行本身是个链接，删除键不能顺带触发它 -->
+              <button
+                class="btn-ghost btn-sm btn-icon danger"
+                title={isLive(r) ? '还在跑，先取消' : '删除这条执行记录'}
+                aria-label="删除执行记录"
+                disabled={isLive(r) || busy === r.id}
+                onclick={(e) => {
+                  e.stopPropagation();
+                  pendingDelete = r;
+                }}
+              >
+                <svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" /></svg>
+              </button>
+            </td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+    {#if nextCursor}
+      <div class="more">
+        <button class="btn-ghost btn-sm" onclick={more} disabled={loadingMore}>
+          {loadingMore ? '加载中…' : '加载更早的记录'}
+        </button>
+      </div>
+    {/if}
+  </div>
 {:else}
   <Empty
-    title={filter === 'all' ? '还没有执行记录' : '这个筛选下没有记录'}
-    hint={filter === 'all' ? '建一个任务，手动触发或配上定时。' : undefined}
+    title={filter === 'all' && !taskId ? '还没有执行记录' : '这个筛选下没有记录'}
+    hint={filter === 'all' && !taskId ? '建一个任务，手动触发或配上定时。' : '换个状态或任务看看。'}
   >
     {#snippet action()}
-      {#if filter === 'all'}<a class="btn" href="/tasks/new">新建任务</a>{/if}
+      {#if filter === 'all' && !taskId}
+        <a class="btn" href="/tasks/new">新建任务</a>
+      {:else}
+        <button
+          class="btn-ghost"
+          onclick={() => {
+            filter = 'all';
+            taskId = '';
+          }}>清除筛选</button
+        >
+      {/if}
     {/snippet}
   </Empty>
 {/if}
 
 <style>
-  .warn-line {
-    color: var(--warn);
-    margin-bottom: 0;
+  .task-pick {
+    max-width: 14rem;
   }
-  td.act {
-    width: 1%;
-    text-align: right;
+  .nowrap {
+    white-space: nowrap;
   }
-  td.act button.danger:hover:not(:disabled) {
-    color: var(--bad);
+  .task-cell {
+    max-width: 40ch;
   }
-  .filters {
-    display: flex;
-    gap: 2px;
-    background: var(--surface-1);
-    border: 1px solid var(--line);
-    border-radius: var(--r2);
-    padding: 2px;
+  .task-cell a {
+    font-weight: 500;
   }
-  .filters button.on {
-    background: var(--surface-3);
-    color: var(--fg);
-  }
-  tbody tr {
-    cursor: pointer;
+  .task-cell .tag {
+    margin-left: var(--s1);
   }
   .err {
     margin-top: 2px;
-    font-size: 0.78rem;
+    font-size: 0.76rem;
     color: var(--bad);
     max-width: 46ch;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  }
+  .more {
+    display: flex;
+    justify-content: center;
+    padding: var(--s2);
+    border-top: 1px solid var(--line);
   }
 </style>
