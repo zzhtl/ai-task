@@ -1,152 +1,247 @@
 <script lang="ts">
-  import { api, ApiFailure } from '$api/client';
-  import { session, logout } from '$lib/auth/session.svelte';
-  import { createTask, listRuns, listTasks, sampleTask, triggerRun } from '$api/runs';
+  /**
+   * 概览。
+   *
+   * 回答三个问题，按紧急程度排：**现在有什么在跑？有什么卡住等人？最近有什么坏了？**
+   * 一个执行控制平面的首页不该是"任务列表"——那是配置视角，不是运行视角。
+   */
+  import { listRuns, listTasks } from '$api/runs';
+  import { api } from '$api/client';
   import type { RunSummary } from '$api/types/RunSummary';
   import type { TaskSummary } from '$api/types/TaskSummary';
+  import PageHeader from '$lib/ui/PageHeader.svelte';
+  import StatusPill from '$lib/ui/StatusPill.svelte';
+  import Empty from '$lib/ui/Empty.svelte';
+  import { ago, money } from '$lib/ui/format';
 
-  let tasks = $state<TaskSummary[]>([]);
   let runs = $state<RunSummary[]>([]);
+  let tasks = $state<TaskSummary[]>([]);
+  let approvals = $state<Array<{ id: string; run_id: string; title: string; expires_in_s: number }>>(
+    []
+  );
   let error = $state<string | null>(null);
-  let busy = $state(false);
 
   async function refresh() {
-    error = null;
     try {
-      [tasks, runs] = await Promise.all([
-        listTasks().then((p) => p.items),
-        listRuns().then((p) => p.items)
+      const [r, t, a] = await Promise.all([
+        listRuns(40),
+        listTasks(),
+        api<{ items: typeof approvals }>('/api/v1/approvals').catch(() => ({ items: [] }))
       ]);
+      runs = r.items;
+      tasks = t.items;
+      approvals = a.items;
+      error = null;
     } catch (e) {
-      error = describe(e);
+      error = String(e);
     }
   }
 
-  async function act(fn: () => Promise<unknown>) {
-    busy = true;
-    error = null;
-    try {
-      await fn();
-      await refresh();
-    } catch (e) {
-      error = describe(e);
-    } finally {
-      busy = false;
-    }
-  }
-
-  function describe(e: unknown): string {
-    return e instanceof ApiFailure ? `[${e.code}] ${e.message}` : String(e);
-  }
-
-  const newTask = () =>
-    act(() => createTask(sampleTask(`统计行数-${new Date().toISOString().slice(11, 19)}`)));
-  const run = (task: TaskSummary) => act(() => triggerRun(task.id));
-
-  // 待审批数量做成角标：审批门挂着的时候 run 是停住的，
-  // 这件事必须在首页就看得见，而不是等人想起来去翻。
-  let pendingApprovals = $state(0);
+  // 首页是"现在怎么样"，必须自己刷新。3 秒是人盯着屏幕时不会觉得卡顿的节奏。
   $effect(() => {
-    const load = () =>
-      api<{ items: unknown[] }>('/api/v1/approvals')
-        .then((page) => (pendingApprovals = page.items.length))
-        .catch(() => {});
-    void load();
-    const timer = setInterval(load, 5000);
+    void refresh();
+    const timer = setInterval(refresh, 3000);
     return () => clearInterval(timer);
   });
 
-  refresh();
+  const live = $derived(runs.filter((r) => r.status === 'running' || r.status === 'queued'));
+  const recent = $derived(runs.filter((r) => !live.includes(r)).slice(0, 12));
+  const failed24h = $derived(
+    runs.filter(
+      (r) =>
+        ['failed', 'timed_out', 'budget_exceeded', 'resource_exceeded'].includes(r.status) &&
+        Date.now() - Date.parse(r.created_at) < 86_400_000
+    )
+  );
+  const spend24h = $derived(
+    runs
+      .filter((r) => Date.now() - Date.parse(r.created_at) < 86_400_000)
+      .reduce((sum, r) => sum + Number(r.cost_usd), 0)
+  );
+
+  const taskName = (id: string) => tasks.find((t) => t.id === id)?.name ?? id.slice(0, 8);
 </script>
 
-<header>
-  <div>
-    <h1>ai-task</h1>
-    <p class="sub">AI 执行控制平面</p>
-  </div>
-  <div class="tools">
-    {#if session.identity}
-      <span class="who muted">{session.identity.display_name}（{session.identity.role}）</span>
-    {/if}
-    {#if session.can('admin')}
-      <a class="btn" href="/users">用户</a>
-    {/if}
-    <a class="btn" href="/approvals" class:urgent={pendingApprovals > 0}>
-      待审批{#if pendingApprovals > 0}<span class="badge">{pendingApprovals}</span>{/if}
-    </a>
-    <button onclick={newTask} disabled={busy}>新建示例任务</button>
-    {#if session.identity}
-      <button onclick={() => logout().then(() => location.reload())}>退出</button>
-    {/if}
-  </div>
-</header>
+<PageHeader title="概览">
+  {#snippet actions()}
+    <a class="btn btn-primary" href="/tasks/new">新建任务</a>
+  {/snippet}
+</PageHeader>
 
 {#if error}<p class="bad">{error}</p>{/if}
 
-<section>
-  <h2>任务 <span class="muted">{tasks.length}</span></h2>
-  {#if tasks.length === 0}
-    <p class="muted">还没有任务。点右上角新建一个。</p>
-  {:else}
-    <ul class="list">
-      {#each tasks as task (task.id)}
-        <li>
-          <div>
-            <a href="/tasks/{task.id}"><strong>{task.name}</strong></a>
-            {#if !task.enabled}<span class="tag">已停用</span>{/if}
-            <div class="muted mono">{task.id}</div>
-          </div>
-          <button onclick={() => run(task)} disabled={busy || !task.enabled}>运行</button>
-        </li>
-      {/each}
-    </ul>
-  {/if}
+<section class="metrics">
+  <div class="metric">
+    <span class="k">正在执行</span>
+    <strong class:live={live.length > 0}>{live.length}</strong>
+  </div>
+  <div class="metric">
+    <span class="k">等待审批</span>
+    <strong class:alert={approvals.length > 0}>{approvals.length}</strong>
+  </div>
+  <div class="metric">
+    <span class="k">24h 失败</span>
+    <strong class:alert={failed24h.length > 0}>{failed24h.length}</strong>
+  </div>
+  <div class="metric">
+    <span class="k">24h 花费</span>
+    <strong>${spend24h.toFixed(4)}</strong>
+  </div>
+  <div class="metric">
+    <span class="k">任务</span>
+    <strong>{tasks.length}</strong>
+  </div>
 </section>
 
-<section>
-  <h2>最近执行</h2>
-  {#if runs.length === 0}
-    <p class="muted">还没有执行记录。</p>
-  {:else}
-    <ul class="list">
-      {#each runs as r (r.id)}
+{#if approvals.length}
+  <section class="block urgent">
+    <h2>等你点头</h2>
+    <ul class="approvals">
+      {#each approvals as a (a.id)}
         <li>
-          <div>
-            <a href="/runs/{r.id}"><span class="status {r.status}">{r.status}</span></a>
-            <span class="muted mono">{r.id.slice(0, 8)}</span>
-            {#if r.dry_run}<span class="tag">影子</span>{/if}
-            <div class="muted">
-              {new Date(r.created_at).toLocaleString()} · ${r.cost_usd} · {r.max_seq} 事件
-            </div>
-          </div>
-          <a class="btn" href="/runs/{r.id}">查看</a>
+          <a href="/runs/{a.run_id}">
+            <span class="dot running"></span>
+            <span class="title">{a.title}</span>
+            <span class="spacer"></span>
+            <span class="muted">剩余 {Math.floor(a.expires_in_s / 60)}:{String(a.expires_in_s % 60).padStart(2, '0')}</span>
+          </a>
         </li>
       {/each}
     </ul>
-  {/if}
-</section>
+  </section>
+{/if}
+
+<div class="cols">
+  <section class="block">
+    <h2>正在执行 <span class="faint">{live.length}</span></h2>
+    {#if live.length}
+      <ul class="runs">
+        {#each live as r (r.id)}
+          <li>
+            <a href="/runs/{r.id}">
+              <StatusPill status={r.status} />
+              <span class="task">{taskName(r.task_id)}</span>
+              <span class="spacer"></span>
+              <span class="mono faint">{r.id.slice(0, 8)}</span>
+              <span class="faint">{ago(r.started_at ?? r.created_at)}</span>
+            </a>
+          </li>
+        {/each}
+      </ul>
+    {:else}
+      <Empty title="现在没有东西在跑" hint="定时任务到点会自己启动，也可以手动触发。" />
+    {/if}
+  </section>
+
+  <section class="block">
+    <h2>最近结束</h2>
+    {#if recent.length}
+      <ul class="runs">
+        {#each recent as r (r.id)}
+          <li>
+            <a href="/runs/{r.id}">
+              <StatusPill status={r.status} />
+              <span class="task">{taskName(r.task_id)}</span>
+              <span class="spacer"></span>
+              <span class="faint">{money(r.cost_usd)}</span>
+              <span class="faint">{ago(r.finished_at ?? r.created_at)}</span>
+            </a>
+          </li>
+        {/each}
+      </ul>
+    {:else}
+      <Empty title="还没有执行记录">
+        {#snippet action()}
+          <a class="btn" href="/tasks/new">建一个任务</a>
+        {/snippet}
+      </Empty>
+    {/if}
+  </section>
+</div>
 
 <style>
-  .tools { display: flex; gap: 0.5rem; align-items: center; }
-  .who { font-size: 0.85rem; }
-  .btn.urgent { border-color: var(--bad); color: var(--bad); }
-  .badge {
-    display: inline-block;
-    min-width: 1.2rem;
-    margin-left: 0.35rem;
-    padding: 0 0.35rem;
-    border-radius: 999px;
-    background: var(--bad);
-    color: #fff;
+  .metrics {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: var(--s3);
+    margin-bottom: var(--s5);
+  }
+  .metric {
+    background: var(--surface-1);
+    border: 1px solid var(--line);
+    border-radius: var(--r3);
+    padding: var(--s3) var(--s4);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .k {
     font-size: 0.75rem;
-    text-align: center;
+    color: var(--fg-faint);
+  }
+  .metric strong {
+    font-size: 1.6rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+  .metric strong.live {
+    color: var(--st-running);
+  }
+  .metric strong.alert {
+    color: var(--bad);
   }
 
-  header { display: flex; align-items: flex-start; justify-content: space-between; }
-  h1 { margin: 0; font-size: 1.6rem; letter-spacing: -0.01em; }
-  .sub { margin: 0.25rem 0 0; color: var(--muted); }
-  h2 { font-size: 1rem; font-weight: 600; margin: 2rem 0 0.75rem; }
-  .list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 0.75rem; overflow: hidden; }
-  .list li { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.75rem 1rem; background: var(--card); }
-  .list li + li { border-top: 1px solid var(--line); }
+  .cols {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--s4);
+  }
+  @media (max-width: 1000px) {
+    .cols {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  .block {
+    background: var(--surface-1);
+    border: 1px solid var(--line);
+    border-radius: var(--r3);
+    padding: var(--s4);
+  }
+  .block.urgent {
+    border-color: color-mix(in srgb, var(--bad) 35%, var(--line));
+    margin-bottom: var(--s4);
+  }
+  h2 {
+    margin-bottom: var(--s3);
+  }
+
+  ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  ul a {
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+    padding: 0.45rem var(--s2);
+    border-radius: var(--r2);
+    font-size: 0.85rem;
+    transition: background 0.1s ease;
+  }
+  ul a:hover {
+    background: var(--surface-2);
+    color: var(--fg);
+  }
+  .task {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .approvals .title {
+    color: var(--fg);
+  }
 </style>

@@ -6,6 +6,8 @@
 import { api, ApiFailure } from '$api/client';
 
 export interface Identity {
+  /** 未登录探测路径下拿不到，所以是可空的。 */
+  email: string | null;
   display_name: string;
   role: 'viewer' | 'operator' | 'admin';
 }

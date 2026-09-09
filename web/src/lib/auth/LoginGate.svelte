@@ -44,12 +44,13 @@
 </script>
 
 {#if session.identity === undefined}
-  <!-- 还没问过后端。这里不渲染任何东西：闪一下登录页再跳走比多等 100ms 更糟 -->
-  <p class="muted">…</p>
+  <!-- 还没问过后端。不渲染登录页：闪一下再跳走比多等 100ms 更糟 -->
+  <div class="loading">…</div>
 {:else if session.identity === null && !session.authDisabled}
+  <div class="gate">
   <form onsubmit={submit}>
-    <h1>ai-task</h1>
-    <p class="sub">{firstRun ? '首次部署：创建管理员账号' : '登录'}</p>
+    <div class="brand"><span class="mark"></span><h1>ai-task</h1></div>
+    <p class="sub">{firstRun ? '首次部署：创建管理员账号' : 'AI 执行控制平面'}</p>
 
     <input type="email" bind:value={email} placeholder="邮箱" required autocomplete="username" />
     {#if firstRun}
@@ -65,44 +66,48 @@
 
     {#if error}<p class="bad">{error}</p>{/if}
 
-    <button type="submit" disabled={busy}>{firstRun ? '创建并登录' : '登录'}</button>
+    <button type="submit" class="btn-primary" disabled={busy}>
+      {firstRun ? '创建并登录' : '登录'}
+    </button>
     <button type="button" class="link" onclick={() => (firstRun = !firstRun)}>
       {firstRun ? '已有账号，去登录' : '还没有任何账号？创建管理员'}
     </button>
   </form>
+  </div>
 {:else}
   {@render children?.()}
 {/if}
 
 <style>
+  .gate {
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: var(--s4);
+  }
   form {
-    max-width: 22rem;
-    margin: 4rem auto;
+    width: min(360px, 100%);
     display: flex;
     flex-direction: column;
-    gap: 0.6rem;
-  }
-  h1 { margin: 0; font-size: 1.4rem; }
-  .sub { margin: 0 0 0.5rem; color: var(--muted); }
-  input {
-    padding: 0.5rem 0.7rem;
+    gap: var(--s3);
+    background: var(--surface-1);
     border: 1px solid var(--line);
-    border-radius: 0.4rem;
-    background: var(--card);
-    color: var(--fg);
-    font: inherit;
+    border-radius: var(--r4);
+    padding: var(--s6);
   }
-  button {
-    padding: 0.5rem;
-    border: 1px solid var(--line);
-    border-radius: 0.4rem;
-    background: var(--card);
-    color: var(--fg);
-    font: inherit;
-    cursor: pointer;
+  .brand { display: flex; align-items: center; gap: var(--s2); }
+  .mark {
+    width: 10px; height: 10px; border-radius: 3px;
+    background: var(--accent);
+    box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 60%, transparent);
   }
-  button[type='submit'] { border-color: var(--ok); color: var(--ok); }
-  button.link { border: none; background: none; color: var(--muted); font-size: 0.85rem; }
-  .bad { color: var(--bad); margin: 0; }
-  .muted { color: var(--muted); text-align: center; margin: 4rem; }
+  h1 { font-size: 1.15rem; }
+  .sub { margin: 0 0 var(--s2); color: var(--fg-dim); font-size: 0.85rem; }
+  form button[type='submit'] { justify-content: center; }
+  button.link {
+    border: none; background: none; color: var(--fg-faint);
+    font-size: 0.8rem; padding: 0; justify-content: center;
+  }
+  button.link:hover { background: none; color: var(--accent-fg); }
+  .loading { min-height: 100vh; display: grid; place-items: center; color: var(--fg-faint); }
 </style>
