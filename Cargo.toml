@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/ai-task-proto",
+    "crates/ai-task-core",
 ]
 resolver = "3"
 
