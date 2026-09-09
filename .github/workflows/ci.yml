@@ -27,6 +27,9 @@ jobs:
         working-directory: web
       - run: bun run check
         working-directory: web
+      # 编排的往返保真只有单测能守住：类型检查看不出"保存时少了个字段"
+      - run: bun run test
+        working-directory: web
       - run: bun run build
         working-directory: web
       - uses: actions/upload-artifact@v4
