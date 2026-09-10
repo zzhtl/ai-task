@@ -37,6 +37,20 @@ pub struct NewHost {
     pub private_key: String,
 }
 
+/// 改主机的入参。`private_key` 为 `None` 表示钥匙不动。
+///
+/// 编辑表单里永远看不到旧钥匙（读接口不返回它），所以"没填"必须是"不换"，
+/// 不能是"清掉"。
+#[derive(Debug, Clone)]
+pub struct HostUpdate {
+    pub name: String,
+    pub address: String,
+    pub port: i32,
+    pub username: String,
+    pub tags: Vec<String>,
+    pub private_key: Option<String>,
+}
+
 /// 一条资源采样点。
 #[derive(Debug, Clone, Copy)]
 pub struct MetricSample {
@@ -88,6 +102,155 @@ impl Store {
 
         tx.commit().await?;
         Ok(host_id)
+    }
+
+    /// 改一台主机。返回 `false` 表示这台主机不在这个 workspace 里。
+    pub async fn update_host(
+        &self,
+        workspace_id: WorkspaceId,
+        id: HostId,
+        update: HostUpdate,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.pool().begin().await?;
+        let row = sqlx::query(
+            "SELECT credential_id FROM hosts WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
+        )
+        .bind(uuid::Uuid::from(id))
+        .bind(uuid::Uuid::from(workspace_id))
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else {
+            return Ok(false);
+        };
+        let credential_id: Option<uuid::Uuid> = row.try_get("credential_id")?;
+
+        sqlx::query(
+            "UPDATE hosts SET name = $3, address = $4, port = $5, username = $6, tags = $7
+             WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(uuid::Uuid::from(id))
+        .bind(uuid::Uuid::from(workspace_id))
+        .bind(&update.name)
+        .bind(&update.address)
+        .bind(update.port)
+        .bind(&update.username)
+        .bind(&update.tags)
+        .execute(&mut *tx)
+        .await
+        .map_err(|err| duplicate(err, "host name", &update.name))?;
+
+        // 凭据的名字跟着主机名走：不跟的话，改完名再建一台原名的主机会撞唯一约束
+        let credential_name = format!("{}-ssh-key", update.name);
+        match (update.private_key.as_deref(), credential_id) {
+            (Some(key), Some(cred)) => {
+                let sealed = crate::crypto::seal(key.as_bytes());
+                sqlx::query(
+                    "UPDATE credentials
+                     SET name = $2, ciphertext = $3, nonce = $4, key_version = $5
+                     WHERE id = $1",
+                )
+                .bind(cred)
+                .bind(&credential_name)
+                .bind(&sealed.ciphertext)
+                .bind(&sealed.nonce)
+                .bind(sealed.key_version)
+                .execute(&mut *tx)
+                .await
+                .map_err(|err| duplicate(err, "host credential", &update.name))?;
+            }
+            (Some(key), None) => {
+                let cred = ai_task_proto::CredentialId::new();
+                let sealed = crate::crypto::seal(key.as_bytes());
+                sqlx::query(
+                    "INSERT INTO credentials
+                       (id, workspace_id, name, kind, ciphertext, nonce, key_version)
+                     VALUES ($1, $2, $3, 'ssh_key', $4, $5, $6)",
+                )
+                .bind(uuid::Uuid::from(cred))
+                .bind(uuid::Uuid::from(workspace_id))
+                .bind(&credential_name)
+                .bind(&sealed.ciphertext)
+                .bind(&sealed.nonce)
+                .bind(sealed.key_version)
+                .execute(&mut *tx)
+                .await
+                .map_err(|err| duplicate(err, "host credential", &update.name))?;
+                sqlx::query("UPDATE hosts SET credential_id = $2 WHERE id = $1")
+                    .bind(uuid::Uuid::from(id))
+                    .bind(uuid::Uuid::from(cred))
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            (None, Some(cred)) => {
+                sqlx::query("UPDATE credentials SET name = $2 WHERE id = $1")
+                    .bind(cred)
+                    .bind(&credential_name)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|err| duplicate(err, "host credential", &update.name))?;
+            }
+            (None, None) => {}
+        }
+
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// 删一台主机，连同它的 SSH 凭据。返回 `false` 表示不存在。
+    ///
+    /// 这里不查有没有任务还指着它——调用方先用 [`Store::tasks_using_host`] 问清楚，
+    /// 删除本身该是纯粹的。
+    pub async fn delete_host(
+        &self,
+        workspace_id: WorkspaceId,
+        id: HostId,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.pool().begin().await?;
+        let row = sqlx::query(
+            "DELETE FROM hosts WHERE id = $1 AND workspace_id = $2 RETURNING credential_id",
+        )
+        .bind(uuid::Uuid::from(id))
+        .bind(uuid::Uuid::from(workspace_id))
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else {
+            return Ok(false);
+        };
+        if let Some(cred) = row.try_get::<Option<uuid::Uuid>, _>("credential_id")? {
+            sqlx::query("DELETE FROM credentials WHERE id = $1")
+                .bind(cred)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// 当前版本里有步骤钉在这台主机上的任务名，按名字排。
+    ///
+    /// 只看当前版本：老版本指着它没关系，新 run 绑的是当前版本。
+    pub async fn tasks_using_host(
+        &self,
+        workspace_id: WorkspaceId,
+        id: HostId,
+    ) -> Result<Vec<String>, StoreError> {
+        let rows = sqlx::query(
+            r#"SELECT t.name FROM tasks t
+               JOIN task_versions v ON v.id = t.current_version_id
+               WHERE t.workspace_id = $1
+                 AND jsonb_path_exists(
+                       v.dag_spec,
+                       '$.nodes[*].host ? (@.on == "host" && @.host_id == $id)',
+                       jsonb_build_object('id', $2::text))
+               ORDER BY t.name"#,
+        )
+        .bind(uuid::Uuid::from(workspace_id))
+        .bind(id.to_string())
+        .fetch_all(self.pool())
+        .await?;
+        rows.iter()
+            .map(|row| row.try_get("name").map_err(StoreError::from))
+            .collect()
     }
 
     pub async fn get_host(

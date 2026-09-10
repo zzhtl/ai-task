@@ -153,19 +153,13 @@ pub async fn create_rule(
             rule,
             global,
             priority,
-        } => {
-            let spec = serde_json::to_value(&rule)
-                .map_err(|err| validation("match", &format!("策略无法序列化：{err}")))?;
-
-            // 立刻试编译一次。坏正则必须在保存时就被拒——等到凌晨两点
-            // 工具调用时才发现策略集装不起来，那时整个 run 都会被拒。
-            let probe: PolicyRule = serde_json::from_value(with_probe_identity(spec.clone()))
-                .map_err(|err| validation("match", &format!("策略结构不合法：{err}")))?;
-            ai_task_core::PolicySet::compile(vec![probe], ai_task_core::DefaultPolicy::AllowAll)
-                .map_err(|err| validation("match", &err.to_string()))?;
-
-            (name, RuleKind::Policy, spec, global, priority)
-        }
+        } => (
+            name,
+            RuleKind::Policy,
+            compiled_policy_spec(&rule)?,
+            global,
+            priority,
+        ),
     };
 
     let id = state
@@ -202,6 +196,164 @@ pub async fn create_rule(
         StatusCode::CREATED,
         Json(RuleCreated { id: id.to_string() }),
     ))
+}
+
+/// 硬策略的 spec：序列化，并**立刻试编译一次**。
+///
+/// 坏正则必须在保存时就被拒——等到凌晨两点工具调用时才发现策略集装不起来，
+/// 那时整个 run 都会被拒。
+fn compiled_policy_spec(rule: &PolicyRuleBody) -> Result<serde_json::Value, AppError> {
+    let spec = serde_json::to_value(rule)
+        .map_err(|err| validation("match", &format!("策略无法序列化：{err}")))?;
+    let probe: PolicyRule = serde_json::from_value(with_probe_identity(spec.clone()))
+        .map_err(|err| validation("match", &format!("策略结构不合法：{err}")))?;
+    ai_task_core::PolicySet::compile(vec![probe], ai_task_core::DefaultPolicy::AllowAll)
+        .map_err(|err| validation("match", &err.to_string()))?;
+    Ok(spec)
+}
+
+/// `PUT /api/v1/rules/{id}` 的报文。
+///
+/// **没有 `name`**：任务是按名字挂规则的，改名等于把它从所有任务上悄悄摘下来。
+/// 种类也必须和原来一致——软规则和硬策略的 spec 结构不同，换种类等于删了重建。
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum UpdateRule {
+    Prompt {
+        text: String,
+        #[serde(default)]
+        global: bool,
+        #[serde(default)]
+        priority: i32,
+    },
+    Policy {
+        #[serde(flatten)]
+        rule: PolicyRuleBody,
+        #[serde(default)]
+        global: bool,
+        #[serde(default)]
+        priority: i32,
+    },
+}
+
+fn kind_label(kind: &str) -> &'static str {
+    if kind == "policy" {
+        "硬策略"
+    } else {
+        "软规则"
+    }
+}
+
+/// `PUT /api/v1/rules/{id}`
+pub async fn update_rule(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+    Json(body): Json<UpdateRule>,
+) -> Result<impl IntoResponse, AppError> {
+    let rule_id = ai_task_proto::RuleId(id);
+    let Some(existing) = state.store.get_rule(state.workspace_id, rule_id).await? else {
+        return Err(AppError::NotFound(format!("规则 {id} 不存在")));
+    };
+
+    let (kind, spec, global, priority) = match body {
+        UpdateRule::Prompt {
+            text,
+            global,
+            priority,
+        } => {
+            if text.trim().is_empty() {
+                return Err(validation("text", "软规则的文本不能为空"));
+            }
+            (
+                "prompt",
+                serde_json::json!({ "text": text }),
+                global,
+                priority,
+            )
+        }
+        UpdateRule::Policy {
+            rule,
+            global,
+            priority,
+        } => ("policy", compiled_policy_spec(&rule)?, global, priority),
+    };
+    if existing.kind != kind {
+        return Err(validation(
+            "kind",
+            &format!(
+                "这是一条{}，不能改成{}。要换种类就删了重建",
+                kind_label(&existing.kind),
+                kind_label(kind)
+            ),
+        ));
+    }
+
+    state
+        .store
+        .update_rule(state.workspace_id, rule_id, &spec, global, priority)
+        .await?;
+
+    // 策略是护栏。"这条 deny 是什么时候被改成 allow 的"必须查得到，所以前后都记
+    state
+        .audit(
+            "rule.update",
+            "rule",
+            id.to_string(),
+            Some(serde_json::json!({
+                "spec": existing.spec,
+                "scope": existing.scope,
+                "priority": existing.priority,
+            })),
+            Some(serde_json::json!({
+                "name": existing.name,
+                "spec": spec,
+                "scope": if global { "global" } else { "task" },
+                "priority": priority,
+            })),
+        )
+        .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/v1/rules/{id}`
+///
+/// 还有任务挂着它时拒绝（409）并列出任务名。删掉之后审批记录里的 `rule_id`
+/// 会置空，历史 run 的 `rules_hash` 也解释不了了——确认框里要把这两件事说出来。
+pub async fn delete_rule(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<impl IntoResponse, AppError> {
+    let rule_id = ai_task_proto::RuleId(id);
+    let Some(existing) = state.store.get_rule(state.workspace_id, rule_id).await? else {
+        return Err(AppError::NotFound(format!("规则 {id} 不存在")));
+    };
+    let mounted = state
+        .store
+        .tasks_using_rule(state.workspace_id, &existing.name)
+        .await?;
+    if !mounted.is_empty() {
+        return Err(AppError::Conflict(format!(
+            "还有任务挂着这条规则：{}。先在任务里取消挂载再删",
+            mounted.join("、")
+        )));
+    }
+    if !state.store.delete_rule(state.workspace_id, rule_id).await? {
+        return Err(AppError::NotFound(format!("规则 {id} 不存在")));
+    }
+    state
+        .audit(
+            "rule.delete",
+            "rule",
+            id.to_string(),
+            Some(serde_json::json!({
+                "name": existing.name,
+                "kind": existing.kind,
+                "spec": existing.spec,
+            })),
+            None,
+        )
+        .await;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `POST /api/v1/skills`

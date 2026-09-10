@@ -86,6 +86,14 @@ pub struct NewUser {
     pub role: Role,
 }
 
+/// 改用户资料的入参。`password` 为 `None` 表示口令不动。
+#[derive(Debug, Clone)]
+pub struct UserUpdate {
+    pub email: String,
+    pub display_name: String,
+    pub password: Option<String>,
+}
+
 impl Store {
     /// 建一个用户并绑定角色。
     pub async fn create_user(&self, new: NewUser) -> Result<UserId, StoreError> {
@@ -338,6 +346,62 @@ impl Store {
         }
         tx.commit().await?;
         Ok(true)
+    }
+
+    /// 改邮箱、显示名，可选换口令。返回 `false` 表示用户不在这个 workspace 里。
+    ///
+    /// **不吊销会话**：改口令是常规操作，不该把人踢下线；口令泄漏时用
+    /// [`Store::revoke_sessions`] 明确地踢。
+    pub async fn update_user(
+        &self,
+        workspace_id: WorkspaceId,
+        user_id: UserId,
+        update: UserUpdate,
+    ) -> Result<bool, StoreError> {
+        let hash = update
+            .password
+            .as_deref()
+            .map(hash_password)
+            .transpose()
+            .map_err(|detail| StoreError::Corrupt {
+                what: "password",
+                detail,
+            })?;
+        let done = sqlx::query(
+            "UPDATE users
+             SET email = $3, display_name = $4, password_hash = COALESCE($5, password_hash)
+             WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(uuid::Uuid::from(user_id))
+        .bind(uuid::Uuid::from(workspace_id))
+        .bind(update.email.trim().to_lowercase())
+        .bind(&update.display_name)
+        .bind(hash)
+        .execute(self.pool())
+        .await
+        .map_err(|err| match err.as_database_error().and_then(|e| e.code()) {
+            Some(code) if code == "23505" => StoreError::Conflict {
+                what: "user",
+                id: update.email.clone(),
+            },
+            _ => StoreError::from(err),
+        })?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    /// 删一个用户。会话和角色绑定由外键级联带走；他建过的任务、做过的审批
+    /// 和审计条目留下，只是 `created_by` / `actor_id` 变成空。
+    pub async fn delete_user(
+        &self,
+        workspace_id: WorkspaceId,
+        user_id: UserId,
+    ) -> Result<bool, StoreError> {
+        let done = sqlx::query("DELETE FROM users WHERE id = $1 AND workspace_id = $2")
+            .bind(uuid::Uuid::from(user_id))
+            .bind(uuid::Uuid::from(workspace_id))
+            .execute(self.pool())
+            .await?;
+        Ok(done.rows_affected() > 0)
     }
 
     /// 吊销一个用户的所有会话，返回吊销掉的条数。

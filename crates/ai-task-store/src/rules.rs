@@ -130,19 +130,87 @@ impl Store {
         .fetch_all(self.pool())
         .await?;
 
-        rows.into_iter()
-            .map(|row| {
-                Ok(RuleRow {
-                    id: RuleId(row.try_get("id")?),
-                    name: row.try_get("name")?,
-                    kind: row.try_get("kind")?,
-                    scope: row.try_get("scope")?,
-                    spec: row.try_get("spec")?,
-                    priority: row.try_get("priority")?,
-                    enabled: row.try_get("enabled")?,
-                    created_at: row.try_get("created_at")?,
-                })
-            })
+        rows.iter().map(rule_from_row).collect()
+    }
+
+    /// 取一条规则。`None` 表示不在这个 workspace 里。
+    pub async fn get_rule(
+        &self,
+        workspace_id: WorkspaceId,
+        id: RuleId,
+    ) -> Result<Option<RuleRow>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, name, kind, scope, spec, priority, enabled, created_at
+             FROM rules WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(uuid::Uuid::from(workspace_id))
+        .bind(uuid::Uuid::from(id))
+        .fetch_optional(self.pool())
+        .await?;
+        row.as_ref().map(rule_from_row).transpose()
+    }
+
+    /// 改一条规则的内容、范围和优先级。返回 `false` 表示不存在。
+    ///
+    /// **名字和种类不能改。**任务是按名字挂规则的，改名等于把它从所有任务上
+    /// 摘下来；软规则和硬策略的 spec 结构不同，换种类等于删了重建。
+    pub async fn update_rule(
+        &self,
+        workspace_id: WorkspaceId,
+        id: RuleId,
+        spec: &serde_json::Value,
+        global: bool,
+        priority: i32,
+    ) -> Result<bool, StoreError> {
+        let done = sqlx::query(
+            "UPDATE rules SET spec = $3, scope = $4, priority = $5, updated_at = now()
+             WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(uuid::Uuid::from(id))
+        .bind(uuid::Uuid::from(workspace_id))
+        .bind(spec)
+        .bind(if global { "global" } else { "task" })
+        .bind(priority)
+        .execute(self.pool())
+        .await?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    /// 删一条规则。返回 `false` 表示不存在。
+    ///
+    /// 审批记录里的 `rule_id` 会被置空（外键 SET NULL），历史 run 的
+    /// `rules_hash` 从此解释不了——调用方要把这件事摆在确认框里。
+    pub async fn delete_rule(
+        &self,
+        workspace_id: WorkspaceId,
+        id: RuleId,
+    ) -> Result<bool, StoreError> {
+        let done = sqlx::query("DELETE FROM rules WHERE id = $1 AND workspace_id = $2")
+            .bind(uuid::Uuid::from(id))
+            .bind(uuid::Uuid::from(workspace_id))
+            .execute(self.pool())
+            .await?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    /// 当前版本挂着这条规则（按名字）的任务名，按名字排。
+    pub async fn tasks_using_rule(
+        &self,
+        workspace_id: WorkspaceId,
+        name: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT t.name FROM tasks t
+             JOIN task_versions v ON v.id = t.current_version_id
+             WHERE t.workspace_id = $1 AND $2 = ANY(v.rules)
+             ORDER BY t.name",
+        )
+        .bind(uuid::Uuid::from(workspace_id))
+        .bind(name)
+        .fetch_all(self.pool())
+        .await?;
+        rows.iter()
+            .map(|row| row.try_get("name").map_err(StoreError::from))
             .collect()
     }
 
@@ -312,6 +380,19 @@ impl Store {
         .await?;
         rows.into_iter().map(skill_from_row).collect()
     }
+}
+
+fn rule_from_row(row: &sqlx::postgres::PgRow) -> Result<RuleRow, StoreError> {
+    Ok(RuleRow {
+        id: RuleId(row.try_get("id")?),
+        name: row.try_get("name")?,
+        kind: row.try_get("kind")?,
+        scope: row.try_get("scope")?,
+        spec: row.try_get("spec")?,
+        priority: row.try_get("priority")?,
+        enabled: row.try_get("enabled")?,
+        created_at: row.try_get("created_at")?,
+    })
 }
 
 fn skill_from_row(row: sqlx::postgres::PgRow) -> Result<Skill, StoreError> {

@@ -1,7 +1,7 @@
 //! 主机与资源采样接口。
 
-use ai_task_proto::{FieldError, Page, RunId};
-use ai_task_store::NewHost;
+use ai_task_proto::{FieldError, HostId, Page, RunId};
+use ai_task_store::{HostUpdate, NewHost};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::{Json, response::IntoResponse};
@@ -38,30 +38,46 @@ pub struct HostCreated {
     pub id: String,
 }
 
-pub async fn create(
-    State(state): State<AppState>,
-    Json(body): Json<CreateHost>,
-) -> Result<impl IntoResponse, AppError> {
-    if body.name.trim().is_empty() {
+/// 建和改共用的字段检查。
+fn check_fields(
+    name: &str,
+    address: &str,
+    username: &str,
+    tags: &[String],
+) -> Result<(), AppError> {
+    if name.trim().is_empty() {
         return Err(validation("name", "主机名不能为空"));
     }
-    if body.address.trim().is_empty() {
+    if address.trim().is_empty() {
         return Err(validation("address", "地址不能为空"));
     }
-    if body.username.trim().is_empty() {
+    if username.trim().is_empty() {
         return Err(validation("username", "登录用户名不能为空"));
     }
-    // 私钥格式在这里判掉，比连接失败时再报清楚得多：那时候错误来自
-    // russh，混在"网络不通/认证失败/密钥格式不对"里分不出来
-    if !body.private_key.contains("PRIVATE KEY") {
+    if tags.iter().any(|t| t.trim().is_empty()) {
+        return Err(validation("tags", "tag 不能是空字符串"));
+    }
+    Ok(())
+}
+
+/// 私钥格式在这里判掉，比连接失败时再报清楚得多：那时候错误来自
+/// russh，混在"网络不通/认证失败/密钥格式不对"里分不出来。
+fn check_private_key(key: &str) -> Result<(), AppError> {
+    if !key.contains("PRIVATE KEY") {
         return Err(validation(
             "private_key",
             "看起来不是 OpenSSH 私钥。要的是私钥文件的内容（-----BEGIN ... PRIVATE KEY-----），不是公钥、也不是路径",
         ));
     }
-    if body.tags.iter().any(|t| t.trim().is_empty()) {
-        return Err(validation("tags", "tag 不能是空字符串"));
-    }
+    Ok(())
+}
+
+pub async fn create(
+    State(state): State<AppState>,
+    Json(body): Json<CreateHost>,
+) -> Result<impl IntoResponse, AppError> {
+    check_fields(&body.name, &body.address, &body.username, &body.tags)?;
+    check_private_key(&body.private_key)?;
 
     let id = state
         .store
@@ -103,6 +119,108 @@ pub async fn create(
         StatusCode::CREATED,
         Json(HostCreated { id: id.to_string() }),
     ))
+}
+
+/// `PUT /api/v1/hosts/{id}`
+///
+/// 整体替换连接信息；`private_key` 留空或不给表示钥匙不动——编辑表单里
+/// 永远看不到旧钥匙，所以"没填"只能是"不换"。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateHost {
+    pub name: String,
+    pub address: String,
+    #[serde(default = "default_port")]
+    pub port: u16,
+    pub username: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub private_key: Option<String>,
+}
+
+pub async fn update(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+    Json(body): Json<UpdateHost>,
+) -> Result<impl IntoResponse, AppError> {
+    check_fields(&body.name, &body.address, &body.username, &body.tags)?;
+    let private_key = body.private_key.filter(|k| !k.trim().is_empty());
+    if let Some(key) = &private_key {
+        check_private_key(key)?;
+    }
+    let key_replaced = private_key.is_some();
+
+    let changed = state
+        .store
+        .update_host(
+            state.workspace_id,
+            HostId(id),
+            HostUpdate {
+                name: body.name.trim().to_owned(),
+                address: body.address.trim().to_owned(),
+                port: i32::from(body.port),
+                username: body.username.trim().to_owned(),
+                tags: body.tags.clone(),
+                private_key,
+            },
+        )
+        .await
+        .map_err(|err| match err {
+            ai_task_store::StoreError::Conflict { .. } => {
+                AppError::Conflict(format!("主机 `{}` 已存在", body.name.trim()))
+            }
+            other => AppError::Store(other),
+        })?;
+    if !changed {
+        return Err(AppError::NotFound(format!("主机 {id} 不存在")));
+    }
+
+    state
+        .audit(
+            "host.update",
+            "host",
+            id.to_string(),
+            None,
+            Some(serde_json::json!({
+                "name": body.name.trim(),
+                "address": body.address.trim(),
+                "port": body.port,
+                "username": body.username.trim(),
+                "tags": body.tags,
+                "key_replaced": key_replaced,
+            })),
+        )
+        .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/v1/hosts/{id}`
+///
+/// 还有任务的步骤钉在这台机器上时拒绝（409）并列出任务名：
+/// 让它们在凌晨两点跑到一台不存在的机器上，比现在多点两下要糟得多。
+pub async fn delete(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<impl IntoResponse, AppError> {
+    let host_id = HostId(id);
+    let pinned = state
+        .store
+        .tasks_using_host(state.workspace_id, host_id)
+        .await?;
+    if !pinned.is_empty() {
+        return Err(AppError::Conflict(format!(
+            "还有任务的步骤钉在这台机器上：{}。先把它们改到别的机器再删",
+            pinned.join("、")
+        )));
+    }
+    if !state.store.delete_host(state.workspace_id, host_id).await? {
+        return Err(AppError::NotFound(format!("主机 {id} 不存在")));
+    }
+    state
+        .audit("host.delete", "host", id.to_string(), None, None)
+        .await;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// 主机的对外形状。**没有凭据字段，且不会有。**

@@ -58,6 +58,7 @@ fn build_router(state: AppState) -> Router {
         .route("/runs/{id}/metrics", get(hosts::metrics))
         .route("/runs/{id}/drift", get(drift::compare))
         .route("/hosts", get(hosts::list).post(hosts::create))
+        .route("/hosts/{id}", put(hosts::update).delete(hosts::delete))
         .route("/schedules", get(schedules::list).post(schedules::create))
         .route(
             "/schedules/{id}",
@@ -74,6 +75,7 @@ fn build_router(state: AppState) -> Router {
         .route("/auth/me", get(auth::me))
         .route("/auth/bootstrap", post(auth::bootstrap))
         .route("/users", get(users::list).post(users::create))
+        .route("/users/{id}", put(users::update).delete(users::delete))
         .route("/users/{id}/role", axum::routing::put(users::set_role))
         .route(
             "/users/{id}/disabled",
@@ -82,6 +84,10 @@ fn build_router(state: AppState) -> Router {
         .route("/users/{id}/revoke-sessions", post(users::revoke_sessions))
         .route("/approvals/{id}/decide", post(approvals::decide))
         .route("/rules", get(rules::list_rules).post(rules::create_rule))
+        .route(
+            "/rules/{id}",
+            put(rules::update_rule).delete(rules::delete_rule),
+        )
         .route("/rules/{id}/enabled", put(rules::set_rule_enabled))
         .route("/skills", get(rules::list_skills).post(rules::create_skill));
 

@@ -9,7 +9,10 @@ use ai_task_proto::{
     AiNode, DagSpec, ExecutorKind, NodeConfig, NodeKey, NodeSpec, OnFailure, RetryPolicy,
     RunEventBody, RunStatus, TriggerKind, UsdMicros, WorkspaceId,
 };
-use ai_task_store::{NewRun, NewTask, PendingEvent, RunOutcome, StoreError};
+use ai_task_store::{
+    HostUpdate, NewHost, NewRule, NewRun, NewTask, NewUser, PendingEvent, Role, RuleKind,
+    RunOutcome, StoreError, UserUpdate,
+};
 
 fn spec(prompt: &str) -> DagSpec {
     DagSpec {
@@ -472,3 +475,349 @@ db_test!(run_listing_filters_by_status, |f| {
         .expect("空筛选");
     assert!(none.is_empty());
 });
+
+// ---------------------------------------------------------------- 主机 / 规则 / 用户的改与删
+
+const KEY_1: &str =
+    "-----BEGIN OPENSSH PRIVATE KEY-----\nkey-one\n-----END OPENSSH PRIVATE KEY-----";
+const KEY_2: &str =
+    "-----BEGIN OPENSSH PRIVATE KEY-----\nkey-two\n-----END OPENSSH PRIVATE KEY-----";
+
+fn host_update(name: &str, key: Option<&str>) -> HostUpdate {
+    HostUpdate {
+        name: name.into(),
+        address: "10.0.0.2".into(),
+        port: 2222,
+        username: "deploy".into(),
+        tags: vec!["staging".into()],
+        private_key: key.map(str::to_owned),
+    }
+}
+
+/// 私钥落库前要加密，没装 KEK 会 panic。两个用例都会调；OnceLock 只装一次，
+/// 第二次返回 Err 是预期的，不是错误。
+fn install_test_kek() {
+    let _ = ai_task_store::crypto::init(&"ab".repeat(32));
+}
+
+async fn seed_host(f: &common::Fixture, name: &str) -> ai_task_proto::HostId {
+    install_test_kek();
+    f.store
+        .create_host(NewHost {
+            workspace_id: f.workspace,
+            name: name.into(),
+            address: "10.0.0.1".into(),
+            port: 22,
+            username: "root".into(),
+            tags: vec!["prod".into()],
+            private_key: KEY_1.into(),
+        })
+        .await
+        .expect("建主机")
+}
+
+db_test!(
+    editing_a_host_keeps_the_key_unless_a_new_one_is_given,
+    |f| {
+        let id = seed_host(&f, "h1").await;
+
+        assert!(
+            f.store
+                .update_host(f.workspace, id, host_update("h1-renamed", None))
+                .await
+                .expect("改主机")
+        );
+        let (host, key) = f.store.get_host(f.workspace, id).await.expect("读回");
+        assert_eq!(host.name, "h1-renamed");
+        assert_eq!(host.port, 2222);
+        assert_eq!(host.tags, vec!["staging".to_string()]);
+        assert!(key.contains("key-one"), "没给新钥匙就不能动旧钥匙");
+
+        f.store
+            .update_host(f.workspace, id, host_update("h1-renamed", Some(KEY_2)))
+            .await
+            .expect("换钥匙");
+        let (_, key) = f.store.get_host(f.workspace, id).await.expect("读回");
+        assert!(key.contains("key-two"));
+
+        // 改完名之后，原来的名字要能再用：凭据名跟着主机名走
+        seed_host(&f, "h1").await;
+
+        // 别的 workspace 改不到、删不掉
+        let other = f.new_workspace().await;
+        assert!(
+            !f.store
+                .update_host(other, id, host_update("x", None))
+                .await
+                .expect("跨租户改")
+        );
+        assert!(!f.store.delete_host(other, id).await.expect("跨租户删"));
+
+        assert!(f.store.delete_host(f.workspace, id).await.expect("删"));
+        assert!(matches!(
+            f.store.get_host(f.workspace, id).await,
+            Err(StoreError::NotFound { .. })
+        ));
+        assert!(
+            !f.store
+                .delete_host(f.workspace, id)
+                .await
+                .expect("再删一次")
+        );
+    }
+);
+
+db_test!(
+    tasks_pinned_to_a_host_are_listed_before_it_can_be_deleted,
+    |f| {
+        let id = seed_host(&f, "pinned-host").await;
+        let spec: ai_task_proto::DagSpec = serde_json::from_value(serde_json::json!({
+        "nodes": [{
+            "key": "run",
+            "config": { "kind": "shell", "command": "true" },
+            "retry": { "max_attempts": 1, "backoff_ms": 1000, "backoff_factor": 2, "feed_error_to_model": false },
+            "on_failure": "fail_fast",
+            "host": { "on": "host", "host_id": id }
+        }],
+        "edges": []
+    }))
+    .expect("spec");
+        f.store
+            .create_task(NewTask {
+                workspace_id: f.workspace,
+                name: "pinned".into(),
+                description: None,
+                spec,
+                rules: vec![],
+                rules_hash: "h".into(),
+                enabled: true,
+            })
+            .await
+            .expect("建任务");
+        // 一个不相关的任务，不该出现在结果里
+        f.seed_task().await;
+
+        assert_eq!(
+            f.store
+                .tasks_using_host(f.workspace, id)
+                .await
+                .expect("查引用"),
+            vec!["pinned".to_string()]
+        );
+        assert!(
+            f.store
+                .tasks_using_host(f.workspace, ai_task_proto::HostId::new())
+                .await
+                .expect("无引用")
+                .is_empty()
+        );
+    }
+);
+
+db_test!(
+    rules_can_be_edited_and_deleted_and_mounting_tasks_are_found,
+    |f| {
+        let id = f
+            .store
+            .create_rule(NewRule {
+                workspace_id: f.workspace,
+                name: "no-restart".into(),
+                spec: serde_json::json!({ "text": "不要重启" }),
+                kind: RuleKind::Prompt,
+                global: false,
+                priority: 0,
+                enabled: true,
+            })
+            .await
+            .expect("建规则");
+
+        assert!(
+            f.store
+                .update_rule(
+                    f.workspace,
+                    id,
+                    &serde_json::json!({ "text": "先报告再重启" }),
+                    true,
+                    5
+                )
+                .await
+                .expect("改规则")
+        );
+        let row = f
+            .store
+            .get_rule(f.workspace, id)
+            .await
+            .expect("读")
+            .expect("在");
+        assert_eq!(row.name, "no-restart", "名字不能被改动");
+        assert_eq!(row.spec["text"], "先报告再重启");
+        assert_eq!(row.scope, "global");
+        assert_eq!(row.priority, 5);
+
+        f.store
+            .create_task(NewTask {
+                workspace_id: f.workspace,
+                name: "mounts-it".into(),
+                description: None,
+                spec: common::minimal_spec(),
+                rules: vec!["no-restart".into()],
+                rules_hash: "h".into(),
+                enabled: true,
+            })
+            .await
+            .expect("建任务");
+        assert_eq!(
+            f.store
+                .tasks_using_rule(f.workspace, "no-restart")
+                .await
+                .expect("查"),
+            vec!["mounts-it".to_string()]
+        );
+        assert!(
+            f.store
+                .tasks_using_rule(f.workspace, "nope")
+                .await
+                .expect("查")
+                .is_empty()
+        );
+
+        let other = f.new_workspace().await;
+        assert!(
+            f.store
+                .get_rule(other, id)
+                .await
+                .expect("跨租户读")
+                .is_none()
+        );
+        assert!(!f.store.delete_rule(other, id).await.expect("跨租户删"));
+        assert!(f.store.delete_rule(f.workspace, id).await.expect("删"));
+        assert!(
+            f.store
+                .get_rule(f.workspace, id)
+                .await
+                .expect("读")
+                .is_none()
+        );
+    }
+);
+
+db_test!(
+    user_profile_and_password_can_change_and_deleting_kills_sessions,
+    |f| {
+        let id = f
+            .store
+            .create_user(NewUser {
+                workspace_id: f.workspace,
+                email: "a@x.io".into(),
+                display_name: "A".into(),
+                password: "correct horse battery".into(),
+                role: Role::Operator,
+            })
+            .await
+            .expect("建用户");
+
+        // 只改资料，口令不动
+        assert!(
+            f.store
+                .update_user(
+                    f.workspace,
+                    id,
+                    UserUpdate {
+                        email: "B@x.io".into(),
+                        display_name: "B".into(),
+                        password: None,
+                    },
+                )
+                .await
+                .expect("改资料")
+        );
+        assert!(
+            f.store
+                .login(f.workspace, "b@x.io", "correct horse battery")
+                .await
+                .expect("登录")
+                .is_some(),
+            "邮箱按小写存，旧口令仍然有效"
+        );
+        assert!(
+            f.store
+                .login(f.workspace, "a@x.io", "correct horse battery")
+                .await
+                .expect("旧邮箱")
+                .is_none()
+        );
+
+        // 换口令
+        f.store
+            .update_user(
+                f.workspace,
+                id,
+                UserUpdate {
+                    email: "b@x.io".into(),
+                    display_name: "B".into(),
+                    password: Some("new password 12345".into()),
+                },
+            )
+            .await
+            .expect("改口令");
+        assert!(
+            f.store
+                .login(f.workspace, "b@x.io", "correct horse battery")
+                .await
+                .expect("旧口令")
+                .is_none()
+        );
+        let (token, _) = f
+            .store
+            .login(f.workspace, "b@x.io", "new password 12345")
+            .await
+            .expect("新口令")
+            .expect("能登录");
+
+        // 邮箱撞车
+        f.store
+            .create_user(NewUser {
+                workspace_id: f.workspace,
+                email: "c@x.io".into(),
+                display_name: "C".into(),
+                password: "another long password".into(),
+                role: Role::Viewer,
+            })
+            .await
+            .expect("第二个用户");
+        assert!(matches!(
+            f.store
+                .update_user(
+                    f.workspace,
+                    id,
+                    UserUpdate {
+                        email: "c@x.io".into(),
+                        display_name: "B".into(),
+                        password: None,
+                    },
+                )
+                .await,
+            Err(StoreError::Conflict { .. })
+        ));
+
+        // 删掉：会话跟着没了
+        let other = f.new_workspace().await;
+        assert!(!f.store.delete_user(other, id).await.expect("跨租户删"));
+        assert!(f.store.delete_user(f.workspace, id).await.expect("删"));
+        assert!(
+            f.store
+                .principal_for(&token)
+                .await
+                .expect("查会话")
+                .is_none()
+        );
+        assert!(
+            !f.store
+                .list_users(f.workspace)
+                .await
+                .expect("列表")
+                .iter()
+                .any(|u| u.id == id)
+        );
+    }
+);
