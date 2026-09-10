@@ -24,7 +24,7 @@
   import Confirm from '$lib/ui/Confirm.svelte';
   import Dropdown from '$lib/ui/Dropdown.svelte';
   import { toast, toastError } from '$lib/ui/toast.svelte';
-  import { clock, duration, isTerminal, money, stamp, triggerLabel } from '$lib/ui/format';
+  import { clock, DISPLAY_TIMEZONE, duration, isTerminal, money, stamp, triggerLabel } from '$lib/ui/format';
 
   const runId = $derived(page.params.id ?? '');
 
@@ -240,7 +240,7 @@
   {#snippet sub()}
     {#if run}
       <span>{triggerLabel(run.trigger)}触发</span>
-      <span title="入队 {stamp(run.created_at)}">开始 {run.started_at ? stamp(run.started_at) : '—'}</span>
+      <span title="入队 {stamp(run.created_at)}（{DISPLAY_TIMEZONE}）">开始 {run.started_at ? stamp(run.started_at) : '—'}</span>
       <span>耗时 {elapsed}</span>
       <span>花费 {money(cost)}</span>
       <span>{events.length} 条事件</span>

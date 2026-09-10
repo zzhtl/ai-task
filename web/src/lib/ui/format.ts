@@ -53,24 +53,52 @@ export function bytes(n: number): string {
 const two = (n: number) => String(n).padStart(2, '0');
 
 /**
- * 绝对时刻，**本地时区**，秒级。
+ * 绝对时间一律按这个时区显示。
+ *
+ * 团队在东八区，但开发机、跳板机、浏览器的时区各不相同——跟着浏览器走的话，
+ * 同一条 run 在两个人屏幕上是两个时间，对日志时先得互相换算一遍。
+ * 定死一个时区，屏幕上的时间就是日志里的时间。
+ */
+export const DISPLAY_TIMEZONE = 'Asia/Shanghai';
+
+const PARTS = new Intl.DateTimeFormat('en-US', {
+  timeZone: DISPLAY_TIMEZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hourCycle: 'h23'
+});
+
+function parts(iso: string): Record<string, string> | null {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const out: Record<string, string> = {};
+  for (const p of PARTS.formatToParts(d)) out[p.type] = p.value;
+  return out;
+}
+
+/**
+ * 绝对时刻，秒级，[`DISPLAY_TIMEZONE`]。
  *
  * 以前是直接把 ISO 串里的 `T`/`Z` 抠掉——那显示的是 UTC，在东八区看
  * 每个时间都差 8 小时，排查时对不上日志。
  */
 export function stamp(iso: string | null | undefined): string {
   if (!iso) return '—';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '—';
-  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${clock(iso)}`;
+  const p = parts(iso);
+  if (!p) return '—';
+  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`;
 }
 
-/** 只有时分秒（本地时区）。事件流一行一条，日期在页头已经写着了。 */
+/** 只有时分秒。事件流一行一条，日期在页头已经写着了。 */
 export function clock(iso: string | null | undefined): string {
   if (!iso) return '—';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '—';
-  return `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`;
+  const p = parts(iso);
+  if (!p) return '—';
+  return `${p.hour}:${p.minute}:${p.second}`;
 }
 
 /** `分:秒`，倒计时用。 */

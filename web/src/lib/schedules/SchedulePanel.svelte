@@ -13,7 +13,7 @@
   import Confirm from '$lib/ui/Confirm.svelte';
   import Loading from '$lib/ui/Loading.svelte';
   import { toast, toastError } from '$lib/ui/toast.svelte';
-  import { stamp } from '$lib/ui/format';
+  import { DISPLAY_TIMEZONE, stamp } from '$lib/ui/format';
 
   let { taskId, taskEnabled = true }: { taskId: string; taskEnabled?: boolean } = $props();
 
@@ -24,7 +24,7 @@
   let adding = $state(false);
 
   let cron = $state('0 2 * * *');
-  let timezone = $state(Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai');
+  let timezone = $state(DISPLAY_TIMEZONE);
   let misfire = $state('fire_once');
   let overlap = $state('skip');
   let jitter = $state(0);
