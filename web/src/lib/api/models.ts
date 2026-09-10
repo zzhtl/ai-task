@@ -85,6 +85,8 @@ export interface User {
   disabled: boolean;
   active_sessions: number;
   created_at: string;
+  /** 首次部署创建的内置管理员：不能删、不能降级停用，资料只能由本人改。 */
+  system: boolean;
 }
 
 export interface AuditItem {

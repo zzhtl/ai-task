@@ -16,6 +16,7 @@
   import PageHeader from '$lib/ui/PageHeader.svelte';
   import Empty from '$lib/ui/Empty.svelte';
   import Loading from '$lib/ui/Loading.svelte';
+  import Confirm from '$lib/ui/Confirm.svelte';
   import { toast, toastError } from '$lib/ui/toast.svelte';
 
   type Tab = 'policy' | 'prompt' | 'skills';
@@ -27,6 +28,8 @@
   let busy = $state(false);
   let tab = $state<Tab>('policy');
   let adding = $state(false);
+  /** 正在改的那条规则。表单复用新增的那一套，只是提交走 PUT。 */
+  let editing = $state<Rule | null>(null);
 
   // 软规则
   let ruleName = $state('');
@@ -72,6 +75,7 @@
       if (done) toast(done);
     } catch (e) {
       error = describeError(e);
+      throw e;
     } finally {
       busy = false;
     }
@@ -81,40 +85,98 @@
     act(
       () => api(`/api/v1/rules/${rule.id}/enabled`, { method: 'PUT', body: { enabled: !rule.enabled } }),
       rule.enabled ? `已停用 ${rule.name}` : `已启用 ${rule.name}`
-    ).catch((e) => toastError(describeError(e)));
+    ).catch(() => {});
 
-  const createPromptRule = () =>
-    act(async () => {
-      await api('/api/v1/rules', {
-        method: 'POST',
-        body: { kind: 'prompt', name: ruleName, text: ruleText, global: ruleGlobal, priority: 0 }
-      });
-      ruleName = '';
-      ruleText = '';
-      adding = false;
-    }, '软规则已添加');
+  /** 软规则的报文。编辑时不带 name：任务按名字挂规则，改名等于全摘掉。 */
+  const promptBody = () => ({
+    kind: 'prompt',
+    text: ruleText,
+    global: ruleGlobal,
+    priority: editing?.priority ?? 0
+  });
+  const policyBody = () => ({
+    kind: 'policy',
+    global: policyGlobal,
+    priority: policyPriority,
+    effect: policyEffect,
+    reason: policyReason,
+    match: policyPattern
+      ? { tool: policyTool, arg: policyArg, any_of: [{ [policyKind]: policyPattern }] }
+      : { tool: policyTool }
+  });
 
-  const createPolicy = () =>
-    act(async () => {
-      await api('/api/v1/rules', {
-        method: 'POST',
-        body: {
-          kind: 'policy',
-          name: policyName,
-          global: policyGlobal,
-          priority: policyPriority,
-          effect: policyEffect,
-          reason: policyReason,
-          match: policyPattern
-            ? { tool: policyTool, arg: policyArg, any_of: [{ [policyKind]: policyPattern }] }
-            : { tool: policyTool }
+  const savePromptRule = () =>
+    act(
+      async () => {
+        if (editing) {
+          await api(`/api/v1/rules/${editing.id}`, { method: 'PUT', body: promptBody() });
+        } else {
+          await api('/api/v1/rules', { method: 'POST', body: { ...promptBody(), name: ruleName } });
         }
-      });
-      policyName = '';
-      policyPattern = '';
-      policyReason = '';
-      adding = false;
-    }, '策略已添加，立刻对新的工具调用生效');
+        closeForm();
+      },
+      editing ? '软规则已更新，下一次执行开始生效' : '软规则已添加'
+    );
+
+  const savePolicy = () =>
+    act(
+      async () => {
+        if (editing) {
+          await api(`/api/v1/rules/${editing.id}`, { method: 'PUT', body: policyBody() });
+        } else {
+          await api('/api/v1/rules', { method: 'POST', body: { ...policyBody(), name: policyName } });
+        }
+        closeForm();
+      },
+      editing ? '策略已更新，立刻对新的工具调用生效' : '策略已添加，立刻对新的工具调用生效'
+    );
+
+  function closeForm() {
+    adding = false;
+    editing = null;
+    ruleName = '';
+    ruleText = '';
+    ruleGlobal = false;
+    policyName = '';
+    policyPattern = '';
+    policyReason = '';
+    policyTool = 'Bash';
+    policyArg = 'command';
+    policyKind = 'regex';
+    policyEffect = 'deny';
+    policyPriority = 100;
+    policyGlobal = true;
+  }
+
+  /** 把一条现有规则摊回表单。 */
+  function openEdit(rule: Rule) {
+    editing = rule;
+    adding = true;
+    if (rule.kind === 'prompt') {
+      ruleName = rule.name;
+      ruleText = promptText(rule);
+      ruleGlobal = rule.scope === 'global';
+      return;
+    }
+    const m = (rule.spec.match ?? {}) as Matcher;
+    const first = m.any_of?.[0];
+    const [kind, value] = first ? (Object.entries(first)[0] ?? ['regex', '']) : ['regex', ''];
+    policyName = rule.name;
+    policyTool = m.tool ?? '';
+    policyArg = m.arg ?? 'command';
+    policyKind = (['regex', 'glob', 'contains'].includes(kind) ? kind : 'regex') as typeof policyKind;
+    policyPattern = value;
+    policyEffect = String(rule.spec.effect ?? 'deny') as typeof policyEffect;
+    policyReason = String(rule.spec.reason ?? '');
+    policyPriority = rule.priority;
+    policyGlobal = rule.scope === 'global';
+  }
+
+  let pendingDelete = $state<Rule | null>(null);
+  const remove = (rule: Rule) =>
+    act(() => api(`/api/v1/rules/${rule.id}`, { method: 'DELETE' }), `已删除 ${rule.name}`).catch(
+      (e) => toastError(describeError(e))
+    );
 
   const importSkill = () =>
     act(async () => {
@@ -126,7 +188,7 @@
       skillDesc = '';
       skillBody = '';
       adding = false;
-    }, '技能已导入');
+    }, '技能已导入').catch(() => {});
 
   /** 当前页签下的规则。软规则和硬策略语义不同，绝不能并成一张表。 */
   const kindRules = $derived(
@@ -158,12 +220,31 @@
   });
   $effect(() => {
     void tab;
-    adding = false;
+    closeForm();
     error = null;
   });
 
   const EFFECT_TAG: Record<string, string> = { deny: 'danger', ask: 'warn', allow: 'ok' };
 </script>
+
+<Confirm
+  open={pendingDelete !== null}
+  title="删除{pendingDelete?.kind === 'policy' ? '策略' : '软规则'}「{pendingDelete?.name ?? ''}」？"
+  danger
+  confirmText="删除"
+  {busy}
+  onconfirm={() => {
+    const rule = pendingDelete;
+    pendingDelete = null;
+    if (rule) void remove(rule);
+  }}
+>
+  <p>还有任务挂着它的话会被拒绝，并列出是哪几个。</p>
+  <p>
+    删掉之后，历史执行记录里的规则指纹就对不上这条规则了；只是想暂时不生效的话，
+    用「停用」更稳妥。
+  </p>
+</Confirm>
 
 <PageHeader title="规则与策略">
   {#snippet sub()}
@@ -208,12 +289,16 @@
     {#if adding}
       <section class="card form">
         <header class="card-head">
-          <h2>新增策略</h2>
+          <h2>{editing ? `编辑策略 ${editing.name}` : '新增策略'}</h2>
           <span class="spacer"></span>
-          <button class="btn-ghost btn-sm" onclick={() => (adding = false)}>收起</button>
+          <button class="btn-ghost btn-sm" onclick={closeForm}>收起</button>
         </header>
         <div class="form-grid">
-          <label class="field">名称<input bind:value={policyName} placeholder="prod-no-write" spellcheck="false" /></label>
+          <label class="field">
+            名称
+            <input bind:value={policyName} placeholder="prod-no-write" spellcheck="false" disabled={editing !== null} />
+            {#if editing}<span class="hint">名字不能改：任务是按名字挂规则的</span>{/if}
+          </label>
           <label class="field">
             工具
             <input bind:value={policyTool} placeholder="Bash / remote_bash / remote_write" spellcheck="false" />
@@ -261,9 +346,10 @@
           <span class="hint">会作为 tool_result 回给模型，写清为什么比写「不行」有用</span>
         </label>
         <div class="form-actions">
-          <button class="btn-primary" onclick={createPolicy} disabled={busy || !policyName || !policyReason}>
-            添加策略
+          <button class="btn-primary" onclick={savePolicy} disabled={busy || !policyName || !policyReason}>
+            {editing ? '保存' : '添加策略'}
           </button>
+          {#if editing}<button class="btn-ghost" onclick={closeForm} disabled={busy}>取消</button>{/if}
         </div>
       </section>
     {/if}
@@ -278,7 +364,7 @@
           </thead>
           <tbody>
             {#each kindRules as rule (rule.id)}
-              <tr class:off={!rule.enabled}>
+              <tr class:off={!rule.enabled} class:on={editing?.id === rule.id}>
                 <td class="mono name">{rule.name}</td>
                 <td><span class="tag {EFFECT_TAG[String(rule.spec.effect)] ?? ''}">{rule.spec.effect}</span></td>
                 <td class="mono small">{matcherText(rule)}</td>
@@ -290,11 +376,24 @@
                 </td>
                 <td class="faint">{rule.priority}</td>
                 <td class="act">
-                  <!-- 只有停用没有删除：规则文本进过 runs.rules_hash，
-                       删掉之后历史 run 就解释不了了 -->
-                  <button class="btn-ghost btn-sm" disabled={busy} onclick={() => toggle(rule)}>
-                    {rule.enabled ? '停用' : '启用'}
-                  </button>
+                  <div class="row">
+                    <button class="btn-ghost btn-sm" disabled={busy} onclick={() => toggle(rule)}>
+                      {rule.enabled ? '停用' : '启用'}
+                    </button>
+                    <button class="btn-ghost btn-sm btn-icon" title="编辑" aria-label="编辑" disabled={busy} onclick={() => openEdit(rule)}>
+                      <svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4zM13 7l4 4" /></svg>
+                    </button>
+                    <!-- 只是暂时不生效的话用停用：删除会让历史 run 的规则指纹对不上 -->
+                    <button
+                      class="btn-ghost btn-sm btn-icon danger"
+                      title="删除"
+                      aria-label="删除规则"
+                      disabled={busy}
+                      onclick={() => (pendingDelete = rule)}
+                    >
+                      <svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" /></svg>
+                    </button>
+                  </div>
                 </td>
               </tr>
             {/each}
@@ -318,12 +417,16 @@
     {#if adding}
       <section class="card form">
         <header class="card-head">
-          <h2>新增软规则</h2>
+          <h2>{editing ? `编辑软规则 ${editing.name}` : '新增软规则'}</h2>
           <span class="spacer"></span>
-          <button class="btn-ghost btn-sm" onclick={() => (adding = false)}>收起</button>
+          <button class="btn-ghost btn-sm" onclick={closeForm}>收起</button>
         </header>
         <div class="form-grid">
-          <label class="field">名称<input bind:value={ruleName} placeholder="no-restart" spellcheck="false" /></label>
+          <label class="field">
+            名称
+            <input bind:value={ruleName} placeholder="no-restart" spellcheck="false" disabled={editing !== null} />
+            {#if editing}<span class="hint">名字不能改：任务是按名字挂规则的</span>{/if}
+          </label>
           <label class="field">
             作用范围
             <select bind:value={ruleGlobal}>
@@ -337,9 +440,10 @@
           <textarea bind:value={ruleText} rows="3" class="prose" placeholder="不要重启任何服务。需要重启时先报告，等人确认。"></textarea>
         </label>
         <div class="form-actions">
-          <button class="btn-primary" onclick={createPromptRule} disabled={busy || !ruleName || !ruleText}>
-            添加规则
+          <button class="btn-primary" onclick={savePromptRule} disabled={busy || !ruleName || !ruleText}>
+            {editing ? '保存' : '添加规则'}
           </button>
+          {#if editing}<button class="btn-ghost" onclick={closeForm} disabled={busy}>取消</button>{/if}
         </div>
       </section>
     {/if}
@@ -354,7 +458,7 @@
           </thead>
           <tbody>
             {#each kindRules as rule (rule.id)}
-              <tr class:off={!rule.enabled}>
+              <tr class:off={!rule.enabled} class:on={editing?.id === rule.id}>
                 <td class="mono name">{rule.name}</td>
                 <td class="muted text">{promptText(rule)}</td>
                 <td>
@@ -363,9 +467,24 @@
                   </span>
                 </td>
                 <td class="act">
-                  <button class="btn-ghost btn-sm" disabled={busy} onclick={() => toggle(rule)}>
-                    {rule.enabled ? '停用' : '启用'}
-                  </button>
+                  <div class="row">
+                    <button class="btn-ghost btn-sm" disabled={busy} onclick={() => toggle(rule)}>
+                      {rule.enabled ? '停用' : '启用'}
+                    </button>
+                    <button class="btn-ghost btn-sm btn-icon" title="编辑" aria-label="编辑" disabled={busy} onclick={() => openEdit(rule)}>
+                      <svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4zM13 7l4 4" /></svg>
+                    </button>
+                    <!-- 只是暂时不生效的话用停用：删除会让历史 run 的规则指纹对不上 -->
+                    <button
+                      class="btn-ghost btn-sm btn-icon danger"
+                      title="删除"
+                      aria-label="删除规则"
+                      disabled={busy}
+                      onclick={() => (pendingDelete = rule)}
+                    >
+                      <svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" /></svg>
+                    </button>
+                  </div>
                 </td>
               </tr>
             {/each}
@@ -391,7 +510,7 @@
         <header class="card-head">
           <h2>导入技能</h2>
           <span class="spacer"></span>
-          <button class="btn-ghost btn-sm" onclick={() => (adding = false)}>收起</button>
+          <button class="btn-ghost btn-sm" onclick={closeForm}>收起</button>
         </header>
         <div class="form-grid">
           <label class="field">名称<input bind:value={skillName} placeholder="linux-perf" spellcheck="false" /></label>
@@ -473,5 +592,8 @@
   textarea.prose {
     font-family: var(--font);
     font-size: 0.86rem;
+  }
+  tr.on td {
+    background: var(--accent-soft);
   }
 </style>
