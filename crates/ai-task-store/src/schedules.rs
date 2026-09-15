@@ -323,11 +323,20 @@ pub async fn create_scheduled_run_in_tx(
 /// 这个任务当前有没有还没跑完的 run。overlap 策略要用。
 pub async fn has_active_run_in_tx(
     tx: &mut Transaction<'_, Postgres>,
+    workspace_id: WorkspaceId,
     task_id: TaskId,
 ) -> Result<bool, StoreError> {
+    // **workspace_id 不能省。** `runs_active_idx` 是
+    // `(workspace_id, created_at) WHERE status IN ('queued','running')`——
+    // 不带前导列就用不上这个部分索引，而这条查询是每个 tick、每条
+    // overlap=skip|queue 的定时都要跑一次的。
     let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM runs WHERE task_id = $1 AND status IN ('queued','running'))",
+        "SELECT EXISTS (
+             SELECT 1 FROM runs
+             WHERE workspace_id = $1 AND task_id = $2 AND status IN ('queued','running')
+         )",
     )
+    .bind(uuid::Uuid::from(workspace_id))
     .bind(uuid::Uuid::from(task_id))
     .fetch_one(&mut **tx)
     .await?;

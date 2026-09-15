@@ -146,7 +146,7 @@ impl Scheduler {
         // 这样这个触发点会一直留在待处理集合里，等上一次结束后自然补上。
         if schedule.overlap == OverlapPolicy::Queue
             && !due.is_empty()
-            && has_active_run_in_tx(&mut tx, schedule.task_id).await?
+            && has_active_run_in_tx(&mut tx, schedule.workspace_id, schedule.task_id).await?
         {
             advance_schedule_in_tx(
                 &mut tx,
@@ -171,7 +171,7 @@ impl Scheduler {
             fires.clear();
         } else if schedule.overlap == OverlapPolicy::Skip
             && !fires.is_empty()
-            && has_active_run_in_tx(&mut tx, schedule.task_id).await?
+            && has_active_run_in_tx(&mut tx, schedule.workspace_id, schedule.task_id).await?
         {
             tracing::info!(schedule_id = %schedule.id, "上一次还没跑完，按 skip 策略丢弃本次触发");
             fires.clear();

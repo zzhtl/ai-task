@@ -145,7 +145,7 @@ db_test!(creating_a_run_writes_its_first_event_atomically, |f| {
     // 不能出现「有 run 但事件流是空的」——那样回放会直接失败
     let events = f
         .store
-        .read_events_after(run.id, 0, 100)
+        .read_events_after(run.id, 0, 100, None)
         .await
         .expect("读事件");
     assert_eq!(events.len(), 1);
@@ -171,7 +171,7 @@ db_test!(batched_appends_get_contiguous_sequence_numbers, |f| {
 
     let events = f
         .store
-        .read_events_after(run.id, 0, 1_000)
+        .read_events_after(run.id, 0, 1_000, None)
         .await
         .expect("读事件");
     let seqs: Vec<_> = events.iter().map(|e| e.seq).collect();
@@ -215,7 +215,7 @@ db_test!(concurrent_writers_never_collide_on_seq, |f| {
 
     let events = f
         .store
-        .read_events_after(run.id, 0, 1_000)
+        .read_events_after(run.id, 0, 1_000, None)
         .await
         .expect("读事件");
     let mut seqs: Vec<_> = events.iter().map(|e| e.seq).collect();
@@ -244,7 +244,7 @@ db_test!(
         // 客户端断在 seq=10，重连时带 Last-Event-ID: 10
         let resumed = f
             .store
-            .read_events_after(run.id, 10, 100)
+            .read_events_after(run.id, 10, 100, None)
             .await
             .expect("续传");
         assert_eq!(resumed.first().map(|e| e.seq), Some(11), "不能重发已收到的");
@@ -253,12 +253,12 @@ db_test!(
         // 分页也不能丢事件
         let page1 = f
             .store
-            .read_events_after(run.id, 0, 7)
+            .read_events_after(run.id, 0, 7, None)
             .await
             .expect("第一页");
         let page2 = f
             .store
-            .read_events_after(run.id, page1.last().expect("非空").seq, 7)
+            .read_events_after(run.id, page1.last().expect("非空").seq, 7, None)
             .await
             .expect("第二页");
         assert_eq!(page1.len(), 7);
@@ -327,7 +327,7 @@ db_test!(a_finished_run_replays_from_its_event_log_alone, |f| {
 
     let events = f
         .store
-        .read_events_after(run.id, 0, 10_000)
+        .read_events_after(run.id, 0, 10_000, None)
         .await
         .expect("读事件");
     let state = RunState::replay(&events).expect("重放");

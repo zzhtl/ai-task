@@ -278,7 +278,7 @@ pub struct NodeMetrics {
     pub points: Vec<MetricPoint>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MetricPoint {
     pub at: chrono::DateTime<chrono::Utc>,
     /// **累计** CPU 微秒。相邻两点做差再除以间隔才是使用率——
@@ -288,10 +288,18 @@ pub struct MetricPoint {
     pub pids: i32,
 }
 
+/// 每个节点最多返回多少个采样点。
+///
+/// 注释原本写着"一个正常 run 也就几百个点"——但那是**期望**，不是约束。
+/// 1 Hz × 一个跑四小时的 shell 节点 = 14400 个点，再乘上节点数，
+/// 全都塞进一个 JSON 响应里。曲线画在 720px 宽的图上，
+/// 超过这个数的点在屏幕上根本落不到不同的像素里。
+const MAX_POINTS_PER_NODE: usize = 1_000;
+
 /// `GET /api/v1/runs/{id}/metrics`
 ///
-/// 一次性返回全量。采样是 1Hz、只在 shell 节点执行期间产生，一个正常 run
-/// 也就几百个点；为它单开一条 SSE 通道不值得，事件流已经能告诉前端何时刷新。
+/// 采样是 1Hz、只在节点执行期间产生。点数超过上限时**等距抽稀**，
+/// 而不是截断——截断会让曲线在中间断掉，看起来像节点提前结束了。
 pub async fn metrics(
     State(state): State<AppState>,
     Path(id): Path<uuid::Uuid>,
@@ -315,9 +323,28 @@ pub async fn metrics(
     Ok(Json(
         grouped
             .into_iter()
-            .map(|(node_key, points)| NodeMetrics { node_key, points })
+            .map(|(node_key, points)| NodeMetrics {
+                node_key,
+                points: downsample(points, MAX_POINTS_PER_NODE),
+            })
             .collect(),
     ))
+}
+
+/// 等距抽稀到至多 `max` 个点。**首尾必留**——曲线的起止时刻决定了
+/// 节点在共用时间轴上的位置，抽掉了整条线就会错位。
+fn downsample(points: Vec<MetricPoint>, max: usize) -> Vec<MetricPoint> {
+    if points.len() <= max || max < 2 {
+        return points;
+    }
+    let last = points.len() - 1;
+    let step = last as f64 / (max - 1) as f64;
+    (0..max)
+        .map(|i| {
+            let idx = ((i as f64) * step).round() as usize;
+            points[idx.min(last)].clone()
+        })
+        .collect()
 }
 
 fn validation(field: &str, message: &str) -> AppError {
@@ -382,5 +409,42 @@ mod tests {
         assert!(!never.as_deref().is_some_and(|m| m != "systemd"));
         assert!(Some("proc").is_some_and(|m| m != "systemd"));
         assert!(!Some("systemd").is_some_and(|m| m != "systemd"));
+    }
+}
+
+#[cfg(test)]
+mod downsample_tests {
+    use super::*;
+
+    fn point(n: i64) -> MetricPoint {
+        MetricPoint {
+            at: chrono::DateTime::from_timestamp(n, 0).expect("ts"),
+            cpu_usec: n,
+            rss_bytes: n,
+            pids: 1,
+        }
+    }
+
+    #[test]
+    fn short_series_pass_through_untouched() {
+        let points: Vec<_> = (0..10).map(point).collect();
+        assert_eq!(downsample(points.clone(), 1000).len(), 10);
+    }
+
+    #[test]
+    fn long_series_keep_both_ends() {
+        // 首尾决定这个节点在共用时间轴上占哪一段，抽掉就会错位
+        let points: Vec<_> = (0..50_000).map(point).collect();
+        let out = downsample(points, 1_000);
+        assert_eq!(out.len(), 1_000);
+        assert_eq!(out.first().expect("首").cpu_usec, 0);
+        assert_eq!(out.last().expect("尾").cpu_usec, 49_999);
+    }
+
+    #[test]
+    fn output_stays_in_chronological_order() {
+        let points: Vec<_> = (0..5_000).map(point).collect();
+        let out = downsample(points, 100);
+        assert!(out.windows(2).all(|w| w[0].cpu_usec <= w[1].cpu_usec));
     }
 }

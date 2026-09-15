@@ -5,13 +5,15 @@ use ai_task_proto::{
     CreateTask, FieldError, Page, PageQuery, RunEventBody, RunSummary, TaskDetail, TaskId,
     TaskSummary, TriggerKind, TriggerRun,
 };
+use ai_task_store::idempotency::{IdempotentCreate, IdempotentRun};
 use ai_task_store::{NewRun, NewTask, PendingEvent};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::{Json, http::HeaderMap};
 
 use crate::error::AppError;
+use crate::idempotency::IdempotentJson;
 use crate::routes::runs::to_summary;
 use crate::state::AppState;
 
@@ -166,7 +168,7 @@ pub async fn delete(
     Ok(Json(serde_json::json!({ "deleted_runs": runs })))
 }
 
-/// `GET /api/v1/tasks`/// `GET /api/v1/tasks`/// `GET /api/v1/tasks`
+/// `GET /api/v1/tasks`
 pub async fn list(
     State(state): State<AppState>,
     Query(page): Query<PageQuery>,
@@ -175,8 +177,18 @@ pub async fn list(
         .store
         .list_tasks(state.workspace_id, i64::from(page.effective_limit()))
         .await?;
+
+    // `last_run` 以前恒为 None——DTO 里有这个字段、列表页也要显示"上次执行"，
+    // 于是前端只好自己再拉 200 条 run 回去逐行 find。
+    // 一条 LATERAL 把它补上，不是 N+1。
+    let ids: Vec<_> = tasks.iter().map(|t| t.id).collect();
+    let mut last = state.store.last_runs_for(state.workspace_id, &ids).await?;
+
     Ok(Json(Page {
-        items: tasks.iter().map(|t| task_summary(t, None)).collect(),
+        items: tasks
+            .iter()
+            .map(|t| task_summary(t, last.remove(&t.id).map(|r| to_summary(&r))))
+            .collect(),
         next_cursor: None,
     }))
 }
@@ -219,8 +231,9 @@ pub async fn get(
 pub async fn trigger(
     State(state): State<AppState>,
     Path(id): Path<TaskId>,
-    Json(body): Json<TriggerRun>,
-) -> Result<impl IntoResponse, AppError> {
+    request: IdempotentJson<TriggerRun>,
+) -> Result<Response, AppError> {
+    let IdempotentJson { body, key, hash } = request;
     let task = state
         .store
         .get_task(state.workspace_id, id)
@@ -247,26 +260,56 @@ pub async fn trigger(
             })?;
     }
 
-    let run = state
+    let new_run = NewRun {
+        workspace_id: state.workspace_id,
+        task_id: task.id,
+        task_version_id: task.current_version_id,
+        trigger: TriggerKind::Manual,
+        dry_run: body.dry_run,
+        inputs: body.inputs.clone(),
+        compare_to: body.compare_to,
+    };
+    let queued = PendingEvent::run(RunEventBody::RunQueued {
+        task_version_id: task.current_version_id,
+        trigger: TriggerKind::Manual,
+        inputs: body.inputs.clone(),
+        dry_run: body.dry_run,
+    });
+
+    // 幂等键和建 run 在**同一个事务**里提交（ADR 0002）。
+    // 校验放在认领之前：422 不该变成一条可重放的存储响应。
+    let outcome = state
         .store
-        .create_run(
-            NewRun {
+        .create_run_idempotent(
+            IdempotentCreate {
                 workspace_id: state.workspace_id,
-                task_id: task.id,
-                task_version_id: task.current_version_id,
-                trigger: TriggerKind::Manual,
-                dry_run: body.dry_run,
-                inputs: body.inputs.clone(),
-                compare_to: body.compare_to,
+                key: key.as_deref(),
+                request_hash: &hash,
+                status: i32::from(StatusCode::ACCEPTED.as_u16()),
             },
-            PendingEvent::run(RunEventBody::RunQueued {
-                task_version_id: task.current_version_id,
-                trigger: TriggerKind::Manual,
-                inputs: body.inputs,
-                dry_run: body.dry_run,
-            }),
+            new_run,
+            queued,
+            |run| serde_json::to_value(to_summary(run)).unwrap_or(serde_json::Value::Null),
         )
         .await?;
+
+    let run = match outcome {
+        IdempotentRun::Created(run) => *run,
+        IdempotentRun::Replayed { status, body } => {
+            return Ok(crate::idempotency::replay(status, body));
+        }
+        IdempotentRun::Conflict => {
+            return Err(AppError::Conflict(
+                "同一个 Idempotency-Key 配了不同的请求体".into(),
+            ));
+        }
+        IdempotentRun::InFlight => {
+            return Err(AppError::Conflict(
+                "同一个 Idempotency-Key 的上一次请求还在处理中".into(),
+            ));
+        }
+    };
+    let summary = to_summary(&run);
 
     // 触发是"谁让它跑的"。定时触发由调度器负责记，这里记的是人手动点的。
     state
@@ -283,13 +326,15 @@ pub async fn trigger(
         )
         .await;
 
+    // **提交之后**才能 spawn：事务里起后台任务的话，回滚了任务还在跑。
+    // 这中间崩溃会留下一个 queued 的 run，由启动时的 unfinished_runs 收尾。
     state.supervisor.spawn(state.workspace_id, run.id);
 
     let mut headers = HeaderMap::new();
     if let Ok(location) = format!("/api/v1/runs/{}", run.id).parse() {
         headers.insert(axum::http::header::LOCATION, location);
     }
-    Ok((StatusCode::ACCEPTED, headers, Json(to_summary(&run))))
+    Ok((StatusCode::ACCEPTED, headers, Json(summary)).into_response())
 }
 
 fn task_summary(task: &ai_task_store::TaskRecord, last_run: Option<RunSummary>) -> TaskSummary {

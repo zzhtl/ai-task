@@ -1185,7 +1185,7 @@ pub async fn reap_orphaned_runs(store: &Store, worker_id: &str) -> Result<usize,
     let orphans = store.unfinished_runs(500).await?;
     let mut reaped = 0;
     for run in orphans {
-        let events = store.read_events_after(run.id, 0, 100_000).await?;
+        let events = store.read_events_after(run.id, 0, 100_000, None).await?;
         // 先重放，把已经花掉的成本捞回来——否则这些钱在账上就消失了
         let cost = match RunState::replay(&events) {
             Ok(state) => state.cost,

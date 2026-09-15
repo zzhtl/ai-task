@@ -21,6 +21,8 @@ use sqlx::{AssertSqlSafe, Connection, PgConnection};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+mod common;
+
 // ---------------------------------------------------------------- 假执行器
 
 /// 按脚本回放事件的执行器。
@@ -227,7 +229,7 @@ impl Harness {
     async fn replay(&self, run_id: ai_task_proto::RunId) -> RunState {
         let events = self
             .store
-            .read_events_after(run_id, 0, 100_000)
+            .read_events_after(run_id, 0, 100_000, None)
             .await
             .expect("读事件");
         RunState::replay(&events).expect("重放")
@@ -281,7 +283,7 @@ macro_rules! engine_test {
         #[tokio::test]
         async fn $name() {
             let Some($h) = Harness::create().await else {
-                eprintln!("跳过 {}：未设置 AI_TASK_TEST_DATABASE_URL", stringify!($name));
+                common::skip_or_fail(stringify!($name), "未设置 AI_TASK_TEST_DATABASE_URL");
                 return;
             };
             let outcome = {
@@ -445,7 +447,7 @@ engine_test!(a_denied_tool_call_is_recorded_as_a_policy_decision, |h| {
     // 审计链路上必须能查到"哪次调用被拒、为什么"
     let events = h
         .store
-        .read_events_after(run.id, 0, 1_000)
+        .read_events_after(run.id, 0, 1_000, None)
         .await
         .expect("读事件");
     let denial = events
@@ -596,7 +598,7 @@ engine_test!(
 
         let events = h
             .store
-            .read_events_after(run.id, 0, 100_000)
+            .read_events_after(run.id, 0, 100_000, None)
             .await
             .expect("读事件");
 
@@ -643,7 +645,7 @@ engine_test!(the_recorded_command_is_the_one_that_actually_ran, |h| {
 
     let events = h
         .store
-        .read_events_after(run.id, 0, 100_000)
+        .read_events_after(run.id, 0, 100_000, None)
         .await
         .expect("读事件");
     let invoked = events

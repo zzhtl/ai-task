@@ -104,6 +104,12 @@ impl Store {
     }
 
     /// 本 workspace 里所有待决的审批，最早过期的排在前面。
+    ///
+    /// **过期的直接在这里滤掉，不靠"读之前先写一次"。**
+    /// 之前每次 GET /approvals 都要先跑一遍全 workspace 的
+    /// `UPDATE ... RETURNING` 把过期的收掉——一个每 5 秒被前端打一次的只读接口，
+    /// 每次都在写库。真正的收尾（写决策事件、放掉挂起的工具调用）
+    /// 由维护任务和审批等待循环负责，那才是需要副作用的地方。
     pub async fn pending_approvals(
         &self,
         workspace_id: WorkspaceId,
@@ -111,7 +117,7 @@ impl Store {
         let rows = sqlx::query(
             "SELECT a.* FROM approvals a
              JOIN runs r ON r.id = a.run_id
-             WHERE r.workspace_id = $1 AND a.decided_at IS NULL
+             WHERE r.workspace_id = $1 AND a.decided_at IS NULL AND a.expires_at > now()
              ORDER BY a.expires_at",
         )
         .bind(uuid::Uuid::from(workspace_id))

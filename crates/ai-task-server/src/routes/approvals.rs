@@ -49,8 +49,9 @@ impl From<ai_task_store::Approval> for ApprovalCard {
 ///
 /// 只返回待决的。已决策的审批属于 run 的历史，从事件流里读。
 pub async fn list(State(state): State<AppState>) -> Result<Json<Page<ApprovalCard>>, AppError> {
-    // 先把过期的收掉，否则界面上会一直挂着一张点不动的卡片
-    let _ = state.store.expire_approvals(chrono::Utc::now()).await;
+    // 过期的由查询本身滤掉（`expires_at > now()`），这里不再写库。
+    // 之前每次读都要先跑一遍全 workspace 的 UPDATE——而这个接口
+    // 前端每 5 秒打一次。真正的过期收尾在审批等待循环和维护任务里。
     let pending = state.store.pending_approvals(state.workspace_id).await?;
     Ok(Json(Page {
         items: pending.into_iter().map(ApprovalCard::from).collect(),

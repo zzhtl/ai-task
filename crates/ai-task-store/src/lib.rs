@@ -12,6 +12,8 @@ pub mod auth;
 pub mod crypto;
 pub mod events;
 pub mod hosts;
+pub mod idempotency;
+pub mod overview;
 pub mod pool;
 pub mod rules;
 pub mod runs;

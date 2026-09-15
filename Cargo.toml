@@ -98,6 +98,9 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = [
     "catch-panic",
+    # brotli 对 JS/CSS 普遍比 gzip 小 15–20%，而这些是内容哈希过的不可变资源，
+    # 压一次就能长期缓存——之前它根本没编进来，所以 `accept-encoding: br` 拿到的是 gzip
+    "compression-br",
     "compression-gzip",
     "cors",
     "normalize-path",

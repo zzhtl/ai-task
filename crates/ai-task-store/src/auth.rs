@@ -206,9 +206,26 @@ impl Store {
     }
 
     /// 用 token 换回调用方身份。过期或不存在都返回 `None`。
+    ///
+    /// **一次往返拿全。** 之前是先 JOIN 出用户、再单独查一次角色，
+    /// 开了认证之后**每一个** `/api/v1` 请求都要付两次数据库往返才进 handler。
+    /// 角色在 SQL 里直接选最高的那个，不用把所有绑定拉回来在 Rust 里挑。
+    ///
+    /// 这里刻意**不加缓存**：哪怕 30 秒 TTL，也会让 `revoke-sessions`
+    /// 和「停用用户」不再即时生效，而 README 明确宣传"口令泄漏时把人踢下线"。
+    /// 拿安全换一次没测量过的往返，不划算。
     pub async fn principal_for(&self, token: &str) -> Result<Option<Principal>, StoreError> {
         let row = sqlx::query(
-            "SELECT u.id, u.workspace_id, u.email, u.display_name
+            "SELECT u.id, u.workspace_id, u.email, u.display_name,
+                    (SELECT rb.role FROM role_bindings rb
+                     WHERE rb.user_id = u.id AND rb.workspace_id = u.workspace_id
+                     -- 档位是 viewer < operator < admin，取最高的那一个
+                     ORDER BY CASE rb.role
+                                WHEN 'admin' THEN 3
+                                WHEN 'operator' THEN 2
+                                ELSE 1
+                              END DESC
+                     LIMIT 1) AS role
              FROM sessions s
              JOIN users u ON u.id = s.user_id
              WHERE s.token_hash = $1 AND s.expires_at > now() AND u.disabled_at IS NULL",
@@ -218,18 +235,35 @@ impl Store {
         .await?;
 
         let Some(row) = row else { return Ok(None) };
-        let user_id = UserId(row.try_get("id")?);
-        let workspace_id = WorkspaceId(row.try_get("workspace_id")?);
+        let role = row
+            .try_get::<Option<String>, _>("role")?
+            .as_deref()
+            .and_then(Role::parse)
+            .unwrap_or(Role::Viewer);
         Ok(Some(Principal {
-            user_id,
-            workspace_id,
+            user_id: UserId(row.try_get("id")?),
+            workspace_id: WorkspaceId(row.try_get("workspace_id")?),
             email: row.try_get("email")?,
             display_name: row.try_get("display_name")?,
-            role: self
-                .highest_role(user_id, workspace_id)
-                .await?
-                .unwrap_or(Role::Viewer),
+            role,
         }))
+    }
+
+    /// 最早建的那个用户，也就是内置管理员。
+    ///
+    /// 之前是把整张用户表拉回来（每行还带两个相关子查询）再挑最早的一个，
+    /// 而且改角色、停用、删除四个 handler 各自调一次。
+    pub async fn system_user_id(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Option<UserId>, StoreError> {
+        let row: Option<uuid::Uuid> = sqlx::query_scalar(
+            "SELECT id FROM users WHERE workspace_id = $1 ORDER BY created_at, id LIMIT 1",
+        )
+        .bind(uuid::Uuid::from(workspace_id))
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(row.map(UserId))
     }
 
     /// 列出 workspace 里的所有用户。

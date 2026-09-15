@@ -190,7 +190,7 @@ macro_rules! db_test {
         #[tokio::test]
         async fn $name() {
             let Some($f) = $crate::common::Fixture::create().await else {
-                eprintln!("跳过 {}：未设置 AI_TASK_TEST_DATABASE_URL", stringify!($name));
+                $crate::common::skip_or_fail(stringify!($name), "未设置 AI_TASK_TEST_DATABASE_URL");
                 return;
             };
             let outcome = $crate::common::catch(std::panic::AssertUnwindSafe(async $body)).await;
@@ -200,4 +200,18 @@ macro_rules! db_test {
             }
         }
     };
+}
+
+/// 没配数据库时：该跳过，还是该失败？
+///
+/// 在日志里「跳过」和「通过」长得一模一样。本地开发跳过是方便，CI 里跳过是自欺——
+/// 一个没连数据库的 `cargo test --workspace` 会全绿，而它什么都没验证。
+/// 所以 `CI` 或 `AI_TASK_REQUIRE_DB_TESTS` 在场时，缺前置条件一律硬失败。
+pub fn skip_or_fail(name: &str, why: &str) {
+    assert!(
+        std::env::var_os("CI").is_none() && std::env::var_os("AI_TASK_REQUIRE_DB_TESTS").is_none(),
+        "{name}：{why}。设了 CI / AI_TASK_REQUIRE_DB_TESTS 就不允许跳过——\
+         否则「测试全绿」不代表测试跑过。"
+    );
+    eprintln!("跳过 {name}：{why}");
 }

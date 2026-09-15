@@ -8,6 +8,7 @@ pub mod cron;
 pub mod dag;
 pub mod engine;
 pub mod host_exec;
+pub mod maintenance;
 pub mod scheduler;
 pub mod sink;
 

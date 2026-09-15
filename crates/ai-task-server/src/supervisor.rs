@@ -1,7 +1,12 @@
-//! 在跑的 run 的登记处。
+//! 在跑的 run 的登记处，外加一道并发闸。
 //!
-//! 只做一件事：让 `POST /runs/{id}/cancel` 能找到对应的取消令牌。
-//! 调度、并发限流是 M2 的事。
+//! 每个 run 会拉起一个 `claude` 子进程——吃 CPU、吃内存、**花钱**。
+//! 这里原本是无上限的 `tokio::spawn`，一次触发风暴或者 cron 的 `fire_all` 补偿
+//! 就能把子进程数顶到没边。
+//!
+//! 闸门用信号量，**permit 在 spawn 出来的任务内部获取**：这样超额的 run
+//! 在拿到许可之前一直停在 `queued`——那正是现有状态机里已有的语义，
+//! 不需要为"排队"新造一个状态。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -17,14 +22,17 @@ pub struct RunSupervisor {
     // Mutex 而不是 RwLock：临界区只是一次 HashMap 增删，
     // RwLock 的读写分离在这个粒度上只会更慢。
     running: Arc<Mutex<HashMap<RunId, CancellationToken>>>,
+    slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl RunSupervisor {
     #[must_use]
-    pub fn new(engine: RunEngine) -> Self {
+    pub fn new(engine: RunEngine, max_concurrent: usize) -> Self {
+        tracing::info!(max_concurrent, "run 并发上限");
         Self {
             engine,
             running: Arc::new(Mutex::new(HashMap::new())),
+            slots: Arc::new(tokio::sync::Semaphore::new(max_concurrent)),
         }
     }
 
@@ -35,8 +43,22 @@ impl RunSupervisor {
 
         let engine = self.engine.clone();
         let running = Arc::clone(&self.running);
+        let slots = Arc::clone(&self.slots);
         tokio::spawn(async move {
-            engine.execute(workspace_id, run_id, cancel).await;
+            // 等一个空位。**等的时候也要能取消**——不然队列很长时，
+            // 用户点了取消却要等前面几十个跑完才生效，看起来就是没反应。
+            let permit = tokio::select! {
+                () = cancel.cancelled() => None,
+                permit = slots.acquire_owned() => permit.ok(),
+            };
+
+            if let Some(permit) = permit {
+                engine.execute(workspace_id, run_id, cancel).await;
+                drop(permit);
+            } else {
+                tracing::info!(%run_id, "排队期间被取消，没有启动");
+            }
+
             // 无论结局如何都要摘掉登记，否则这个表会一直涨
             if let Ok(mut map) = running.lock() {
                 map.remove(&run_id);

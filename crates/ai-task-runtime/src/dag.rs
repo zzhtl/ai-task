@@ -6,7 +6,7 @@
 //! 两个刻意的设计选择：
 //!
 //! - **`map` 是节点内部的扇出，不是图重写。** 展开出来的实例在事件日志和
-//!   `run_nodes` 里各占一行（靠 `instance` 区分），但**图本身不变**。
+//!   逻辑上各算一个实例（靠 `instance` 区分），但**图本身不变**。
 //!   下游像读普通节点一样读 map 节点的输出（一个数组）。图在运行时变形会让
 //!   拓扑序、就绪判定、取消传播全部变成动态问题，不值得。
 //! - **就绪判定看入边而不是看拓扑序。** 一个节点只有在它**所有**入边都有了
@@ -143,8 +143,18 @@ pub async fn run_dag(
             continue;
         }
 
-        // 同一批就绪的节点并发跑。上限来自 DAG 里最保守的那个 max_parallel，
-        // 免得一个宽松的节点把整个 run 的并发度拉上去。
+        // 同一批就绪的节点并发跑，但有上限。
+        //
+        // 之前这里的注释写着"上限来自 DAG 里最保守的那个 max_parallel"，
+        // 而代码是对整个就绪集 join_all——**没有上限**。而且
+        // `max_parallel` 只存在于 `MapNode` 上，普通节点根本没有这个字段，
+        // 所以那句话描述的机制从来不存在。一个 20 路扇出的层会同时
+        // 拉起 20 个 claude 子进程，每个都吃 CPU、吃内存、花钱。
+        //
+        // 用和 map 扇出同一个默认值：那边早就认定 4 路是个合理的并发度。
+        let limit = LEVEL_PARALLEL.min(ready.len()).max(1);
+        // 先把 future 建出来再喂给 stream：用惰性的 map 闭包会引入一个
+        // 高阶生命周期，把整个 execute 变得不能 spawn。
         let mut futures = Vec::with_capacity(ready.len());
         for key in &ready {
             let node = dag.node(key).expect("就绪集里的节点必然存在");
@@ -157,7 +167,14 @@ pub async fn run_dag(
                 cancel,
             ));
         }
-        let results = futures_util::future::join_all(futures).await;
+        // buffered 保序：下面要按 ready 的顺序把结果对回节点
+        let results: Vec<_> = {
+            use futures_util::StreamExt as _;
+            futures_util::stream::iter(futures)
+                .buffered(limit)
+                .collect()
+                .await
+        };
 
         for (key, result) in ready.iter().zip(results) {
             let result = result?;
@@ -212,6 +229,13 @@ pub async fn run_dag(
 }
 
 /// 跑一个节点（含重试、schema 校验、map 展开）。
+/// 一层里最多并发跑几个节点。
+///
+/// 和 `MapNode::max_parallel` 的默认值一致——map 扇出那边早就认定
+/// 4 路是个合理的并发度，同一个 run 里的普通节点没理由更激进。
+/// 跨 run 的总量另有一道闸（见 `RunSupervisor`）。
+const LEVEL_PARALLEL: usize = 4;
+
 async fn run_one_node(
     node: &NodeSpec,
     runner: &dyn NodeRunner,

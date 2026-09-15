@@ -70,15 +70,43 @@ impl Store {
     /// 建池并探活。
     pub async fn connect(config: &StoreConfig) -> Result<Self, StoreError> {
         let options: PgConnectOptions = config.url.parse().map_err(StoreError::Connect)?;
-        let pool = PgPoolOptions::new()
+        let connecting = PgPoolOptions::new()
             .max_connections(config.max_connections)
             .min_connections(config.min_connections)
             .acquire_timeout(config.acquire_timeout)
             // 长事务会挡住 VACUUM，进而导致膨胀。这里只是兜底，
             // 真正的约束是「事务里不做任何网络 IO」。
             .idle_timeout(Duration::from_secs(600))
-            .connect_with(options)
+            // 连接不要永久复用：长命连接会攒住旧的执行计划和临时表空间，
+            // 而且换掉之后才能享受到数据库那边的配置变更。
+            .max_lifetime(Duration::from_secs(30 * 60))
+            .after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    // 一条查询不该跑到天荒地老：慢查询在表现上和连接池耗尽
+                    // 长得一样，设个上限才能在日志里把两者分开。
+                    // 值取得比 acquire_timeout 宽：正常的重查询不该被误杀。
+                    sqlx::query("SET statement_timeout = '30s'")
+                        .execute(&mut *conn)
+                        .await?;
+                    // 事务里挂着不动会挡住 VACUUM。这是兜底，不是正常路径。
+                    sqlx::query("SET idle_in_transaction_session_timeout = '60s'")
+                        .execute(&mut *conn)
+                        .await?;
+                    // pg_stat_activity 里能一眼看出这些连接是谁的
+                    sqlx::query("SET application_name = 'ai-task'")
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect_with(options);
+
+        // sqlx 0.9 的 PoolOptions 只有 acquire_timeout，没有 connect_timeout——
+        // 所以这个配置项得自己兑现，否则库不可达时启动会一直挂到 acquire_timeout 才报错，
+        // 而「连不上」和「池被占满」是两件需要分开诊断的事。
+        let pool = tokio::time::timeout(config.connect_timeout, connecting)
             .await
+            .map_err(|_| StoreError::Connect(sqlx::Error::PoolTimedOut))?
             .map_err(StoreError::Connect)?;
 
         tracing::info!(
@@ -100,6 +128,18 @@ impl Store {
     ///
     /// 由运行时每天调一次。必须**提前**建好：往非空的 DEFAULT 分区上 ATTACH
     /// 新分区要全扫它并持 ACCESS EXCLUSIVE 锁，那会把所有写入堵住。
+    /// 丢掉超过保留期的月度分区。返回丢掉的张数。
+    ///
+    /// 不做这件事的话分区数每月 +1 且无上限，而 SSE 的续传查询没有 `ts` 谓词，
+    /// 每次都要 Merge Append 扫过所有分区。
+    pub async fn drop_old_partitions(&self, retain_months: i32) -> Result<i32, StoreError> {
+        let row = sqlx::query("SELECT ai_task_drop_old_partitions($1) AS dropped")
+            .bind(retain_months)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.try_get("dropped")?)
+    }
+
     pub async fn ensure_partitions(&self, months_ahead: i32) -> Result<i32, StoreError> {
         let row = sqlx::query("SELECT ai_task_ensure_partitions($1) AS created")
             .bind(months_ahead)
@@ -120,18 +160,6 @@ impl Store {
     }
 }
 
-/// 事务是不是因为可串行化冲突或死锁失败的。
-///
-/// 这两种不是 bug 而是**预期结果**，正确的反应是重跑整个事务（不是重跑单条语句）。
-/// 40001 = serialization_failure，40P01 = deadlock_detected。
-#[must_use]
-pub fn is_retryable(err: &sqlx::Error) -> bool {
-    matches!(
-        err.as_database_error().and_then(|e| e.code()).as_deref(),
-        Some("40001" | "40P01")
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,9 +175,14 @@ mod tests {
     }
 
     #[test]
-    fn serialization_failures_are_classified_as_retryable() {
-        // sqlx::Error 没法在单测里凭空造出带 SQLSTATE 的数据库错误，
-        // 这里只锁住「非数据库错误不可重试」这一半，另一半由集成测试覆盖。
-        assert!(!is_retryable(&sqlx::Error::RowNotFound));
+    fn the_connect_timeout_is_shorter_than_the_acquire_timeout() {
+        // 否则它永远不会先触发，等于没配：连不上和池占满会表现成同一种超时。
+        let c = StoreConfig::default();
+        assert!(
+            c.connect_timeout < c.acquire_timeout,
+            "connect_timeout {:?} 应当短于 acquire_timeout {:?}",
+            c.connect_timeout,
+            c.acquire_timeout
+        );
     }
 }

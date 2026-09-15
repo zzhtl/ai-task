@@ -79,22 +79,32 @@ impl Store {
     /// 读取 `after_seq` 之后的事件，最多 `limit` 条。
     ///
     /// SSE 断线续传就是拿 `Last-Event-ID` 当 `after_seq` 调这个。
+    /// 续传读。
+    ///
+    /// `not_before` 是**分区裁剪**用的：`run_events` 按 ts 月度分区，
+    /// 而这条查询只有 run_id 和 seq 两个条件，于是 planner 只能 Merge Append
+    /// 扫过**所有**分区——分区数每月 +1，这条 SSE 热路径就越走越慢。
+    /// 调用方手上有这个 run 的 created_at，给一个下界就能裁掉所有更早的分区。
+    /// 传 `None` 表示不裁（回放整条流时用）。
     pub async fn read_events_after(
         &self,
         run_id: RunId,
         after_seq: i64,
         limit: i64,
+        not_before: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<Vec<RunEvent>, StoreError> {
         let rows = sqlx::query(
             "SELECT seq, ts, node_key, payload
              FROM run_events
              WHERE run_id = $1 AND seq > $2
+               AND ($4::timestamptz IS NULL OR ts >= $4)
              ORDER BY seq
              LIMIT $3",
         )
         .bind(uuid::Uuid::from(run_id))
         .bind(after_seq)
         .bind(limit)
+        .bind(not_before)
         .fetch_all(self.pool())
         .await?;
 

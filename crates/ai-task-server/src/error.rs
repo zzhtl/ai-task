@@ -22,6 +22,13 @@ pub enum AppError {
     #[error("{0}")]
     Unauthorized(&'static str),
 
+    /// 认了出来，但这一档不够。
+    ///
+    /// 只用于**同租户内的权限不足**；跨租户资源一律走 `NotFound`，
+    /// 因为 403 等于向探测者确认了那个 id 存在。
+    #[error("{0}")]
+    Forbidden(String),
+
     /// 报文解析不了（游标格式错、JSON 坏掉）。
     #[error("{0}")]
     BadRequest(String),
@@ -56,6 +63,7 @@ impl AppError {
         match self {
             Self::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
             Self::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "unauthorized"),
+            Self::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
             Self::PreconditionFailed(_) => (StatusCode::PRECONDITION_FAILED, "precondition_failed"),
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             // 全项目只用 422 表示「读懂了但你说的不对」，不与 400 混用
@@ -121,6 +129,24 @@ mod tests {
         assert!(!text.contains("db-prod-3"), "内部主机名泄漏了：{text}");
         assert!(!text.contains("password"), "内部错误细节泄漏了：{text}");
         assert!(text.contains("internal"));
+    }
+
+    #[tokio::test]
+    async fn forbidden_uses_the_same_envelope_as_every_other_error() {
+        // RBAC 曾经手拼 403 的 JSON，少了 request_id 和 details——于是全站唯一一个
+        // 客户端解析不出 ApiError 的响应，恰好落在最需要把 request_id 报给运维的地方。
+        let response =
+            AppError::Forbidden("需要 admin 及以上，你是 operator".into()).into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("读 body");
+        let parsed: ApiError = serde_json::from_slice(&body).expect("403 必须能解析成 ApiError");
+        assert_eq!(parsed.code, "forbidden");
+        assert!(parsed.message.contains("admin"));
+        // request_id 字段必须在，哪怕测试里不在请求上下文中拿到的是占位值
+        assert!(parsed.details.is_empty());
     }
 
     #[tokio::test]

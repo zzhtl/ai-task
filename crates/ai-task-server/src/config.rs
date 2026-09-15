@@ -27,6 +27,15 @@ pub struct AppConfig {
     #[arg(long, env = "AI_TASK_DB_MAX_CONNECTIONS")]
     pub db_max_connections: Option<u32>,
 
+    /// 同时最多跑几个 run。
+    ///
+    /// 每个 run 会拉起一个 `claude` 子进程——它吃 CPU、吃内存，而且**花钱**。
+    /// 之前这里没有上限：一次触发风暴、或者 cron 的 `fire_all` 补偿，
+    /// 能把机器上的子进程数顶到没边。超出上限的 run 留在 `queued` 排队，
+    /// 不拒绝——那正是现有状态机里已有的语义。
+    #[arg(long, env = "AI_TASK_MAX_CONCURRENT_RUNS")]
+    pub max_concurrent_runs: Option<usize>,
+
     /// 启动时自动跑迁移。生产上想把迁移和发布解耦时置 false。
     #[arg(long, env = "AI_TASK_AUTO_MIGRATE", default_value_t = true, action = clap::ArgAction::Set)]
     pub auto_migrate: bool,
@@ -137,6 +146,18 @@ impl AppConfig {
     }
 
     #[must_use]
+    /// 并发上限。默认取 CPU 核数，封到 [1, 32]——
+    /// 和连接池一个量级：每个 run 干活时都要用连接。
+    pub fn max_concurrent_runs(&self) -> usize {
+        self.max_concurrent_runs
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(std::num::NonZeroUsize::get)
+                    .unwrap_or(4)
+            })
+            .clamp(1, 32)
+    }
+
     pub fn scheduler_interval(&self) -> Duration {
         Duration::from_millis(self.scheduler_interval_ms.max(100))
     }
@@ -186,6 +207,20 @@ fn default_known_hosts() -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_run_concurrency_cap_stays_in_a_sane_range() {
+        // 没配就跟着核数走，但两头都要封住：0 会让所有 run 永远排队，
+        // 而几百路并发意味着几百个 claude 子进程同时在花钱。
+        let mut config = AppConfig::parse_from(["ai-task"]);
+        assert!((1..=32).contains(&config.max_concurrent_runs()));
+
+        config.max_concurrent_runs = Some(0);
+        assert_eq!(config.max_concurrent_runs(), 1, "0 会让 run 永远起不来");
+
+        config.max_concurrent_runs = Some(9999);
+        assert_eq!(config.max_concurrent_runs(), 32);
+    }
+
     use super::*;
 
     #[test]

@@ -273,6 +273,102 @@ pub struct TriggerRun {
     pub compare_to: Option<RunId>,
 }
 
+/// `GET /api/v1/overview` 的查询参数。
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(deny_unknown_fields)]
+pub struct OverviewQuery {
+    /// 统计窗口，小时。默认 24，上限 720（30 天）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_hours: Option<u32>,
+}
+
+impl OverviewQuery {
+    pub const DEFAULT_WINDOW_HOURS: u32 = 24;
+    pub const MAX_WINDOW_HOURS: u32 = 720;
+
+    #[must_use]
+    pub fn effective_window_hours(&self) -> u32 {
+        self.window_hours
+            .unwrap_or(Self::DEFAULT_WINDOW_HOURS)
+            .clamp(1, Self::MAX_WINDOW_HOURS)
+    }
+}
+
+/// 首页那一屏要的全部数字，一次算完。
+///
+/// **这个接口首先是个正确性修复，不只是少发几个请求。**
+/// 之前首页是拉最近 200 条 run 回浏览器里算 24 小时的次数、失败数和花费——
+/// 实例一忙，第 201 条之后的就静静地不算了，而界面上那三个数字看不出自己是错的。
+/// 窗口聚合只能在数据库里做。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Overview {
+    pub stats: OverviewStats,
+    /// 正在跑和排队中的，最近的在前。
+    pub live: Vec<OverviewRun>,
+    /// 最近结束的。
+    pub recent: Vec<OverviewRun>,
+    /// 接下来会自己触发的定时。
+    pub upcoming: Vec<UpcomingFire>,
+}
+
+/// 首页顶部那一排指标。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct OverviewStats {
+    /// 下面几个窗口内的统计按这个小时数算。回显出来，免得客户端自己猜。
+    pub window_hours: u32,
+    /// 窗口内的 run 总数。
+    pub runs: i64,
+    /// 窗口内落在失败类终态（failed / timed_out / budget_exceeded / resource_exceeded）的。
+    pub failed: i64,
+    /// 窗口内的模型花费合计。
+    pub spend_usd: UsdMicros,
+    /// 当前在跑的（不受窗口限制）。
+    pub running: i64,
+    /// 当前排队的（不受窗口限制）。
+    pub queued: i64,
+    /// 当前待决的审批（不受窗口限制）。
+    pub pending_approvals: i64,
+    /// 任务总数。
+    pub tasks: i64,
+}
+
+/// 首页列表里的一行。
+///
+/// 比 [`RunSummary`] 少几个字段、多一个 `task_name`：首页每一行都要显示任务名，
+/// 而客户端为此再拉一遍任务表、逐行 `find` 是没必要的。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct OverviewRun {
+    pub id: RunId,
+    pub task_id: TaskId,
+    pub task_name: String,
+    pub status: RunStatus,
+    pub trigger: TriggerKind,
+    pub dry_run: bool,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<DateTime<Utc>>,
+    pub cost_usd: UsdMicros,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// 接下来会自己响的一个定时。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UpcomingFire {
+    pub schedule_id: ScheduleId,
+    pub task_id: TaskId,
+    pub task_name: String,
+    pub cron: String,
+    pub next_fire_at: DateTime<Utc>,
+}
+
 /// `GET /api/v1/runs` 的过滤条件。
 ///
 /// 未声明的查询参数会被拒绝而不是忽略——静默忽略会把一个拼写错误变成「返回全部」。

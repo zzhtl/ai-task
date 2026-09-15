@@ -12,6 +12,8 @@ use ai_task_store::{NewRun, NewTask, PendingEvent, RunOutcome, Store, StoreConfi
 use chrono::{DateTime, Duration, Utc};
 use sqlx::{AssertSqlSafe, Connection, PgConnection};
 
+mod common;
+
 struct Harness {
     store: Store,
     workspace: WorkspaceId,
@@ -240,7 +242,7 @@ macro_rules! sched_test {
         #[tokio::test]
         async fn $name() {
             let Some($h) = Harness::create().await else {
-                eprintln!("跳过 {}：未设置 AI_TASK_TEST_DATABASE_URL", stringify!($name));
+                common::skip_or_fail(stringify!($name), "未设置 AI_TASK_TEST_DATABASE_URL");
                 return;
             };
             let outcome = {

@@ -51,6 +51,12 @@ pub struct EventSink {
     last_flush: tokio::time::Instant,
 }
 
+/// 缓冲里最多留多少条没落库的事件。
+///
+/// 只有数据库持续不可用时才会堆到这里。超过就开始丢最早的：
+/// 到那个份上，保住进程比保住事件更要紧。
+const MAX_PENDING: usize = 10_000;
+
 impl EventSink {
     #[must_use]
     pub fn new(store: Store, run_id: RunId) -> Self {
@@ -91,12 +97,41 @@ impl EventSink {
             self.last_flush = tokio::time::Instant::now();
             return Ok(());
         }
-        // 先清空缓冲再写：写失败时缓冲已经腾空，不会在重试里越堆越大。
-        // 代价是那一批事件丢了——但它们是展示用的增量，run 的状态推导
-        // 依赖的是状态类事件，那些走 store 的事务接口单独写。
+        // **写失败要把这一批留着。**
+        //
+        // 这里原本是"先清空再写"，注释说丢掉的只是展示用的增量。那句话不对：
+        // `NodeFinished`、`PolicyDecided`、`ToolRequested` 都从这条路走
+        // （见 dag.rs 的 finish_node 和 engine.rs 的事件翻译），
+        // 它们既是状态推导的依据，也是"这次工具调用被拦下来了吗"的审计材料。
+        // 在一个事件溯源的系统里安静地丢掉一批，等于让回放得出另一个结论。
+        //
+        // 留着的代价是内存，所以有个硬上限兜底：真堆到那个份上，
+        // 数据库已经长时间不可用，这时候保住进程比保住事件更要紧。
         let batch = std::mem::take(&mut self.buffer);
         self.last_flush = tokio::time::Instant::now();
-        self.store.append_events(self.run_id, &batch).await?;
+        if let Err(err) = self.store.append_events(self.run_id, &batch).await {
+            let restored = self.buffer.len() + batch.len();
+            if restored <= MAX_PENDING {
+                // 放回队首：事件之间有顺序，新来的不能插到失败那批前面
+                let mut merged = batch;
+                merged.append(&mut self.buffer);
+                self.buffer = merged;
+                tracing::warn!(
+                    run_id = %self.run_id,
+                    pending = self.buffer.len(),
+                    error = %err,
+                    "事件落库失败，留在缓冲里等下一次"
+                );
+            } else {
+                tracing::error!(
+                    run_id = %self.run_id,
+                    dropped = batch.len(),
+                    error = %err,
+                    "事件缓冲超过上限，丢弃最早的一批——这个 run 的回放会不完整"
+                );
+            }
+            return Err(err);
+        }
         Ok(())
     }
 

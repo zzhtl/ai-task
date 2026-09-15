@@ -42,6 +42,8 @@ pub struct Settings {
     pub host_exec: Option<ai_task_runtime::HostExecConfig>,
     pub require_auth: bool,
     pub min_password_len: usize,
+    /// 同时最多跑几个 run。超出的排队，不拒绝。
+    pub max_concurrent_runs: usize,
 }
 
 impl AppState {
@@ -58,11 +60,12 @@ impl AppState {
             host_exec,
             require_auth,
             min_password_len,
+            max_concurrent_runs,
         } = settings;
         Self(Arc::new(Inner {
             store,
             bus,
-            supervisor: RunSupervisor::new(engine),
+            supervisor: RunSupervisor::new(engine, max_concurrent_runs),
             workspace_id,
             internal_token,
             host_exec,

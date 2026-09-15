@@ -98,8 +98,26 @@ impl Store {
         new: NewRun,
         queued_event: PendingEvent,
     ) -> Result<RunRecord, StoreError> {
-        let run_id = RunId::new();
         let mut tx = self.pool().begin().await?;
+        let record = Self::create_run_in_tx(&mut tx, new, queued_event).await?;
+        tx.commit().await?;
+        self.notify_run(record.id, 1).await;
+        Ok(record)
+    }
+
+    /// 同上，但在调用方给的事务里。
+    ///
+    /// 幂等键要求「响应与副作用写在同一个事务里」（ADR 0002），
+    /// 所以建 run 这一步必须能被拉进外面的事务。
+    ///
+    /// **注意**：提交之后调用方要自己调 [`Store::notify_run`]，否则 SSE 的
+    /// 订阅者要等 2 秒的兜底轮询才看得见第一条事件。
+    pub async fn create_run_in_tx(
+        tx: &mut sqlx::Transaction<'_, Postgres>,
+        new: NewRun,
+        queued_event: PendingEvent,
+    ) -> Result<RunRecord, StoreError> {
+        let run_id = RunId::new();
 
         let row = sqlx::query(
             "INSERT INTO runs (id, workspace_id, task_id, task_version_id, trigger, status,
@@ -115,13 +133,10 @@ impl Store {
         .bind(new.dry_run)
         .bind(&new.inputs)
         .bind(new.compare_to.map(uuid::Uuid::from))
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
 
-        append_in_tx(&mut tx, run_id, std::slice::from_ref(&queued_event)).await?;
-        tx.commit().await?;
-
-        self.notify_run(run_id, 1).await;
+        append_in_tx(tx, run_id, std::slice::from_ref(&queued_event)).await?;
 
         Ok(RunRecord {
             id: run_id,
@@ -315,21 +330,45 @@ impl Store {
         limit: i64,
     ) -> Result<Vec<RunRecord>, StoreError> {
         let statuses = status.map(|s| s.iter().copied().map(status_str).collect::<Vec<_>>());
-        let rows = run_query(
-            "workspace_id = $1
-             AND ($2::uuid IS NULL OR task_id = $2)
-             AND ($3::timestamptz IS NULL OR (created_at, id) < ($3, $4))
-             AND ($6::text[] IS NULL OR status = ANY($6))
-             ORDER BY created_at DESC, id DESC LIMIT $5",
-        )
-        .bind(uuid::Uuid::from(workspace_id))
-        .bind(task_id.map(uuid::Uuid::from))
-        .bind(cursor.map(|(ts, _)| ts))
-        .bind(cursor.map(|(_, id)| uuid::Uuid::from(id)))
-        .bind(limit)
-        .bind(statuses)
-        .fetch_all(self.pool())
-        .await?;
+
+        // **谓词按实际传参拼出来，不用 `($n IS NULL OR ...)`。**
+        //
+        // 原来三个可选条件全挤在一条 SQL 里，planner 在计划期看不出
+        // `status` 到底会不会被用上，于是选不了 runs_status_recent_idx——
+        // 加了索引也照样全扫再过滤。**这是"改了但其实没改好"最容易发生的地方。**
+        // 谓词片段都是代码里的字面量，动态数据一律还是走 bind。
+        let predicate: &'static str = match (task_id.is_some(), statuses.is_some()) {
+            (false, false) => {
+                "workspace_id = $1
+                 AND ($3::timestamptz IS NULL OR (created_at, id) < ($3, $4))
+                 ORDER BY created_at DESC, id DESC LIMIT $5"
+            }
+            (true, false) => {
+                "workspace_id = $1 AND task_id = $2
+                 AND ($3::timestamptz IS NULL OR (created_at, id) < ($3, $4))
+                 ORDER BY created_at DESC, id DESC LIMIT $5"
+            }
+            (false, true) => {
+                "workspace_id = $1 AND status = ANY($6)
+                 AND ($3::timestamptz IS NULL OR (created_at, id) < ($3, $4))
+                 ORDER BY created_at DESC, id DESC LIMIT $5"
+            }
+            (true, true) => {
+                "workspace_id = $1 AND task_id = $2 AND status = ANY($6)
+                 AND ($3::timestamptz IS NULL OR (created_at, id) < ($3, $4))
+                 ORDER BY created_at DESC, id DESC LIMIT $5"
+            }
+        };
+
+        let rows = run_query(predicate)
+            .bind(uuid::Uuid::from(workspace_id))
+            .bind(task_id.map(uuid::Uuid::from))
+            .bind(cursor.map(|(ts, _)| ts))
+            .bind(cursor.map(|(_, id)| uuid::Uuid::from(id)))
+            .bind(limit)
+            .bind(statuses)
+            .fetch_all(self.pool())
+            .await?;
         rows.into_iter().map(run_from_row).collect()
     }
 
@@ -342,7 +381,8 @@ impl Store {
         rows.into_iter().map(run_from_row).collect()
     }
 
-    async fn notify_run(&self, run_id: RunId, max_seq: i64) {
+    /// 通知 SSE 订阅者。跨事务建 run 时调用方要自己调它。
+    pub async fn notify_run(&self, run_id: RunId, max_seq: i64) {
         let payload = format!("{run_id}:{max_seq}");
         if let Err(err) = sqlx::query("SELECT pg_notify($1, $2)")
             .bind(crate::events::EVENTS_CHANNEL)
@@ -370,7 +410,7 @@ fn run_query(predicate: &'static str) -> Query<'static, Postgres, PgArguments> {
     )))
 }
 
-fn run_from_row(row: sqlx::postgres::PgRow) -> Result<RunRecord, StoreError> {
+pub(crate) fn run_from_row(row: sqlx::postgres::PgRow) -> Result<RunRecord, StoreError> {
     Ok(RunRecord {
         id: RunId(row.try_get("id")?),
         workspace_id: WorkspaceId(row.try_get("workspace_id")?),
@@ -398,7 +438,7 @@ fn run_from_row(row: sqlx::postgres::PgRow) -> Result<RunRecord, StoreError> {
 
 /// 库里的取值与 `ai-task-proto` 的 serde tag 逐字一致，所以直接走 serde，
 /// 不另写一张映射表——两份映射早晚会漂移。
-fn parse_status(value: &str) -> Result<RunStatus, StoreError> {
+pub(crate) fn parse_status(value: &str) -> Result<RunStatus, StoreError> {
     serde_json::from_value(serde_json::Value::String(value.into())).map_err(|_| {
         StoreError::Corrupt {
             what: "runs.status",
@@ -407,7 +447,7 @@ fn parse_status(value: &str) -> Result<RunStatus, StoreError> {
     })
 }
 
-fn parse_trigger(value: &str) -> Result<TriggerKind, StoreError> {
+pub(crate) fn parse_trigger(value: &str) -> Result<TriggerKind, StoreError> {
     serde_json::from_value(serde_json::Value::String(value.into())).map_err(|_| {
         StoreError::Corrupt {
             what: "runs.trigger",

@@ -6,6 +6,7 @@ pub mod auth;
 pub mod drift;
 pub mod health;
 pub mod hosts;
+mod overview;
 pub mod policy;
 pub mod remote;
 pub mod rules;
@@ -51,6 +52,7 @@ fn build_router(state: AppState) -> Router {
             get(tasks::get).put(tasks::update).delete(tasks::delete),
         )
         .route("/tasks/{id}/runs", post(tasks::trigger))
+        .route("/overview", get(overview::get))
         .route("/runs", get(runs::list))
         .route("/runs/{id}", get(runs::get).delete(runs::delete))
         .route("/runs/{id}/cancel", post(runs::cancel))
@@ -120,7 +122,14 @@ fn build_router(state: AppState) -> Router {
                 .layer(axum::middleware::from_fn(middleware::request_id::layer))
                 .layer(TraceLayer::new_for_http().make_span_with(RequestSpan))
                 // 2. 压缩在业务层外侧，handler 不用关心
-                .layer(CompressionLayer::new().gzip(true).no_br().no_deflate())
+                .layer(
+                    CompressionLayer::new()
+                        // brotli 优先：对 JS/CSS 普遍比 gzip 小 15–20%。
+                        // DefaultPredicate 会跳过 text/event-stream，所以 SSE 不受影响。
+                        .br(true)
+                        .gzip(true)
+                        .no_deflate(),
+                )
                 .layer(axum::extract::DefaultBodyLimit::max(BODY_LIMIT))
                 // 3. CatchPanic 在最内侧：一个 handler panic 不能带走整个连接，
                 //    但它外面的 trace/request-id 仍要能记录这次失败

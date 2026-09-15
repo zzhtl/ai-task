@@ -10,7 +10,7 @@
 use ai_task_proto::UserId;
 use ai_task_store::Role;
 use axum::extract::{Request, State};
-use axum::http::{Method, StatusCode};
+use axum::http::Method;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
@@ -66,18 +66,15 @@ pub async fn layer(State(state): State<AppState>, request: Request, next: Next) 
     };
 
     if !principal.role.allows(needed) {
-        return (
-            StatusCode::FORBIDDEN,
-            axum::Json(serde_json::json!({
-                "code": "forbidden",
-                "message": format!(
-                    "需要 {} 及以上，你是 {}",
-                    needed.as_str(),
-                    principal.role.as_str()
-                ),
-            })),
-        )
-            .into_response();
+        // 走 AppError 而不是手拼 JSON：手拼的那版少了 request_id 和 details，
+        // 于是全站唯一一个客户端解析不出 `ApiError` 的响应恰好出现在权限失败上，
+        // 而那正是最需要把 request_id 报给运维的时候。见 ADR 0002。
+        return AppError::Forbidden(format!(
+            "需要 {} 及以上，你是 {}",
+            needed.as_str(),
+            principal.role.as_str()
+        ))
+        .into_response();
     }
 
     CURRENT_USER

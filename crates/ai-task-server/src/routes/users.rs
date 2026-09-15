@@ -57,8 +57,8 @@ fn system_user_id(users: &[ai_task_store::auth::UserRecord]) -> Option<UserId> {
 }
 
 async fn is_system_user(state: &AppState, id: UserId) -> Result<bool, AppError> {
-    let users = state.store.list_users(state.workspace_id).await?;
-    Ok(system_user_id(&users) == Some(id))
+    // 一条 ORDER BY ... LIMIT 1，不再为了找"最早那个"把整张表拉回来
+    Ok(state.store.system_user_id(state.workspace_id).await? == Some(id))
 }
 
 /// 当前请求是谁发的。没开认证时是 `None`。

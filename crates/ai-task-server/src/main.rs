@@ -5,6 +5,7 @@ mod bus;
 mod config;
 mod error;
 mod hook;
+mod idempotency;
 mod middleware;
 mod observability;
 mod routes;
@@ -16,7 +17,7 @@ use std::time::Duration;
 
 use ai_task_exec::claude_code::ClaudeCodeExecutor;
 use ai_task_proto::WorkspaceId;
-use ai_task_runtime::{HookSettings, RunEngine, Scheduler, reap_orphaned_runs};
+use ai_task_runtime::{HookSettings, RunEngine, Scheduler, maintenance, reap_orphaned_runs};
 use ai_task_store::Store;
 use anyhow::Context as _;
 use clap::Parser as _;
@@ -187,11 +188,15 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
             host_exec: Some(config.host_exec()),
             require_auth: config.require_auth,
             min_password_len: config.min_password_len,
+            max_concurrent_runs: config.max_concurrent_runs(),
         },
     );
 
-    // 调度器和 HTTP 服务共享一个关停信号
+    // 调度器、维护任务和 HTTP 服务共享一个关停信号
     let shutdown = tokio_util::sync::CancellationToken::new();
+    // 每日维护。少了它 `ensure_partitions` 就只在 migrate 时跑过一次，
+    // 连续运行约四个月后所有事件会落进 DEFAULT 兜底分区——那之后很难便宜地补救。
+    maintenance::spawn(store.clone(), shutdown.clone());
     {
         let supervisor = state.supervisor.clone();
         Scheduler::new(store).spawn(

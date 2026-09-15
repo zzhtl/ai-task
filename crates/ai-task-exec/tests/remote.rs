@@ -261,6 +261,14 @@ async fn the_local_agent_enforces_limits_when_systemd_is_available() {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/debug/ai-task-agent");
     if !path.exists() {
+        // CI 会先 `cargo build -p ai-task-agent`，所以这里缺二进制是配置错误，不是环境差异。
+        // 静默跳过的话，「本机 agent 的上限真的生效了」就变成一句没人验证过的话。
+        assert!(
+            std::env::var_os("CI").is_none()
+                && std::env::var_os("AI_TASK_REQUIRE_DB_TESTS").is_none(),
+            "本机 agent 未构建（cargo build -p ai-task-agent）。\
+             设了 CI / AI_TASK_REQUIRE_DB_TESTS 就不允许跳过。"
+        );
         eprintln!("跳过：本机 agent 未构建（cargo build -p ai-task-agent）");
         return;
     }

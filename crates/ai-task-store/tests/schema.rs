@@ -388,3 +388,242 @@ async fn seed(f: &common::Fixture) -> Ids {
         schedule,
     }
 }
+
+db_test!(retention_bounds_the_partition_count, |f| {
+    // 上面那条 `monthly_partitions_exist_and_are_not_recreated` 只断言"分区建出来了"，
+    // 分区数涨到几十张它照样绿。而 SSE 的续传查询没有 ts 谓词，
+    // 每多一张分区就多扫一张表——所以真正要守的是**上界**。
+    async fn count_partitions(store: &ai_task_store::Store) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM pg_inherits i
+             JOIN pg_class p ON p.oid = i.inhparent
+             WHERE p.relname = 'run_events'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .expect("数分区")
+    }
+
+    // 造一批很老的月度分区，模拟跑了两年的实例
+    for ym in ["202301", "202302", "202303", "202304"] {
+        let sql = format!(
+            "CREATE TABLE run_events_{ym} PARTITION OF run_events
+             FOR VALUES FROM ('{}-01') TO ('{}-01')",
+            format_args!("{}-{}", &ym[..4], &ym[4..]),
+            // 下个月
+            if &ym[4..] == "12" {
+                format!("{}-01", ym[..4].parse::<i32>().expect("year") + 1)
+            } else {
+                format!(
+                    "{}-{:02}",
+                    &ym[..4],
+                    ym[4..].parse::<i32>().expect("month") + 1
+                )
+            }
+        );
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .execute(f.store.pool())
+            .await
+            .expect("建老分区");
+    }
+
+    let before = count_partitions(&f.store).await;
+    assert!(before >= 5, "至少有兜底分区 + 四张老分区，实际 {before}");
+
+    let dropped = f.store.drop_old_partitions(6).await.expect("清理");
+    assert_eq!(dropped, 4, "四张 2023 年的分区都该被丢掉");
+
+    let after = count_partitions(&f.store).await;
+    assert_eq!(after, before - 4);
+
+    // 兜底分区永远保留：它是"维护任务没跑"时唯一的安全网，丢了会让写入直接失败
+    let has_default: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'run_events_default')",
+    )
+    .fetch_one(f.store.pool())
+    .await
+    .expect("查兜底分区");
+    assert!(has_default, "DEFAULT 分区不能被保留策略丢掉");
+
+    // 再跑一次是幂等的
+    assert_eq!(f.store.drop_old_partitions(6).await.expect("再清理"), 0);
+});
+
+db_test!(status_filtered_run_listing_uses_the_status_index, |f| {
+    // 加索引**不等于**索引会被用上。`list_runs` 原来把三个可选条件挤在
+    // 一条 `($n IS NULL OR ...)` 里，planner 在计划期看不出 status 会不会参与，
+    // 于是照样全扫再过滤。这条断言守的就是"查询形状拆开了"这件事。
+    let ids = seed(&f).await;
+    // **选择性要真实。** 四种状态各占 25% 的话，沿着 created_at 索引走几十行
+    // 就能凑够 LIMIT，planner 选全扫再过滤是对的。这个索引真正要救的是
+    // 「几万条里只有几条是这个状态」——那时候不走索引要扫到天亮。
+    sqlx::query(
+        "INSERT INTO runs (id, workspace_id, task_id, task_version_id, trigger, status, created_at)
+         SELECT gen_random_uuid(), $1, $2, $3, 'manual',
+                CASE WHEN s % 5000 = 0 THEN 'resource_exceeded' ELSE 'succeeded' END,
+                now() - make_interval(secs => s)
+         FROM generate_series(1, 30000) s",
+    )
+    .bind(ids.workspace)
+    .bind(ids.task)
+    .bind(ids.version)
+    .execute(f.store.pool())
+    .await
+    .expect("写 run");
+    sqlx::query("ANALYZE runs")
+        .execute(f.store.pool())
+        .await
+        .expect("ANALYZE");
+
+    let plan: String = sqlx::query(
+        "EXPLAIN SELECT id FROM runs
+         WHERE workspace_id = $1 AND status = ANY(ARRAY['resource_exceeded'])
+         ORDER BY created_at DESC, id DESC LIMIT 50",
+    )
+    .bind(ids.workspace)
+    .fetch_all(f.store.pool())
+    .await
+    .expect("EXPLAIN")
+    .iter()
+    .map(|row| row.get::<String, _>(0))
+    .collect::<Vec<_>>()
+    .join("\n");
+
+    assert!(
+        plan.contains("runs_status_recent_idx"),
+        "状态筛选没走 runs_status_recent_idx，计划是：\n{plan}"
+    );
+});
+
+db_test!(metrics_by_time_can_be_read_without_a_sort, |f| {
+    // 原来的索引是 (run_id, node_key, ts)，中间隔着 node_key，
+    // 所以 `WHERE run_id = $1 ORDER BY ts` 出来的顺序是按节点分组的，还得再排一次。
+    //
+    // **断言的是"索引能满足这个查询形状"，不是"planner 一定会选它"。**
+    // 选不选取决于表有多大、数据多稀疏——在几百行的测试库上全扫再排序
+    // 完全可能更便宜，那时候 planner 不用索引是对的。写死计划形状的断言
+    // 会在数据量一变就红，那种红不说明任何问题。
+    let ids = seed(&f).await;
+    let run: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO runs (id, workspace_id, task_id, task_version_id, trigger, status)
+         VALUES (gen_random_uuid(), $1, $2, $3, 'manual', 'running') RETURNING id",
+    )
+    .bind(ids.workspace)
+    .bind(ids.task)
+    .bind(ids.version)
+    .fetch_one(f.store.pool())
+    .await
+    .expect("建 run");
+
+    sqlx::query(
+        "INSERT INTO run_metrics (run_id, node_key, ts, cpu_usec, rss_bytes, pids)
+         SELECT $1, 'n' || (s % 5), now() - make_interval(secs => s), s, s, 1
+         FROM generate_series(1, 2000) s",
+    )
+    .bind(run)
+    .execute(f.store.pool())
+    .await
+    .expect("写采样");
+    sqlx::query("ANALYZE run_metrics")
+        .execute(f.store.pool())
+        .await
+        .expect("ANALYZE");
+
+    // 索引必须存在**且有效**。CONCURRENTLY 失败会留下一个 indisvalid = false 的
+    // 索引——它不报错、也永远不被使用，比没建更难发现。
+    let valid: bool = sqlx::query_scalar(
+        "SELECT i.indisvalid FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+         WHERE c.relname = 'run_metrics_run_ts_idx'",
+    )
+    .fetch_one(f.store.pool())
+    .await
+    .expect("查索引");
+    assert!(valid, "run_metrics_run_ts_idx 不是有效索引");
+
+    // 把全扫这条路堵上，逼 planner 表态：这个索引到底能不能满足
+    // 「按 run_id 取、按 ts 有序」而不额外排序。
+    //
+    // **必须钉在同一条连接上。** SET 是会话级的，而池子下一次可能给另一条连接；
+    // SET LOCAL 更糟——不在事务里就是空操作，还不报错。
+    let mut conn = f.store.pool().acquire().await.expect("取连接");
+    sqlx::query("SET enable_seqscan = off")
+        .execute(&mut *conn)
+        .await
+        .expect("关掉全扫");
+    let plan: String =
+        sqlx::query("EXPLAIN SELECT node_key, ts FROM run_metrics WHERE run_id = $1 ORDER BY ts")
+            .bind(run)
+            .fetch_all(&mut *conn)
+            .await
+            .expect("EXPLAIN")
+            .iter()
+            .map(|row| row.get::<String, _>(0))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+    // 分区表上，父索引会在每张分区上生成一个**自己的名字**
+    // （run_metrics_202609_run_id_ts_idx），计划里出现的是那些名字，不是父索引名。
+    assert!(
+        plan.contains("run_id_ts_idx"),
+        "堵掉全扫之后仍然没走 (run_id, ts) 索引：\n{plan}"
+    );
+    // 真正要的是这个：Merge Append 直接产出有序结果，**没有单独的 Sort 节点**。
+    // 老索引 (run_id, node_key, ts) 给不出这个顺序，必然多一次排序。
+    assert!(
+        !plan
+            .lines()
+            .any(|line| line.trim_start().starts_with("Sort  ")),
+        "计划里还有排序节点，说明索引没能直接给出 ts 顺序：\n{plan}"
+    );
+});
+
+db_test!(the_sse_query_prunes_partitions_it_cannot_contain, |f| {
+    // SSE 的续传查询只有 run_id 和 seq 两个条件时，planner 只能 Merge Append
+    // 扫过**所有**月度分区——而分区数每月 +1。给一个 ts 下界就能裁掉更早的那些。
+    let ids = seed(&f).await;
+    let run: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO runs (id, workspace_id, task_id, task_version_id, trigger, status)
+         VALUES (gen_random_uuid(), $1, $2, $3, 'manual', 'running') RETURNING id",
+    )
+    .bind(ids.workspace)
+    .bind(ids.task)
+    .bind(ids.version)
+    .fetch_one(f.store.pool())
+    .await
+    .expect("建 run");
+
+    let touched = |plan: &str| plan.matches("run_events_").count();
+
+    let without: String = sqlx::query(
+        "EXPLAIN SELECT seq FROM run_events WHERE run_id = $1 AND seq > 0 ORDER BY seq LIMIT 200",
+    )
+    .bind(run)
+    .fetch_all(f.store.pool())
+    .await
+    .expect("EXPLAIN")
+    .iter()
+    .map(|r| r.get::<String, _>(0))
+    .collect::<Vec<_>>()
+    .join("\n");
+
+    let with: String = sqlx::query(
+        "EXPLAIN SELECT seq FROM run_events
+         WHERE run_id = $1 AND seq > 0 AND ts >= now() - interval '1 minute'
+         ORDER BY seq LIMIT 200",
+    )
+    .bind(run)
+    .fetch_all(f.store.pool())
+    .await
+    .expect("EXPLAIN")
+    .iter()
+    .map(|r| r.get::<String, _>(0))
+    .collect::<Vec<_>>()
+    .join("\n");
+
+    assert!(
+        touched(&with) <= touched(&without),
+        "加了 ts 下界之后接触的分区不该变多：\n带下界 {}\n{with}\n\n不带 {}\n{without}",
+        touched(&with),
+        touched(&without)
+    );
+});

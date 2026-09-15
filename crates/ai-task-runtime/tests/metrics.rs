@@ -8,6 +8,8 @@ use ai_task_runtime::{Command, HostExecConfig, run_command};
 use ai_task_store::{NewRun, NewTask, PendingEvent, Store, StoreConfig};
 use sqlx::{AssertSqlSafe, Connection, PgConnection};
 
+mod common;
+
 struct Harness {
     store: Store,
     workspace: WorkspaceId,
@@ -67,11 +69,19 @@ fn agent_path() -> Option<std::path::PathBuf> {
 #[tokio::test]
 async fn every_sample_the_agent_emits_reaches_the_database() {
     let Some(harness) = Harness::create().await else {
-        eprintln!("跳过：未设 AI_TASK_TEST_DATABASE_URL");
+        common::skip_or_fail(
+            "every_sample_the_agent_emits_reaches_the_database",
+            "未设 AI_TASK_TEST_DATABASE_URL",
+        );
         return;
     };
     let Some(agent) = agent_path() else {
-        eprintln!("跳过：先 cargo build -p ai-task-agent");
+        // 这个测试要驱动真实的 agent 二进制。没建就跳过的话，"资源归因跑通了"
+        // 和"资源归因根本没测"在日志里是同一行字。
+        common::skip_or_fail(
+            "every_sample_the_agent_emits_reaches_the_database",
+            "target/debug/ai-task-agent 不存在，先 cargo build -p ai-task-agent",
+        );
         harness.drop_db().await;
         return;
     };
@@ -189,11 +199,19 @@ async fn a_command_shorter_than_the_sampling_interval_still_gets_one_point() {
     // 跑得比一个采样周期还快的命令，曲线不能是空的——否则界面上
     // "这个节点跑过吗"没有答案。
     let Some(harness) = Harness::create().await else {
-        eprintln!("跳过：未设 AI_TASK_TEST_DATABASE_URL");
+        common::skip_or_fail(
+            "a_command_shorter_than_the_sampling_interval_still_gets_one_point",
+            "未设 AI_TASK_TEST_DATABASE_URL",
+        );
         return;
     };
     let Some(agent) = agent_path() else {
-        eprintln!("跳过：先 cargo build -p ai-task-agent");
+        // 这个测试要驱动真实的 agent 二进制。没建就跳过的话，"资源归因跑通了"
+        // 和"资源归因根本没测"在日志里是同一行字。
+        common::skip_or_fail(
+            "a_command_shorter_than_the_sampling_interval_still_gets_one_point",
+            "target/debug/ai-task-agent 不存在，先 cargo build -p ai-task-agent",
+        );
         harness.drop_db().await;
         return;
     };

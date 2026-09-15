@@ -31,6 +31,16 @@ const FALLBACK_POLL: Duration = Duration::from_secs(2);
 /// SSE 心跳间隔。
 ///
 /// 中间的反向代理通常会掐掉一段时间无数据的连接，心跳让连接活着。
+/// 同时最多挂多少条 SSE。
+///
+/// 每条连接是一个不限时长的任务，拿着一个 broadcast 接收端，
+/// 而且每隔 FALLBACK_POLL 就要占一次连接池。之前没有任何上限：
+/// 开着几百个标签页就能把池子耗干，而池子耗干表现为**所有接口**一起变慢。
+const MAX_STREAMS: usize = 64;
+
+static STREAMS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_STREAMS)));
+
 const KEEPALIVE: Duration = Duration::from_secs(15);
 
 /// `GET /api/v1/runs/{id}/events`
@@ -47,13 +57,24 @@ pub async fn stream(
         .await
         .map_err(|err| map_not_found(err, "run", run_id))?;
 
+    // 拿一个名额。拿不到就让客户端稍后再来——EventSource 自己会重连。
+    let Ok(permit) = std::sync::Arc::clone(&STREAMS).try_acquire_owned() else {
+        return Err(AppError::Conflict("同时打开的事件流太多，稍后再试".into()));
+    };
+
     let after_seq = last_event_id(&headers).unwrap_or(0);
+    // 这个 run 的事件不可能早于它自己被创建的时刻。给查询一个 ts 下界，
+    // 就能让 Postgres 裁掉所有更早的月度分区——run 已经在手上了，不用额外查一次。
+    // 留一分钟余量，免得被时钟回拨这类事情卡掉边界上的事件。
+    let not_before = Some(run.created_at - chrono::Duration::minutes(1));
     let store = state.store.clone();
     let mut wakeups = state.bus.subscribe();
     let mut cursor = after_seq;
     let mut terminal = run.status.is_terminal() && cursor >= run.max_seq;
 
     let stream = async_stream::stream! {
+        // 名额跟着流走：流结束（正常收尾或客户端断开）时自动还回去
+        let _permit = permit;
         loop {
             if terminal {
                 break;
@@ -61,7 +82,10 @@ pub async fn stream(
 
             // 先把落后的补完，再等下一次唤醒
             loop {
-                let batch = match store.read_events_after(run_id, cursor, CATCHUP_BATCH).await {
+                let batch = match store
+                    .read_events_after(run_id, cursor, CATCHUP_BATCH, not_before)
+                    .await
+                {
                     Ok(batch) => batch,
                     Err(err) => {
                         tracing::warn!(%run_id, error = %err, "读取事件失败，本轮跳过");
@@ -95,17 +119,34 @@ pub async fn stream(
                 break;
             }
 
-            // 等唤醒；超时就兜底轮询一次
-            match tokio::time::timeout(FALLBACK_POLL, wakeups.recv()).await {
-                // 别的 run 的提示，忽略
-                Ok(Ok(wakeup)) if wakeup.run_id != run_id => continue,
-                Ok(Ok(_)) | Err(_) => continue,
-                // 落后太多：不用管，下一轮补读会按 cursor 把差的都取回来
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
-                    tracing::debug!(%run_id, skipped = n, "订阅落后，靠补读追上");
-                    continue;
+            // 等唤醒；超时就兜底轮询一次。
+            //
+            // **别的 run 的提示必须在这里就地丢掉。**
+            // 之前这一档写的是 `continue`，注释也写着"忽略"——但 continue 回到的是
+            // **外层**循环，于是立刻又发一次 read_events_after。
+            // K 个连接 × 一个忙碌的 run 每秒 flush 几次 = 每秒几千次无谓查询，
+            // 而连接池只有 4–32。
+            let mut closed = false;
+            loop {
+                match tokio::time::timeout(FALLBACK_POLL, wakeups.recv()).await {
+                    // 本 run 的提示，或者超时兜底：跳出去补读
+                    Ok(Ok(wakeup)) if wakeup.run_id == run_id => break,
+                    Err(_) => break,
+                    // 别的 run 的提示：接着等，不去碰数据库
+                    Ok(Ok(_)) => {}
+                    // 落后太多：不用管，补读会按 cursor 把差的都取回来
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
+                        tracing::debug!(%run_id, skipped = n, "订阅落后，靠补读追上");
+                        break;
+                    }
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                        closed = true;
+                        break;
+                    }
                 }
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
+            }
+            if closed {
+                break;
             }
         }
     };

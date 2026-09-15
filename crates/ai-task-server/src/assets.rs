@@ -3,7 +3,7 @@
 //! 缓存策略跟着 SvelteKit 的产物布局走：`_app/immutable/` 下的文件名带内容哈希，
 //! 可以长期强缓存；`index.html` 必须每次校验，否则改版后用户一直拿到旧壳。
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode, Uri, header};
 use rust_embed::Embed;
 
@@ -19,7 +19,7 @@ pub async fn serve(uri: Uri, headers: HeaderMap) -> Response<Body> {
     let key = if path.is_empty() { "index.html" } else { path };
 
     if let Some(file) = Assets::get(key) {
-        return build_response(key, file, &headers);
+        return build_response(key, file, &headers, precompressed(key, &headers));
     }
 
     // 带扩展名的资源没命中就是真的 404。一律回退 index.html 并返回 200 会让
@@ -30,7 +30,7 @@ pub async fn serve(uri: Uri, headers: HeaderMap) -> Response<Body> {
 
     // 无扩展名的路径视为前端路由，交回 SPA 入口
     match Assets::get("index.html") {
-        Some(file) => build_response("index.html", file, &headers),
+        Some(file) => build_response("index.html", file, &headers, None),
         None => not_found(),
     }
 }
@@ -45,10 +45,37 @@ fn not_found() -> Response<Body> {
     response
 }
 
+/// 客户端能收哪种编码，我们又恰好有对应的侧车。
+///
+/// `precompress: true` 让构建期就把 `.br` / `.gz` 生成好。这些是内容哈希过的
+/// 不可变资源，每个请求现压一遍是纯浪费 CPU——而且压的还是同样的字节。
+/// 命中侧车时直接吐，并打上 `content-encoding`，压缩层看到就不会再压一次。
+fn precompressed(
+    path: &str,
+    headers: &HeaderMap,
+) -> Option<(rust_embed::EmbeddedFile, &'static str)> {
+    let accept = headers
+        .get(header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+
+    // brotli 更小，优先
+    for (suffix, encoding) in [(".br", "br"), (".gz", "gzip")] {
+        if !accept.contains(encoding) {
+            continue;
+        }
+        if let Some(file) = Assets::get(&format!("{path}{suffix}")) {
+            return Some((file, encoding));
+        }
+    }
+    None
+}
+
 fn build_response(
     path: &str,
     file: rust_embed::EmbeddedFile,
     headers: &HeaderMap,
+    precompressed: Option<(rust_embed::EmbeddedFile, &'static str)>,
 ) -> Response<Body> {
     let etag = format!("\"{}\"", hex(&file.metadata.sha256_hash()));
 
@@ -62,7 +89,19 @@ fn build_response(
         *r.status_mut() = StatusCode::NOT_MODIFIED;
         r
     } else {
-        Response::new(Body::from(file.data.into_owned()))
+        // ETag 始终来自**未压缩**的那份：同一份内容不该因为客户端支持的编码不同
+        // 而有两个不同的 ETag，否则换个浏览器就得重下一遍。
+        let body = precompressed
+            .as_ref()
+            .map_or(file.data, |(sidecar, _)| sidecar.data.clone());
+        // `into_owned()` 会把整个文件复制进一个新 Vec——每一个请求都复制一遍，
+        // 而这些字节是 'static 的、内容哈希过的、永远不变的。
+        // release 下 rust-embed 给的是 Cow::Borrowed，借用它就是零拷贝；
+        // dev 下（没开 debug-embed）是 Owned，直接拿走，行为不变。
+        Response::new(match body {
+            std::borrow::Cow::Borrowed(bytes) => Body::from(Bytes::from_static(bytes)),
+            std::borrow::Cow::Owned(bytes) => Body::from(bytes),
+        })
     };
 
     let out = response.headers_mut();
@@ -71,6 +110,12 @@ fn build_response(
     }
     if fresh {
         return response;
+    }
+
+    if let Some((_, encoding)) = precompressed {
+        out.insert(header::CONTENT_ENCODING, HeaderValue::from_static(encoding));
+        // 同一个 URL 在不同 accept-encoding 下内容不同，缓存必须按它分桶
+        out.insert(header::VARY, HeaderValue::from_static("accept-encoding"));
     }
 
     let mime = mime_guess::from_path(path).first_or_octet_stream();
