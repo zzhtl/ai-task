@@ -6,7 +6,7 @@
    * 别的东西也不会混进来。CPU 是累计微秒，必须相邻两点做差才是使用率；
    * 直接画累计值只会得到一条单调上升、看不出任何问题的线。
    */
-  import { api } from '$api/client';
+  import { api, describeError } from '$api/client';
 
   interface MetricPoint {
     at: string;
@@ -30,14 +30,21 @@
   } = $props();
 
   let series = $state<NodeMetrics[]>([]);
+  /** 采样读不出来。不是 admin 门禁的接口，所以这里失败就是真故障。 */
+  let error = $state<string | null>(null);
 
   $effect(() => {
     // revision 变了就重取：事件流告诉我们节点跑完了，这里不用自己轮询
     void revision;
     if (!runId) return;
     api<NodeMetrics[]>(`/api/v1/runs/${runId}/metrics`)
-      .then((s) => (series = s))
-      .catch(() => {});
+      .then((s) => {
+        series = s;
+        error = null;
+      })
+      // 之前这里是 `.catch(() => {})`：采样读失败时整块曲线连同标题一起消失，
+      // 和"这个 run 本来就没有资源采样"长得一模一样。
+      .catch((e) => (error = describeError(e)));
   });
 
   const W = 720;
@@ -87,20 +94,34 @@
       .join(' ');
   }
 
+  /**
+   * 求最大值。**不能用 `Math.max(...arr)`**：参数展开会把整个数组推上调用栈，
+   * V8 大约在十万个元素时抛 RangeError。1 Hz 采样跑够久就能撞上，而那正是
+   * 最需要看曲线的时候。采样条数由服务端决定，前端不该被一个大响应打崩。
+   */
+  function peak<T>(items: T[], of: (item: T) => number): number {
+    let max = 0;
+    for (const item of items) {
+      const v = of(item);
+      if (v > max) max = v;
+    }
+    return max;
+  }
+
   const charts = $derived.by(() =>
     series.map((s) => {
       const cpu = cpuPercent(s.points);
       const rss = s.points.map((p) => ({ t: Date.parse(p.at), v: p.rss_bytes }));
       // 上界向上取整到一个好看的刻度，否则每来一个点整条线都会跳
-      const cpuMax = Math.max(100, Math.ceil(Math.max(0, ...cpu.map((p) => p.v)) / 100) * 100);
-      const rssMax = Math.max(1, ...rss.map((p) => p.v));
+      const cpuMax = Math.max(100, Math.ceil(peak(cpu, (p) => p.v) / 100) * 100);
+      const rssMax = Math.max(1, peak(rss, (p) => p.v));
       return {
         key: s.node_key,
         cpuPath: path(cpu, cpuMax),
         rssPath: path(rss, rssMax),
         cpuMax,
         peakRss: rssMax,
-        peakPids: Math.max(0, ...s.points.map((p) => p.pids)),
+        peakPids: peak(s.points, (p) => p.pids),
         degraded: degraded[s.node_key],
         // 这个节点在共用时间轴上占的区间：底色 + 表头的起止偏移
         span: (() => {
@@ -122,7 +143,9 @@
   const totalSeconds = $derived(domain ? (domain.hi - domain.lo) / 1000 : 0);
 </script>
 
-{#if charts.length > 0}
+{#if error}
+  <div class="banner">读不到资源采样：{error}</div>
+{:else if charts.length > 0}
   <section class="metrics">
     <h2>
       资源归因
@@ -185,7 +208,7 @@
     display: flex;
     gap: var(--s3);
     align-items: baseline;
-    font-size: 0.84rem;
+    font-size: var(--t-base);
     flex-wrap: wrap;
   }
   .node {
@@ -215,7 +238,7 @@
   }
   h2 .muted {
     font-weight: 400;
-    font-size: 0.78rem;
+    font-size: var(--t-sm);
     margin-left: 0.5rem;
   }
   .muted {
@@ -223,10 +246,10 @@
   }
   .degraded {
     color: var(--warn);
-    font-size: 0.78rem;
+    font-size: var(--t-sm);
   }
   footer {
-    font-size: 0.74rem;
+    font-size: var(--t-xs);
     display: flex;
     gap: 0.4rem;
     align-items: center;

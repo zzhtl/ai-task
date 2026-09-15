@@ -9,7 +9,9 @@ export default {
       pages: '../crates/ai-task-server/dist',
       assets: '../crates/ai-task-server/dist',
       fallback: 'index.html',
-      precompress: false,
+      // 产出 .br / .gz 侧车：这些资源内容哈希过、永不变化，
+      // 每次请求现压是纯浪费。assets.rs 按 accept-encoding 直接吐侧车。
+      precompress: true,
       strict: false
     }),
     alias: {

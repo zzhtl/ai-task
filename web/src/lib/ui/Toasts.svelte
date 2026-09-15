@@ -1,5 +1,6 @@
 <script lang="ts">
   import { toasts } from './toast.svelte';
+  import Icon from './Icon.svelte';
 </script>
 
 <div class="toasts" aria-live="polite">
@@ -8,7 +9,7 @@
       <span class="mark"></span>
       <span class="text">{t.text}</span>
       <button class="btn-ghost btn-sm btn-icon" aria-label="关闭" onclick={() => toasts.dismiss(t.id)}>
-        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
+        <Icon name="close" />
       </button>
     </div>
   {/each}
@@ -36,14 +37,8 @@
     background: var(--surface-2);
     border: 1px solid var(--line-strong);
     box-shadow: var(--shadow-pop);
-    font-size: 0.84rem;
-    animation: rise 0.16s ease-out;
-  }
-  @keyframes rise {
-    from {
-      opacity: 0;
-      transform: translateY(8px);
-    }
+    font-size: var(--t-base);
+    animation: rise var(--dur-3) var(--ease-out);
   }
   .mark {
     width: 8px;

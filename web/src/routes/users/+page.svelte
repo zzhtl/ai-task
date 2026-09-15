@@ -1,13 +1,16 @@
 <script lang="ts">
   // 用户与角色管理。整页都要 admin —— 后端也拦，这里只是别让人白点。
-  import { api, describeError } from '$api/client';
+  import { api, describeError, fieldErrors } from '$api/client';
   import { listUsers, type Role, type User } from '$api/models';
   import { session } from '$lib/auth/session.svelte';
   import PageHeader from '$lib/ui/PageHeader.svelte';
   import Loading from '$lib/ui/Loading.svelte';
   import Confirm from '$lib/ui/Confirm.svelte';
+  import Modal from '$lib/ui/Modal.svelte';
+  import Field from '$lib/ui/Field.svelte';
   import { toast, toastError } from '$lib/ui/toast.svelte';
   import { ago, stamp } from '$lib/ui/format';
+  import Icon from '$lib/ui/Icon.svelte';
 
   const ROLES: Role[] = ['viewer', 'operator', 'admin'];
   /** 各档能做什么，写在界面上——不然"operator"是个没有含义的词。 */
@@ -23,6 +26,8 @@
   let busy = $state(false);
   /** 表单打开着：新建，或者在改某个人。 */
   let form = $state<'closed' | 'new' | User>('closed');
+  /** 后端 422 里按字段拆出来的错误，显示在各自的框底下。 */
+  let fieldErr = $state<Record<string, string>>({});
   const editing = $derived(typeof form === 'object' ? form : null);
 
   let email = $state('');
@@ -39,12 +44,14 @@
     displayName = '';
     password = '';
     role = 'operator';
+    fieldErr = {};
     form = 'new';
   }
   function openEdit(user: User) {
     email = user.email;
     displayName = user.display_name;
     password = '';
+    fieldErr = {};
     form = user;
   }
 
@@ -76,6 +83,7 @@
   async function submit() {
     busy = true;
     error = null;
+    fieldErr = {};
     try {
       if (editing) {
         await api(`/api/v1/users/${editing.id}`, {
@@ -93,7 +101,9 @@
       form = 'closed';
       await load();
     } catch (e) {
-      error = describeError(e);
+      // 字段级的落到各自的框底下；其余（重名、最后一个管理员）留在页头横幅
+      fieldErr = fieldErrors(e);
+      error = Object.keys(fieldErr).length ? null : describeError(e);
     } finally {
       busy = false;
     }
@@ -131,6 +141,7 @@
 
 <Confirm
   open={pendingDelete !== null}
+  onclose={() => (pendingDelete = null)}
   title="删除用户 {pendingDelete?.display_name ?? ''}？"
   danger
   confirmText="删除"
@@ -150,7 +161,7 @@
     <span>改角色立刻生效，不用重新登录；停用会连带吊销该用户所有会话。</span>
   {/snippet}
   {#snippet actions()}
-    {#if session.can('admin') && form === 'closed'}
+    {#if session.can('admin')}
       <button class="btn-primary" onclick={openNew}>添加用户</button>
     {/if}
   {/snippet}
@@ -161,40 +172,47 @@
 {:else}
   {#if error}<div class="banner">{error}</div>{/if}
 
-  {#if form !== 'closed'}
-    <section class="card form">
-      <header class="card-head">
-        <h2>{editing ? `编辑 ${editing.display_name}` : '加人'}</h2>
-        <span class="spacer"></span>
-        <button class="btn-ghost btn-sm" onclick={() => (form = 'closed')} disabled={busy}>收起</button>
-      </header>
-      <div class="form-grid">
-        <label class="field">邮箱<input bind:value={email} type="email" placeholder="name@example.com" autocomplete="off" /></label>
-        <label class="field">显示名<input bind:value={displayName} placeholder="可留空，默认用邮箱" autocomplete="off" /></label>
-        <label class="field">
-          {editing ? '新口令（留空不改）' : '初始口令'}
-          <input bind:value={password} type="password" placeholder="至少 12 个字符" autocomplete="new-password" />
-          {#if editing}
-            <span class="hint">改口令不会踢掉已登录的会话，需要的话在列表里点「踢下线」</span>
-          {/if}
-        </label>
-        {#if !editing}
-          <label class="field">
-            角色
-            <select bind:value={role}>
+  <Modal
+    open={form !== 'closed'}
+    title={editing ? `编辑 ${editing.display_name}` : '添加用户'}
+    onclose={() => (form = 'closed')}
+  >
+    <div class="form-grid">
+      <Field label="邮箱" error={fieldErr.email}>
+        {#snippet control(p)}
+          <input {...p} bind:value={email} type="email" placeholder="name@example.com" autocomplete="off" />
+        {/snippet}
+      </Field>
+      <Field label="显示名" error={fieldErr.display_name}>
+        {#snippet control(p)}
+          <input {...p} bind:value={displayName} placeholder="可留空，默认用邮箱" autocomplete="off" />
+        {/snippet}
+      </Field>
+      <Field
+        label={editing ? '新口令（留空不改）' : '初始口令'}
+        hint={editing ? '改口令不会踢掉已登录的会话，需要的话在列表里点「踢下线」' : undefined}
+        error={fieldErr.password}
+        wide={!!editing}
+      >
+        {#snippet control(p)}
+          <input {...p} bind:value={password} type="password" placeholder="至少 12 个字符" autocomplete="new-password" />
+        {/snippet}
+      </Field>
+      {#if !editing}
+        <Field label="角色" error={fieldErr.role}>
+          {#snippet control(p)}
+            <select {...p} bind:value={role}>
               {#each ROLES as r (r)}<option value={r}>{r} — {WHAT_EACH_ROLE_CAN_DO[r]}</option>{/each}
             </select>
-          </label>
-        {/if}
-      </div>
-      <div class="form-actions">
-        <button class="btn-primary" onclick={submit} disabled={!canSubmit}>{editing ? '保存' : '创建'}</button>
-        {#if editing}
-          <button class="btn-ghost" onclick={() => (form = 'closed')} disabled={busy}>取消</button>
-        {/if}
-      </div>
-    </section>
-  {/if}
+          {/snippet}
+        </Field>
+      {/if}
+    </div>
+    {#snippet footer()}
+      <button class="btn-ghost" onclick={() => (form = 'closed')} disabled={busy}>取消</button>
+      <button class="btn-primary" onclick={submit} disabled={!canSubmit}>{editing ? '保存' : '创建'}</button>
+    {/snippet}
+  </Modal>
 
   {#if !loaded}
     <div class="card"><Loading rows={2} /></div>
@@ -259,7 +277,7 @@
                 <div class="row">
                   {#if !user.system || me || session.authDisabled}
                     <button class="btn-ghost btn-sm btn-icon" title="编辑资料" aria-label="编辑" disabled={busy} onclick={() => openEdit(user)}>
-                      <svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4zM13 7l4 4" /></svg>
+                      <Icon name="pencil" />
                     </button>
                   {/if}
                   {#if !user.system}
@@ -275,7 +293,7 @@
                       disabled={busy}
                       onclick={() => (pendingDelete = user)}
                     >
-                      <svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" /></svg>
+                      <Icon name="trash" />
                     </button>
                   {/if}
                 </div>
@@ -291,12 +309,6 @@
 {/if}
 
 <style>
-  .form {
-    display: flex;
-    flex-direction: column;
-    gap: var(--s3);
-    margin-bottom: var(--s4);
-  }
   .who {
     display: flex;
     align-items: center;
@@ -310,7 +322,7 @@
     place-items: center;
     background: var(--surface-3);
     border: 1px solid var(--line-strong);
-    font-size: 0.75rem;
+    font-size: var(--t-xs);
     font-weight: 600;
     color: var(--fg-dim);
     flex: 0 0 auto;
@@ -335,8 +347,5 @@
   select {
     padding-top: 0.25rem;
     padding-bottom: 0.25rem;
-  }
-  tr.on td {
-    background: var(--accent-soft);
   }
 </style>

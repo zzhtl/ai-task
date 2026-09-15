@@ -31,7 +31,7 @@
     display: inline-flex;
     align-items: center;
     gap: 0.4rem;
-    font-size: 0.8rem;
+    font-size: var(--t-sm);
     color: var(--fg-dim);
     white-space: nowrap;
   }

@@ -5,15 +5,18 @@
    * 私钥只进不出：加密后落库，任何读接口都不返回它。这个页面也永远显示不出来
    * ——所以编辑时私钥框留空的意思是"不换"，不是"清掉"。
    */
-  import { api, describeError } from '$api/client';
+  import { api, describeError, fieldErrors } from '$api/client';
   import { listHosts, type Host } from '$api/models';
   import { session } from '$lib/auth/session.svelte';
   import PageHeader from '$lib/ui/PageHeader.svelte';
   import Empty from '$lib/ui/Empty.svelte';
   import Loading from '$lib/ui/Loading.svelte';
   import Confirm from '$lib/ui/Confirm.svelte';
+  import Modal from '$lib/ui/Modal.svelte';
+  import Field from '$lib/ui/Field.svelte';
   import { toast, toastError } from '$lib/ui/toast.svelte';
   import { ago, stamp } from '$lib/ui/format';
+  import Icon from '$lib/ui/Icon.svelte';
 
   let hosts = $state<Host[]>([]);
   let error = $state<string | null>(null);
@@ -29,6 +32,8 @@
   let username = $state('');
   let tags = $state('');
   let privateKey = $state('');
+  /** 后端 422 里按字段拆出来的错误，显示在各自的框底下。 */
+  let fieldErr = $state<Record<string, string>>({});
 
   function openNew() {
     name = '';
@@ -37,6 +42,7 @@
     username = '';
     tags = '';
     privateKey = '';
+    fieldErr = {};
     form = 'new';
   }
   function openEdit(host: Host) {
@@ -46,6 +52,7 @@
     username = host.username;
     tags = host.tags.join(', ');
     privateKey = '';
+    fieldErr = {};
     form = host;
   }
 
@@ -53,7 +60,6 @@
     try {
       hosts = await listHosts();
       error = null;
-      if (hosts.length === 0 && form === 'closed') openNew();
     } catch (e) {
       error = describeError(e);
     } finally {
@@ -64,6 +70,7 @@
   async function submit() {
     busy = true;
     error = null;
+    fieldErr = {};
     const body = {
       name,
       address,
@@ -87,7 +94,9 @@
       form = 'closed';
       await load();
     } catch (e) {
-      error = describeError(e);
+      // 字段级的落到各自的框底下；其余（重名、连不上目标机）留在页头横幅
+      fieldErr = fieldErrors(e);
+      error = Object.keys(fieldErr).length ? null : describeError(e);
     } finally {
       busy = false;
     }
@@ -124,6 +133,7 @@
 
 <Confirm
   open={pendingDelete !== null}
+  onclose={() => (pendingDelete = null)}
   title="删除主机「{pendingDelete?.name ?? ''}」？"
   danger
   confirmText="删除"
@@ -143,7 +153,7 @@
     <span>任务要下发到别的机器，先在这里加一台。私钥加密落库，任何读接口都不返回。</span>
   {/snippet}
   {#snippet actions()}
-    {#if session.can('admin') && form === 'closed'}
+    {#if session.can('admin')}
       <button class="btn-primary" onclick={openNew}>添加主机</button>
     {/if}
   {/snippet}
@@ -154,49 +164,66 @@
 {:else}
   {#if error}<div class="banner">{error}</div>{/if}
 
-  {#if form !== 'closed'}
-    <section class="card form">
-      <header class="card-head">
-        <h2>{editing ? `编辑「${editing.name}」` : '加一台'}</h2>
-        <span class="spacer"></span>
-        {#if hosts.length}
-          <button class="btn-ghost btn-sm" onclick={() => (form = 'closed')} disabled={busy}>收起</button>
-        {/if}
-      </header>
-      <div class="form-grid">
-        <label class="field">名称<input bind:value={name} placeholder="prod-web-1" /></label>
-        <label class="field">地址或 IP<input bind:value={address} placeholder="10.0.0.12" spellcheck="false" /></label>
-        <label class="field narrow">端口<input bind:value={port} type="number" min="1" max="65535" /></label>
-        <label class="field">登录用户名<input bind:value={username} placeholder="deploy" spellcheck="false" /></label>
-        <label class="field">
-          tag
-          <input bind:value={tags} placeholder="prod, web（逗号分隔）" />
-          <span class="hint">策略可以按 tag 生效</span>
-        </label>
-      </div>
-      <label class="field">
-        OpenSSH 私钥{editing ? '（留空表示不换）' : ''}
-        <textarea
-          bind:value={privateKey}
-          spellcheck="false"
-          rows="6"
-          placeholder={editing ? '留空则沿用现在的钥匙；要换就把新私钥整个贴进来' : '-----BEGIN OPENSSH PRIVATE KEY-----'}
-        ></textarea>
-      </label>
-      <p class="faint small">
-        首次连接会记下对方的主机密钥（TOFU）；<strong>密钥变了永远是拒绝</strong>——那是中间人攻击的信号。
-        连上之后会探测目标机上有没有 systemd cgroup、装了哪些 AI CLI。
-      </p>
-      <div class="form-actions">
-        <button class="btn-primary" onclick={submit} disabled={!canSubmit}>
-          {editing ? '保存' : '添加主机'}
-        </button>
-        {#if editing}
-          <button class="btn-ghost" onclick={() => (form = 'closed')} disabled={busy}>取消</button>
-        {/if}
-      </div>
-    </section>
-  {/if}
+  <Modal
+    open={form !== 'closed'}
+    title={editing ? `编辑「${editing.name}」` : '添加主机'}
+    onclose={() => (form = 'closed')}
+  >
+    <div class="form-grid">
+      <Field label="名称" error={fieldErr.name}>
+        {#snippet control(p)}
+          <input {...p} bind:value={name} placeholder="prod-web-1" />
+        {/snippet}
+      </Field>
+      <Field label="地址或 IP" error={fieldErr.address}>
+        {#snippet control(p)}
+          <input {...p} bind:value={address} placeholder="10.0.0.12" spellcheck="false" />
+        {/snippet}
+      </Field>
+      <Field label="端口" error={fieldErr.port}>
+        {#snippet control(p)}
+          <input {...p} bind:value={port} type="number" min="1" max="65535" />
+        {/snippet}
+      </Field>
+      <Field label="登录用户名" error={fieldErr.username}>
+        {#snippet control(p)}
+          <input {...p} bind:value={username} placeholder="deploy" spellcheck="false" />
+        {/snippet}
+      </Field>
+      <Field label="tag" hint="策略可以按 tag 生效" error={fieldErr.tags} wide>
+        {#snippet control(p)}
+          <input {...p} bind:value={tags} placeholder="prod, web（逗号分隔）" />
+        {/snippet}
+      </Field>
+      <Field
+        label="OpenSSH 私钥{editing ? '（留空表示不换）' : ''}"
+        error={fieldErr.private_key}
+        wide
+      >
+        {#snippet control(p)}
+          <textarea
+            {...p}
+            bind:value={privateKey}
+            spellcheck="false"
+            rows="6"
+            placeholder={editing
+              ? '留空则沿用现在的钥匙；要换就把新私钥整个贴进来'
+              : '-----BEGIN OPENSSH PRIVATE KEY-----'}
+          ></textarea>
+        {/snippet}
+      </Field>
+    </div>
+    <p class="faint small">
+      首次连接会记下对方的主机密钥（TOFU）；<strong>密钥变了永远是拒绝</strong>——那是中间人攻击的信号。
+      连上之后会探测目标机上有没有 systemd cgroup、装了哪些 AI CLI。
+    </p>
+    {#snippet footer()}
+      <button class="btn-ghost" onclick={() => (form = 'closed')} disabled={busy}>取消</button>
+      <button class="btn-primary" onclick={submit} disabled={!canSubmit}>
+        {editing ? '保存' : '添加主机'}
+      </button>
+    {/snippet}
+  </Modal>
 
   {#if !loaded}
     <div class="card"><Loading rows={2} /></div>
@@ -255,7 +282,7 @@
               <td class="act">
                 <div class="row">
                   <button class="btn-ghost btn-sm btn-icon" title="编辑" aria-label="编辑" disabled={busy} onclick={() => openEdit(host)}>
-                    <svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4zM13 7l4 4" /></svg>
+                    <Icon name="pencil" />
                   </button>
                   <button
                     class="btn-ghost btn-sm btn-icon danger"
@@ -264,7 +291,7 @@
                     disabled={busy}
                     onclick={() => (pendingDelete = host)}
                   >
-                    <svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" /></svg>
+                    <Icon name="trash" />
                   </button>
                 </div>
               </td>
@@ -273,28 +300,20 @@
         </tbody>
       </table>
     </div>
-  {:else if form === 'closed'}
-    <Empty title="还没有主机" hint="加一台之后，任务步骤里就能选择在它上面执行。" />
+  {:else}
+    <Empty title="还没有主机" hint="加一台之后，任务步骤里就能选择在它上面执行。">
+      {#snippet action()}
+        <button class="btn-primary" onclick={openNew}>添加主机</button>
+      {/snippet}
+    </Empty>
   {/if}
 {/if}
 
 <style>
-  .form {
-    display: flex;
-    flex-direction: column;
-    gap: var(--s3);
-    margin-bottom: var(--s4);
-  }
-  .narrow {
-    max-width: 7rem;
-  }
   .name {
     font-weight: 500;
   }
   td .tag + .tag {
     margin-left: 4px;
-  }
-  tr.on td {
-    background: var(--accent-soft);
   }
 </style>

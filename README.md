@@ -67,6 +67,7 @@ cargo test -p ai-task-proto     # 产物写入 web/src/lib/api/types/，需要�
 | `AI_TASK_REMOTE_AGENT` | 无 | 推送到远端的 musl 静态二进制。不配的话远端节点会明确报错，不会静默降级 |
 | `AI_TASK_KNOWN_HOSTS` | `~/.ssh/known_hosts` | SSH known_hosts |
 | `AI_TASK_SSH_ACCEPT_NEW` | `true` | 首次见到新主机时记下它的密钥（TOFU）。**密钥变了永远是拒绝**，这个开关只影响没见过的主机 |
+| `AI_TASK_MAX_CONCURRENT_RUNS` | CPU 核数（封在 1–32） | 同时最多跑几个 run。每个 run 会拉起一个 `claude` 子进程——吃 CPU、吃内存、**花钱**。超出上限的 run 留在 `queued` 排队，不拒绝 |
 | `AI_TASK_REQUIRE_AUTH` | `false` | 是否强制登录。默认只监听回环，单人自托管不必先建账号；**`--listen` 一旦离开回环而没开这个，进程拒绝启动** |
 
 `AI_TASK_WORKDIR_ROOT` **不要放在带 `.claude/` 的仓库里**：执行时读 project
@@ -96,11 +97,12 @@ misfire / overlap / jitter 策略齐全，多副本靠 `UNIQUE(schedule_id, fire
 装技能包供任务勾选。
 
 还可以：画 DAG（条件边、重试并把校验错误回喂给模型、`map` 按上游数组扇出、
-`assert` 节点），在网页上看编排图并叠加实时执行状态。
+`assert` 节点），在网页上看编排图并叠加实时执行状态——分层布局手写，零前端依赖，
+点图上的节点跳到执行过程里对应的那一段。
 
 还可以：把任务下发到任意机器。SSH 推一个 570 KB 的 musl 静态二进制过去
 （目标机上没有 Node、没有 API key），命令在 cgroup scope 里跑，
-CPU/RSS/进程数按 run 归因、1 Hz 边采边落库，界面上和 DAG、事件流共享一根时间轴。
+CPU/RSS/进程数按 run 归因、1 Hz 边采边落库，界面上和编排图、事件流共享一根时间轴。
 `MemoryMax` 超限被内核 kill 时 run 落 `resource_exceeded`，与普通失败分开。
 目标机没有 systemd 就降级到 `/proc` 采样，界面上明确标出「上限未强制」。
 AI 节点也能在远端干活：它拿到的是 `remote_bash`/`remote_read`/`remote_write`/`remote_glob`，

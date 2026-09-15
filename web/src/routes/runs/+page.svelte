@@ -13,6 +13,7 @@
   import { goto } from '$app/navigation';
   import { deleteRun, listRuns, listTasks } from '$api/runs';
   import { describeError } from '$api/client';
+  import { pollWhileVisible } from '$api/resource.svelte';
   import type { RunSummary } from '$api/types/RunSummary';
   import type { RunStatus } from '$api/types/RunStatus';
   import type { TaskSummary } from '$api/types/TaskSummary';
@@ -23,6 +24,7 @@
   import Confirm from '$lib/ui/Confirm.svelte';
   import { toast, toastError } from '$lib/ui/toast.svelte';
   import { ago, duration, money, stamp, triggerLabel, FAILED_STATUSES } from '$lib/ui/format';
+  import Icon from '$lib/ui/Icon.svelte';
 
   type FilterKey = 'all' | 'live' | 'failed' | 'succeeded';
   const FILTERS: Array<{ key: FilterKey; label: string; status: RunStatus[] | null }> = [
@@ -123,8 +125,9 @@
   });
 
   $effect(() => {
-    const timer = setInterval(poll, 4000);
-    return () => clearInterval(timer);
+    // 这一页的轮询是**按 id 并进已翻出来的那几页**的，保住滚动位置和翻页结果，
+    // 所以不走通用缓存（它是整份替换）。但看不见时照样该停。
+    return pollWhileVisible(poll, 4000);
   });
 
   const taskName = (id: string) => tasks.find((t) => t.id === id)?.name ?? id.slice(0, 8);
@@ -172,6 +175,7 @@
 
 <Confirm
   open={pendingDelete !== null}
+  onclose={() => (pendingDelete = null)}
   title="删除这次执行记录？"
   danger
   confirmText="删除"
@@ -239,7 +243,7 @@
                   pendingDelete = r;
                 }}
               >
-                <svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" /></svg>
+                <Icon name="trash" />
               </button>
             </td>
           </tr>
@@ -279,9 +283,6 @@
   .task-pick {
     max-width: 14rem;
   }
-  .nowrap {
-    white-space: nowrap;
-  }
   .task-cell {
     max-width: 40ch;
   }
@@ -290,12 +291,6 @@
   }
   .task-cell .tag {
     margin-left: var(--s1);
-  }
-  .err {
-    margin-top: 2px;
-    font-size: 0.76rem;
-    color: var(--bad);
-    max-width: 46ch;
   }
   .more {
     display: flex;

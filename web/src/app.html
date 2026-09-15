@@ -7,10 +7,16 @@
     <meta name="color-scheme" content="dark light" />
     <script>
       // 主题在首帧之前就定下来。等到组件挂载再切，浅色用户每次打开都会先闪一下黑底。
+      // 判断必须和 lib/ui/theme.svelte.ts 的 read() 完全一致：显式选择优先，否则跟随系统。
       try {
-        if (localStorage.getItem('ai-task.theme') === 'light') {
-          document.documentElement.dataset.theme = 'light';
-        }
+        var saved = null;
+        try {
+          saved = localStorage.getItem('ai-task.theme');
+        } catch (e) {}
+        var light =
+          saved === 'light' ||
+          (saved !== 'dark' && window.matchMedia('(prefers-color-scheme: light)').matches);
+        if (light) document.documentElement.dataset.theme = 'light';
       } catch (e) {}
     </script>
     %sveltekit.head%

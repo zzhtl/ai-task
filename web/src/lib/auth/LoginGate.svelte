@@ -133,12 +133,12 @@
     }
   }
   h1 {
-    font-size: 1.2rem;
+    font-size: var(--t-xl);
   }
   .sub {
     margin: 0 0 var(--s2);
     color: var(--fg-dim);
-    font-size: 0.85rem;
+    font-size: var(--t-base);
   }
   form button[type='submit'] {
     justify-content: center;
@@ -149,7 +149,7 @@
     border: none;
     background: none;
     color: var(--fg-faint);
-    font-size: 0.8rem;
+    font-size: var(--t-sm);
     padding: 0;
     justify-content: center;
   }

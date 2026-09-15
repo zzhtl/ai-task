@@ -6,22 +6,12 @@
    * **每步都能看见上一步的结果**——不串的话「按顺序」就没有意义。
    */
   import { newStep, reachOf, REACH_TOOLS, type Composition, type Reach, type Step } from './compose';
+  import Icon from '$lib/ui/Icon.svelte';
+  import StepRail from '$lib/ui/StepRail.svelte';
+  // 这三个类型在 models.ts 里有唯一定义。之前这里各抄了一份：
+  // 后端加字段时抄出去的那份不会报错，只会悄悄对不上。
+  import type { AiCli, Host, Skill } from '$api/models';
 
-  interface AiCli {
-    name: string;
-    path: string;
-    version: string | null;
-  }
-  interface Host {
-    id: string;
-    name: string;
-    address: string;
-    ai_clis: AiCli[];
-  }
-  interface Skill {
-    name: string;
-    description: string;
-  }
 
   let {
     comp = $bindable(),
@@ -116,10 +106,7 @@
 <div class="steps">
   {#each comp.steps as step, i (step.uid)}
     <article class="step {step.kind}">
-      <div class="rail">
-        <span class="num">{i + 1}</span>
-        {#if i < comp.steps.length - 1}<span class="wire"></span>{/if}
-      </div>
+      <StepRail index={i + 1} last={i === comp.steps.length - 1} kind={step.kind} />
 
       <div class="body">
         <header>
@@ -132,7 +119,7 @@
           </div>
           <span class="spacer"></span>
           <button class="btn-ghost btn-sm btn-icon" disabled={i === 0} onclick={() => move(i, -1)} title="上移" aria-label="上移">
-            <svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
+            <Icon name="arrow-up" />
           </button>
           <button
             class="btn-ghost btn-sm btn-icon"
@@ -141,7 +128,7 @@
             title="下移"
             aria-label="下移"
           >
-            <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12l7 7 7-7" /></svg>
+            <Icon name="arrow-down" />
           </button>
           <button
             class="btn-ghost btn-sm btn-icon danger"
@@ -150,7 +137,7 @@
             title="删除这一步"
             aria-label="删除这一步"
           >
-            <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
+            <Icon name="close" />
           </button>
         </header>
 
@@ -314,7 +301,7 @@
   <span class="hint">加一步</span>
   {#each KINDS as k (k.id)}
     <button class="btn-sm" onclick={() => add(k.id)} title={k.hint}>
-      <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+      <Icon name="plus" />
       {k.label}
     </button>
   {/each}
@@ -331,38 +318,6 @@
     gap: var(--s3);
   }
   /* 左侧的序号和竖线：一眼看出这是有顺序的，不是一堆并列的卡片 */
-  .rail {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: var(--s1);
-  }
-  .num {
-    width: 1.6rem;
-    height: 1.6rem;
-    border-radius: 50%;
-    border: 1px solid var(--line-strong);
-    background: var(--surface-2);
-    display: grid;
-    place-items: center;
-    font-size: 0.78rem;
-    color: var(--fg-dim);
-    flex: 0 0 auto;
-  }
-  .wire {
-    flex: 1;
-    width: 1px;
-    background: var(--line);
-    min-height: var(--s4);
-  }
-  .step.ai .num {
-    border-color: color-mix(in srgb, #56b6f5 55%, var(--line-strong));
-    color: #7cc4f8;
-  }
-  .step.approval .num {
-    border-color: color-mix(in srgb, var(--warn) 55%, var(--line-strong));
-    color: var(--warn);
-  }
 
   .body {
     background: var(--surface-1);
@@ -374,7 +329,7 @@
     flex-direction: column;
     gap: var(--s2);
     min-width: 0;
-    transition: border-color 0.12s ease;
+    transition: border-color var(--dur-2) var(--ease);
   }
   .body:focus-within {
     border-color: var(--line-strong);
@@ -385,7 +340,7 @@
     gap: var(--s1);
   }
   .title {
-    font-size: 0.95rem;
+    font-size: var(--t-md);
     font-weight: 500;
     border: none;
     background: transparent;
@@ -400,12 +355,12 @@
   textarea {
     width: 100%;
     font-family: var(--font);
-    font-size: 0.88rem;
+    font-size: var(--t-base);
     line-height: 1.6;
   }
   textarea.mono {
     font-family: var(--mono);
-    font-size: 0.82rem;
+    font-size: var(--t-sm);
   }
   .opts {
     display: flex;
@@ -422,7 +377,7 @@
   }
   .hint {
     margin: 0;
-    font-size: 0.76rem;
+    font-size: var(--t-xs);
     color: var(--fg-faint);
     line-height: 1.5;
   }
@@ -466,7 +421,7 @@
     display: flex;
     gap: var(--s2);
     align-items: baseline;
-    font-size: 0.8rem;
+    font-size: var(--t-sm);
   }
   .skills em {
     font-style: normal;

@@ -1,4 +1,5 @@
-// 主题。暗色是默认，浅色是可选项；选择记在 localStorage，app.html 里在首帧前读回来。
+// 主题。**显式选择优先，没选过就跟随系统**；选择记在 localStorage，
+// app.html 里在首帧前读回来——那段内联脚本和这里的 read() 必须是同一套判断。
 
 export type Theme = 'dark' | 'light';
 
@@ -6,7 +7,14 @@ const KEY = 'ai-task.theme';
 
 function read(): Theme {
   try {
-    return localStorage.getItem(KEY) === 'light' ? 'light' : 'dark';
+    const saved = localStorage.getItem(KEY);
+    if (saved === 'light' || saved === 'dark') return saved;
+  } catch {
+    /* 隐私模式下读不了，往下走系统偏好 */
+  }
+  // 没选过：跟随系统。之前这里恒为 dark，浅色系统的人第一次打开会被强行塞一个暗色界面。
+  try {
+    return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
   } catch {
     return 'dark';
   }

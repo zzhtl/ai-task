@@ -25,7 +25,9 @@
   /* ---- 文字 ---- */
   --fg: #e8ebf1;
   --fg-dim: #9aa4b5;
-  --fg-faint: #6b7487;
+  /* 对最亮的表面（--surface-3）也要 ≥4.5:1。原来的 #6b7487 只有 3.2，
+     而它偏偏用在 0.68–0.78rem 的字上——最小的字配最低的对比度。 */
+  --fg-faint: #818a9b;
 
   /* ---- 强调色。克制使用：满屏都是重点等于没有重点 ---- */
   --accent: #5b8cff;
@@ -43,7 +45,11 @@
   --st-timeout: #e0a33e;
   --st-budget: #e0a33e;
   --st-resource: #d97cf0;
-  --st-skipped: #4a5261;
+  /* 圆点是非文字元素，3:1 就够；但 #4a5261 对 --surface-3 只有 2.0，
+     等于画了个看不见的点——"跳过"和"这里什么都没有"就分不出来了。 */
+  --st-skipped: #626d80;
+  /* AI 步骤的序号色。原来是三个文件里各写一遍的 var(--st-ai) / var(--st-ai) */
+  --st-ai: var(--st-ai);
   --st-awaiting: #e0a33e;
 
   --ok: var(--st-succeeded);
@@ -65,8 +71,39 @@
   --r3: 12px;
   --r4: 16px;
 
-  /* ---- 阴影。只给浮层 ---- */
+  /* ---- 阴影。层次靠明度，阴影只用来表示"浮起来了" ---- */
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.25);
+  --shadow-2: 0 6px 20px rgb(0 0 0 / 0.35), 0 0 0 1px rgb(255 255 255 / 0.03);
   --shadow-pop: 0 12px 40px rgb(0 0 0 / 0.5), 0 0 0 1px rgb(255 255 255 / 0.04);
+
+  /* ---- 字号。9 档，从实际用量归并而来：原来有 23 个散落的字面量。
+         根字号 16px，所以括号里是最终像素。
+         **硬规矩：`--fg-faint` 不得用在 `--t-xs` 以下**——最小的字配最低的对比度
+         是这个界面之前最容易读不清的组合。 ---- */
+  --t-2xs: 0.6875rem; /* 11px：kbd、seq、徽标 */
+  --t-xs: 0.75rem; /* 12px：表头、hint、次要说明 */
+  --t-sm: 0.8125rem; /* 13px：卡片里的次要正文 */
+  --t-base: 0.875rem; /* 14px：正文、按钮、输入框、表格 */
+  --t-md: 0.9375rem; /* 15px：需要强调的输入 */
+  --t-lg: 1.0625rem; /* 17px：h2/h3、弹窗标题 */
+  --t-xl: 1.25rem; /* 20px：指标数字 */
+  --t-2xl: 1.5rem; /* 24px：h1 */
+  --t-3xl: 1.75rem; /* 28px：首页大指标 */
+
+  /* ---- 动效。原来 `var(--dur-2) var(--ease)` 硬编码在十二处，改一次节奏要翻十二个文件 ---- */
+  --dur-1: 0.1s; /* 悬停变色这种微交互 */
+  --dur-2: 0.14s; /* 默认：过渡、浮层出现 */
+  --dur-3: 0.2s; /* 位移较大的 */
+  --ease: ease;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.3, 1);
+
+  /* ---- 断点。只有三档，写在这里是为了让人抄得对——
+         CSS 的 @media 用不了 var()，所以下面各处只能写字面量，但必须是这三个。
+         原来散着 700 / 820 / 900 / 1000 / 1100 五个随手值。
+         --bp-sm: 640px   手机：单列、导航收进抽屉
+         --bp-md: 960px   平板：侧栏收成图标条、双列塌成单列
+         --bp-lg: 1280px  宽屏：侧边面板才出现
+     ---- */
 
   /* ---- 字体 ---- */
   --font:
@@ -83,8 +120,10 @@
   color-scheme: dark;
 }
 
-/* 浅色是可选项，不是默认。只翻转表面和文字，状态色保持不变
-   ——状态的含义不该随主题变。 */
+/* 浅色是可选项，不是默认。
+   状态的**含义**不该随主题变——含义由色相和圆点的形状承载，这两样都不动。
+   但明度必须跟着背景走：同一个 #35c07f 在白底上只有 2.3:1，那不是"含义不变"，
+   是根本读不出来。所以下面按背景重新定明度，色相保持原样。 */
 :root[data-theme='light'] {
   --bg: #f4f6f9;
   --surface-1: #ffffff;
@@ -95,13 +134,29 @@
   --line-strong: #c9d0db;
   --fg: #10131a;
   --fg-dim: #55607a;
-  --fg-faint: #8a93a5;
+  --fg-faint: #626b7f;
   --accent: #3b6ee8;
   --accent-strong: #2f5fd2;
   --accent-dim: #c9d9ff;
   --accent-fg: #2b56b5;
   --accent-soft: rgba(59, 110, 232, 0.1);
+  --shadow-1: 0 1px 2px rgb(16 19 26 / 0.06);
+  --shadow-2: 0 6px 20px rgb(16 19 26 / 0.1), 0 0 0 1px rgb(16 19 26 / 0.04);
   --shadow-pop: 0 12px 40px rgb(16 19 26 / 0.18), 0 0 0 1px rgb(16 19 26 / 0.06);
+
+  /* 状态色：同色相压暗到能读。StatusPill 把这五个当**文字**色用，要 4.5:1；
+     queued / cancelled / skipped 只作圆点，非文字 3:1 即可，在浅底上本来就够。
+     基准取最难的那个表面 --surface-3 (#e8ecf2)，其它表面只会更宽裕。 */
+  --st-running: #0d68d2;
+  --st-succeeded: #287853;
+  --st-failed: #d11d23;
+  --st-timeout: #8c631f;
+  --st-budget: #8c631f;
+  --st-awaiting: #8c631f;
+  --st-resource: #ad25ce;
+  --st-skipped: #4a5261;
+  --st-ai: #1d7fb8;
+
   color-scheme: light;
 }
 
@@ -120,7 +175,7 @@ body {
   background: var(--bg);
   color: var(--fg);
   font-family: var(--font);
-  font-size: 14px;
+  font-size: var(--t-base);
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
   /* 数字等宽：成本和耗时在实时刷新时不能左右跳 */
@@ -135,14 +190,14 @@ h3 {
   letter-spacing: -0.01em;
 }
 h1 {
-  font-size: 1.5rem;
+  font-size: var(--t-2xl);
   letter-spacing: -0.02em;
 }
 h2 {
-  font-size: 0.95rem;
+  font-size: var(--t-md);
 }
 h3 {
-  font-size: 0.875rem;
+  font-size: var(--t-base);
 }
 p {
   margin: 0 0 var(--s2);
@@ -169,7 +224,7 @@ pre {
 kbd,
 .kbd {
   font-family: var(--mono);
-  font-size: 0.7rem;
+  font-size: var(--t-2xs);
   padding: 0.05rem 0.32rem;
   border: 1px solid var(--line-strong);
   border-bottom-width: 2px;
@@ -196,7 +251,10 @@ kbd,
   color: var(--warn);
 }
 .small {
-  font-size: 0.8rem;
+  font-size: var(--t-sm);
+}
+.nowrap {
+  white-space: nowrap;
 }
 .ellipsis {
   overflow: hidden;
@@ -226,7 +284,7 @@ kbd,
   margin: 0;
 }
 .card-head .sub {
-  font-size: 0.78rem;
+  font-size: var(--t-sm);
   color: var(--fg-faint);
 }
 
@@ -264,14 +322,14 @@ button,
   background: var(--surface-2);
   color: var(--fg);
   font: inherit;
-  font-size: 0.85rem;
+  font-size: var(--t-base);
   line-height: 1.2;
   cursor: pointer;
   transition:
-    background 0.12s ease,
-    border-color 0.12s ease,
-    color 0.12s ease,
-    box-shadow 0.12s ease;
+    background var(--dur-2) var(--ease),
+    border-color var(--dur-2) var(--ease),
+    color var(--dur-2) var(--ease),
+    box-shadow var(--dur-2) var(--ease);
   white-space: nowrap;
   user-select: none;
 }
@@ -338,7 +396,7 @@ summary:focus-visible {
 }
 .btn-sm {
   padding: 0.24rem 0.55rem;
-  font-size: 0.78rem;
+  font-size: var(--t-sm);
 }
 .btn-icon {
   padding: 0.3rem;
@@ -381,7 +439,7 @@ button svg {
   background: transparent;
   color: var(--fg-dim);
   padding: 0.28rem 0.7rem;
-  font-size: 0.8rem;
+  font-size: var(--t-sm);
   border-radius: 6px;
 }
 .seg > button:hover:not(:disabled) {
@@ -396,7 +454,7 @@ button svg {
 .seg > button .count {
   margin-left: 0.35rem;
   color: var(--fg-faint);
-  font-size: 0.72rem;
+  font-size: var(--t-xs);
 }
 
 /* ---- 表单 ---- */
@@ -409,10 +467,10 @@ textarea {
   background: var(--surface-2);
   color: var(--fg);
   font: inherit;
-  font-size: 0.85rem;
+  font-size: var(--t-base);
   transition:
-    border-color 0.12s ease,
-    box-shadow 0.12s ease;
+    border-color var(--dur-2) var(--ease),
+    box-shadow var(--dur-2) var(--ease);
   min-width: 0;
 }
 input::placeholder,
@@ -452,7 +510,7 @@ select {
 }
 textarea {
   font-family: var(--mono);
-  font-size: 0.8rem;
+  font-size: var(--t-sm);
   line-height: 1.6;
   resize: vertical;
 }
@@ -460,14 +518,30 @@ label.field {
   display: flex;
   flex-direction: column;
   gap: 0.3rem;
-  font-size: 0.76rem;
+  font-size: var(--t-xs);
   color: var(--fg-dim);
   min-width: 0;
 }
 label.field > span.hint {
-  font-size: 0.72rem;
+  font-size: var(--t-xs);
   color: var(--fg-faint);
 }
+/* 字段级错误。跟在出错的那个控件正下方，而不是汇总到页头 */
+.field-error {
+  font-size: var(--t-xs);
+  color: var(--bad);
+  overflow-wrap: anywhere;
+}
+
+/* 列表里那一行「为什么失败」。原来在五个页面里各写了一遍，
+   宽度上限还各不相同（40ch / 46ch / 36ch / 34ch / 32ch）。 */
+.err {
+  font-size: var(--t-xs);
+  color: var(--bad);
+  max-width: 44ch;
+  margin-top: 2px;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -486,7 +560,7 @@ label.field > span.hint {
   display: flex;
   gap: var(--s2);
   align-items: baseline;
-  font-size: 0.82rem;
+  font-size: var(--t-sm);
   cursor: pointer;
 }
 
@@ -494,12 +568,12 @@ label.field > span.hint {
 table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.85rem;
+  font-size: var(--t-base);
 }
 thead th {
   text-align: left;
   font-weight: 500;
-  font-size: 0.72rem;
+  font-size: var(--t-xs);
   letter-spacing: 0.05em;
   text-transform: uppercase;
   color: var(--fg-faint);
@@ -516,9 +590,15 @@ tbody tr:last-child td {
   border-bottom: none;
 }
 tbody tr {
-  transition: background 0.1s ease;
+  transition: background var(--dur-1) var(--ease);
 }
 tbody tr:hover {
+  background: var(--surface-hover);
+}
+/* 键盘走到行内链接时，整行要跟着亮——鼠标有 hover，键盘不该只有一个小焦点框。
+   行本身**不该**加 tabindex：每一行里已经有一个指向同一个地方的 <a>，
+   再加一个焦点点位只会让 Tab 走两遍同一个目标。 */
+tbody tr:focus-within {
   background: var(--surface-hover);
 }
 tbody tr.clickable {
@@ -534,6 +614,16 @@ td.act .row {
   justify-content: flex-end;
   gap: 2px;
 }
+/* 正在编辑 / 正在确认的那一行。三个管理页各写过一遍 */
+tbody tr.on td {
+  background: var(--accent-soft);
+}
+
+/* 列表页顶部的筛选框。宽度统一，不然并排放的时候会参差不齐 */
+.search {
+  width: 14rem;
+}
+
 /* 表格放进 card.flush 时，两侧留白与卡片对齐 */
 .card.flush table thead th:first-child,
 .card.flush table tbody td:first-child {
@@ -546,6 +636,10 @@ td.act .row {
 .card.flush table thead th {
   padding-top: var(--s3);
   background: var(--surface-2);
+  /* 滚过几十行之后还得知道这一列是什么。表头本来就有底色，吸顶不需要额外的视觉处理 */
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 tr.off td {
   opacity: 0.5;
@@ -616,7 +710,7 @@ tr.off td {
   border-radius: 999px;
   border: 1px solid var(--line);
   background: var(--surface-2);
-  font-size: 0.72rem;
+  font-size: var(--t-xs);
   line-height: 1.5;
   color: var(--fg-dim);
   white-space: nowrap;
@@ -649,7 +743,7 @@ tr.off td {
   border-left: 3px solid var(--accent);
   border-radius: var(--r2);
   background: var(--surface-1);
-  font-size: 0.84rem;
+  font-size: var(--t-base);
   color: var(--fg-dim);
   line-height: 1.6;
 }
@@ -670,7 +764,7 @@ tr.off td {
   gap: var(--s2);
   padding: var(--s3) var(--s4);
   border-radius: var(--r2);
-  font-size: 0.84rem;
+  font-size: var(--t-base);
   margin-bottom: var(--s4);
   border: 1px solid color-mix(in srgb, var(--bad) 35%, var(--line));
   background: color-mix(in srgb, var(--bad) 7%, var(--surface-1));
@@ -685,7 +779,7 @@ tr.off td {
   border-radius: 50%;
   background: var(--bad);
   color: #fff;
-  font-size: 0.72rem;
+  font-size: var(--t-xs);
   font-weight: 700;
   display: grid;
   place-items: center;
@@ -708,6 +802,16 @@ tr.off td {
   border: 1px dashed var(--line-strong);
   border-radius: var(--r3);
   background: color-mix(in srgb, var(--surface-1) 60%, transparent);
+}
+
+/* 浮层入场：从下方轻推。没有过渡的话弹层是"闪"出来的，容易误点。
+   Dropdown 是从上往下落、命令面板还要保住 translateX(-50%) 居中，
+   那两个动作不一样，各自留了自己的 keyframes。 */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
 }
 
 /* ---- 骨架。数据还没回来时占位，比先闪一下空状态好 ---- */
@@ -764,6 +868,13 @@ details > summary::-webkit-details-marker {
 
 /* 尊重系统的减弱动效设置。盯着状态流的人里有一部分对动效敏感 */
 @media (prefers-reduced-motion: reduce) {
+  /* 先把时长 token 归零，走 token 的过渡就自然没了；
+     下面那条 !important 留着兜底 keyframe 动画（它们不走 --dur-*）。 */
+  :root {
+    --dur-1: 0s;
+    --dur-2: 0s;
+    --dur-3: 0s;
+  }
   *,
   *::before,
   *::after {

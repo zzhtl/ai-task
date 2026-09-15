@@ -13,7 +13,7 @@
   import { untrack } from 'svelte';
   import { page } from '$app/state';
   import { goto, beforeNavigate } from '$app/navigation';
-  import { api, ApiFailure, describeError } from '$api/client';
+  import { api, ApiFailure, describeError, ignoreForbidden } from '$api/client';
   import { listHosts, listRules, listSkills, type Host, type Rule, type Skill } from '$api/models';
   import type { DagSpec } from '$api/types/DagSpec';
   import PageHeader from '$lib/ui/PageHeader.svelte';
@@ -21,6 +21,7 @@
   import { toast } from '$lib/ui/toast.svelte';
   import { DEFAULTS, fromSpec, newStep, toSpec, type Composition } from '$lib/tasks/compose';
   import StepEditor from '$lib/tasks/StepEditor.svelte';
+  import Confirm from '$lib/ui/Confirm.svelte';
 
   const editingId = $derived(page.url.searchParams.get('id'));
 
@@ -31,6 +32,41 @@
   let enabled = $state(true);
   let error = $state<string | null>(null);
   let fieldErrors = $state<Array<{ field: string; message: string }>>([]);
+
+  interface Snapshot {
+    name: string;
+    description: string;
+    picked: string[];
+    enabled: boolean;
+    comp: Composition;
+  }
+
+  /** 先比便宜的，再比贵的。返回 true 表示有改动。 */
+  function changed(a: Snapshot, b: Snapshot): boolean {
+    if (
+      a.name !== b.name ||
+      a.description !== b.description ||
+      a.enabled !== b.enabled ||
+      a.picked.length !== b.picked.length ||
+      a.comp.steps.length !== b.comp.steps.length
+    ) {
+      return true;
+    }
+    // 步骤数和标量都一样，才值得付一次序列化的钱
+    return JSON.stringify(a) !== JSON.stringify(b);
+  }
+
+  /**
+   * `TaskDetail` 用了 serde(flatten)，`summary` 的字段是**平铺在顶层**的。
+   * 照着生成类型写 `task.summary.name` 拿到的是 undefined，保存时会把名字清空。
+   */
+  type TaskDetailFlat = {
+    name: string;
+    description?: string | null;
+    spec: DagSpec;
+    rules?: string[] | null;
+    enabled: boolean;
+  };
   let busy = $state(false);
   let ready = $state(false);
   let hosts = $state<Host[]>([]);
@@ -47,13 +83,13 @@
     // 主机 / 规则是 admin 才能读；operator 建任务时读不到不该报错
     listHosts()
       .then((h) => (hosts = h))
-      .catch(() => {});
+      .catch(ignoreForbidden);
     listSkills()
       .then((s) => (skills = s))
-      .catch(() => {});
+      .catch(ignoreForbidden);
     listRules()
       .then((r) => (rules = r.filter((x) => x.scope === 'task' && x.enabled)))
-      .catch(() => {});
+      .catch(ignoreForbidden);
   });
 
   $effect(() => {
@@ -62,19 +98,10 @@
       ready = true;
       return;
     }
-    fetch(`/api/v1/tasks/${id}`, { headers: { accept: 'application/json' } })
-      .then(async (r) => {
-        if (!r.ok) throw new Error(`加载任务失败：${r.status}`);
-        etag = r.headers.get('etag');
-        // TaskDetail 用了 serde(flatten)，summary 的字段是**平铺在顶层**的
-        // ——读 task.summary.name 拿到的是 undefined，保存时会把名字清空
-        const task: {
-          name: string;
-          description?: string | null;
-          spec: DagSpec;
-          rules?: string[] | null;
-          enabled: boolean;
-        } = await r.json();
+    // 走 api() 而不是裸 fetch。之前这里绕开封装只为读一个 ETag，
+    // 代价是丢掉了 15 秒超时、结构化错误和 401 处理——现在 onHeaders 把头交出来。
+    api<TaskDetailFlat>(`/api/v1/tasks/${id}`, { onHeaders: (h) => (etag = h.get('etag')) })
+      .then((task) => {
         name = task.name;
         description = task.description ?? '';
         enabled = task.enabled;
@@ -110,17 +137,43 @@
    * 拿加载完成那一刻的快照做基线，和当前内容比；直接监听"变过没有"会把
    * 加载本身也算成一次修改。
    */
-  const fingerprint = $derived(JSON.stringify({ name, description, picked, enabled, comp }));
-  let baseline = $state<string | null>(null);
+  // **不要每次敲键都把整个编排 JSON.stringify 一遍。**
+  // 提示词是逐字符输入的，而这里序列化的是全部步骤 + 规则 + 预算——
+  // 一个长 prompt 打字时每个字符都要重新序列化一次整棵树。
+  //
+  // 改成先比标量和长度（绝大多数改动在这一步就分出来了），
+  // 只有它们都相等时才落到深比较上。
+  let baseline = $state<Snapshot | null>(null);
+  const snapshot = $derived<Snapshot>({ name, description, picked, enabled, comp });
   $effect(() => {
-    if (ready && baseline === null) baseline = untrack(() => fingerprint);
+    if (ready && baseline === null) baseline = untrack(() => structuredClone(snapshot));
   });
-  const dirty = $derived(baseline !== null && fingerprint !== baseline);
+  const dirty = $derived(baseline !== null && changed(baseline, snapshot));
+
+  /** 被拦下来的那次跳转。确认之后用它继续走。 */
+  let pendingNav = $state<URL | null>(null);
+  /** 用户已经点过"仍然离开"：这一次 goto 不要再拦，否则就出不去了。 */
+  let leaving = false;
+
+  // beforeNavigate 是同步的，而 <dialog> 的确认是异步的，所以这里一律先 cancel，
+  // 等用户点了确认再用 pendingNav 重新发起同一次跳转。
   beforeNavigate((nav) => {
-    if (dirty && !saved && !busy && nav.type !== 'leave') {
-      if (!confirm('有没保存的改动，确定离开？')) nav.cancel();
+    if (!dirty || saved || busy || leaving) return;
+    // 关标签页 / 关浏览器只有原生提示这一条路，cancel() 正是触发它的方式。
+    // 之前这一档被整个排除在外，于是误关标签页会静默丢掉整页提示词。
+    if (nav.type === 'leave') {
+      nav.cancel();
+      return;
     }
+    nav.cancel();
+    pendingNav = nav.to?.url ?? null;
   });
+
+  function leaveAnyway() {
+    const to = pendingNav;
+    leaving = true;
+    if (to) void goto(to);
+  }
 
   async function save() {
     if (!spec) return;
@@ -160,6 +213,17 @@
     }
   }
 </script>
+
+<Confirm
+  open={pendingNav !== null}
+  title="有未保存的改动"
+  danger
+  confirmText="仍然离开"
+  onconfirm={leaveAnyway}
+  onclose={() => (pendingNav = null)}
+>
+  <p>这一页的编辑还没保存，离开后会丢掉。</p>
+</Confirm>
 
 <PageHeader
   title={editingId ? '编辑任务' : '新建任务'}
@@ -291,7 +355,7 @@
     gap: var(--s4);
     align-items: start;
   }
-  @media (max-width: 1100px) {
+  @media (max-width: 1280px) {
     .two {
       grid-template-columns: 1fr;
     }
@@ -320,7 +384,7 @@
     font-style: normal;
     color: var(--fg-faint);
     display: block;
-    font-size: 0.76rem;
+    font-size: var(--t-xs);
   }
   .rules .tag {
     margin-left: var(--s1);

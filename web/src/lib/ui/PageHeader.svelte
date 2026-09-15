@@ -3,6 +3,8 @@
    * 每页统一的头：面包屑 + 标题 + 一行摘要 + 右侧动作。
    * 顺手把浏览器标签页的标题也设了：十个 ai-task 标签页并排时得能认出哪个是哪个。
    */
+  import Icon from './Icon.svelte';
+
   let {
     title,
     crumb,
@@ -27,7 +29,7 @@
   <div class="left">
     {#if crumb}
       <a class="crumb" href={crumbHref ?? '/'}>
-        <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" /></svg>
+        <Icon name="chevron-left" size={13} />
         {crumb}
       </a>
     {/if}
@@ -57,14 +59,14 @@
     display: inline-flex;
     align-items: center;
     gap: 2px;
-    font-size: 0.78rem;
+    font-size: var(--t-sm);
     color: var(--fg-faint);
     margin-bottom: 4px;
     margin-left: -2px;
   }
-  .crumb svg {
-    width: 13px;
-    height: 13px;
+  /* 图标现在在子组件里，scoped 选择器够不到，得显式打穿一层。
+     宽高走 Icon 的 size 属性，这里只管描边。 */
+  .crumb :global(svg) {
     fill: none;
     stroke: currentColor;
     stroke-width: 2;
@@ -85,7 +87,7 @@
   }
   .sub {
     margin-top: var(--s2);
-    font-size: 0.84rem;
+    font-size: var(--t-base);
     color: var(--fg-dim);
     display: flex;
     align-items: center;
@@ -101,7 +103,7 @@
     flex-wrap: wrap;
     justify-content: flex-end;
   }
-  @media (max-width: 700px) {
+  @media (max-width: 640px) {
     .page-head {
       flex-direction: column;
     }

@@ -36,6 +36,49 @@ export function describeError(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/**
+ * 把 422 的 `details[]` 拆成「字段名 -> 该字段的错误」。
+ *
+ * 后端一次把所有字段的问题都给回来（ADR 0002 明确要求不是只报第一个），
+ * 但 `describeError` 会把它们拼成一行放进页头 banner。要把错误显示在**出错的那个框**
+ * 旁边，就得按 field 拆开——这个函数是 `Field` 组件的输入。
+ *
+ * 不是 `ApiFailure`（网络错、超时）时返回空对象：那不是某个字段的问题。
+ */
+export function fieldErrors(e: unknown): Record<string, string> {
+  if (!(e instanceof ApiFailure)) return {};
+  const out: Record<string, string> = {};
+  for (const d of e.body.details ?? []) {
+    // 同一个字段有多条时保留第一条：框底下只有一行的位置
+    out[d.field] ??= d.message;
+  }
+  return out;
+}
+
+/**
+ * 只吞掉"这个角色本来就读不到"的错误，其余照常抛。
+ *
+ * 之前这些地方一律是 `.catch(() => {})`。意图是对的——operator 读不到主机列表，
+ * 界面退化成显示短 id 就行，不该弹个红条。但那一行同时吞掉了 500、超时和断网，
+ * 于是"后端挂了"和"你没权限"在界面上长得一模一样：面板空着，没有任何解释。
+ */
+export function ignoreForbidden(e: unknown): void {
+  if (e instanceof ApiFailure && (e.status === 403 || e.status === 401)) return;
+  throw e;
+}
+
+/**
+ * 会话过期时叫谁。
+ *
+ * 不在这里直接改 session：`session.svelte.ts` 依赖本模块，反过来 import 就成环了。
+ * 留一个插槽让它自己注册，方向保持单向。
+ */
+let onExpired: (() => void) | null = null;
+
+export function setUnauthorizedHandler(handler: () => void): void {
+  onExpired = handler;
+}
+
 export interface RequestOptions {
   method?: string;
   body?: unknown;
@@ -46,6 +89,18 @@ export interface RequestOptions {
   idempotencyKey?: string;
   /** 乐观锁。更新任务时带上当前 ETag，冲突会返回 409。 */
   ifMatch?: string;
+  /**
+   * 拿响应头。
+   *
+   * 加这个是因为"要读 ETag"曾经是绕开 `api()` 去裸 fetch 的唯一理由——
+   * 而绕开之后顺带丢掉了超时、结构化错误和 401 处理。
+   */
+  onHeaders?: (headers: Headers) => void;
+  /**
+   * 这个请求的 401 是**正常答案**，不是会话过期。
+   * 只有登录/探测类调用该设它——别处设了就等于把过期检测关掉了。
+   */
+  expected401?: boolean;
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -90,11 +145,21 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
     clearTimeout(timer);
   }
 
+  // 会话中途过期时，之前每个请求各自抛 401，而 LoginGate 只在挂载时查过一次
+  // ——于是界面停在一个哪个接口都 401 的壳里，不硬刷新永远回不到登录页。
+  //
+  // `expected401` 是必要的：登录探测本身就靠 401 来分辨"该登录了"和"没开认证"，
+  // 把它也当成过期处理会在登录页上打出一个死循环。
+  if (response.status === 401 && !options.expected401) {
+    onExpired?.();
+  }
   if (!response.ok) {
     throw new ApiFailure(response.status, await parseError(response));
   }
   if (response.status === 204) return undefined as T;
-  return (await response.json()) as T;
+  const parsed = (await response.json()) as T;
+  options.onHeaders?.(response.headers);
+  return parsed;
 }
 
 async function parseError(response: Response): Promise<ApiError> {

@@ -149,17 +149,17 @@
   }
   h3 {
     margin: 0;
-    font-size: 1rem;
+    font-size: var(--t-lg);
   }
   .meta {
     margin: 2px 0 0;
-    font-size: 0.8rem;
+    font-size: var(--t-sm);
     display: flex;
     gap: var(--s1);
     flex-wrap: wrap;
   }
   .clock {
-    font-size: 0.84rem;
+    font-size: var(--t-base);
     color: var(--warn);
     white-space: nowrap;
     font-weight: 500;
@@ -172,7 +172,7 @@
     grid-template-columns: auto 1fr;
     gap: 0.3rem var(--s3);
     margin: 0;
-    font-size: 0.85rem;
+    font-size: var(--t-base);
     padding: var(--s3);
     background: var(--surface-2);
     border-radius: var(--r2);
@@ -180,7 +180,7 @@
   dt {
     color: var(--fg-faint);
     white-space: nowrap;
-    font-size: 0.78rem;
+    font-size: var(--t-sm);
     padding-top: 2px;
   }
   dd {
@@ -189,7 +189,7 @@
     min-width: 0;
   }
   dd code {
-    font-size: 0.82rem;
+    font-size: var(--t-sm);
     color: var(--fg);
   }
   dd.block code {
@@ -216,7 +216,7 @@
   .banner {
     margin: 0;
   }
-  @media (max-width: 700px) {
+  @media (max-width: 640px) {
     .actions {
       flex-wrap: wrap;
     }

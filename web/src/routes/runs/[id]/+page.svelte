@@ -8,9 +8,10 @@
    */
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
-  import { api, describeError } from '$api/client';
+  import { api, describeError, ignoreForbidden } from '$api/client';
+  import { resource, invalidate } from '$api/resource.svelte';
   import { subscribeRunEvents, type EventStream } from '$api/events';
-  import { cancelRun, deleteRun, getRun, triggerRun } from '$api/runs';
+  import { cancelRun, deleteRun, getRun, triggerRun, newIdempotencyKey } from '$api/runs';
   import { listApprovals, listHosts, type Approval } from '$api/models';
   import type { RunEvent } from '$api/types/RunEvent';
   import type { RunSummary } from '$api/types/RunSummary';
@@ -18,6 +19,7 @@
   import ResourceChart from '$lib/metrics/ResourceChart.svelte';
   import DriftPanel from '$lib/drift/DriftPanel.svelte';
   import Process from '$lib/runs/Process.svelte';
+  import DagView from '$lib/dag/DagView.svelte';
   import ApprovalCard from '$lib/approvals/ApprovalCard.svelte';
   import PageHeader from '$lib/ui/PageHeader.svelte';
   import StatusPill from '$lib/ui/StatusPill.svelte';
@@ -25,6 +27,8 @@
   import Dropdown from '$lib/ui/Dropdown.svelte';
   import { toast, toastError } from '$lib/ui/toast.svelte';
   import { clock, DISPLAY_TIMEZONE, duration, isTerminal, money, stamp, triggerLabel } from '$lib/ui/format';
+  import Icon from '$lib/ui/Icon.svelte';
+  import { scrollToNode } from '$lib/ui/scroll';
 
   const runId = $derived(page.params.id ?? '');
 
@@ -49,7 +53,18 @@
         if (event.body.kind === 'run_finished') {
           getRun(runId)
             .then((r) => (run = r))
-            .catch(() => {});
+            // 终态刷新拿最终成本和耗时。失败不致命（流里的数据还在），
+            // 但也不能不说——否则页头的成本会停在一个偏小的值上，没人知道为什么。
+            .catch((e) => toastError(describeError(e)));
+          // **SSE 是失效信号，缓存是存储。** 这个 run 结束了，首页的指标和执行列表
+          // 立刻就旧了；与其让它们各自缩短轮询去"撞"到这个变化，不如在这里直接失效。
+          invalidate('overview', 'runs');
+        }
+        if (
+          event.body.kind === 'approval_requested' ||
+          event.body.kind === 'approval_decided'
+        ) {
+          invalidate('approvals', 'overview');
         }
       },
       onStatus: (s) => (status = s)
@@ -78,13 +93,14 @@
     if (!run?.task_id) return;
     api<TaskDetail>(`/api/v1/tasks/${run.task_id}`)
       .then((t) => (task = t))
-      .catch(() => {});
+      // 任何角色都读得到自己 workspace 的任务，所以这里失败是真故障，不是权限。
+      .catch((e) => toastError(describeError(e)));
   });
   $effect(() => {
     // 主机是 admin 才能读；读不到就在过程里显示短 id，不该报错
     listHosts()
       .then((h) => (hosts = h))
-      .catch(() => {});
+      .catch(ignoreForbidden);
   });
 
   const cost = $derived(run?.cost_usd ?? '0.000000');
@@ -102,19 +118,27 @@
 
   // 本 run 的待审批。审批门挂着时 run 停在 running，人得能就地点头，
   // 而不是先记住 run id 再翻到另一个页面去找。
-  let pending = $state<Approval[]>([]);
-  async function loadApprovals() {
-    try {
-      pending = (await listApprovals()).filter((a) => a.run_id === runId);
-    } catch {
-      /* 审批读不到不该把整个 run 页面弄坏 */
+  // 和侧栏徽标、首页、/approvals 共享同一个 key。四处订阅只产生一条请求，
+  // 而且上面的 SSE 一收到审批事件就让它立刻失效，不用靠 3 秒轮询去撞。
+  const approvals = resource<Approval[]>('approvals', () => listApprovals(), { pollMs: 5000 });
+  const pending = $derived((approvals.data ?? []).filter((a) => a.run_id === runId));
+
+  /**
+   * 每个节点当前的状态。图上的圆点靠它。
+   *
+   * 和 `degraded` 一样是**增量累积**：每来一条事件只看这一条，
+   * 不把整个 events 数组重扫一遍。
+   */
+  const nodeStatus = $derived.by(() => {
+    const out: Record<string, string> = {};
+    for (const event of events) {
+      if (!event.node_key) continue;
+      const kind = event.body.kind;
+      if (kind === 'node_started') out[event.node_key] = 'running';
+      else if (kind === 'node_finished') out[event.node_key] = event.body.status;
+      else if (kind === 'approval_requested') out[event.node_key] = 'awaiting_approval';
     }
-  }
-  $effect(() => {
-    if (!runId) return;
-    void loadApprovals();
-    const timer = setInterval(loadApprovals, 3000);
-    return () => clearInterval(timer);
+    return out;
   });
 
   // 节点跑完才有新的采样可读。用事件数当版本号，比定时轮询省事也更及时。
@@ -156,7 +180,9 @@
     if (!run) return;
     busy = true;
     try {
-      const r = await triggerRun(run.task_id, { dry_run: run.dry_run });
+      // "再跑一次"每次点都是一次新的意图，所以每次都拿一个新键——
+      // 复用的话第二次点会被当成重放，直接把上一次的 run 返回来。
+      const r = await triggerRun(run.task_id, { dry_run: run.dry_run }, newIdempotencyKey());
       toast('已重新触发');
       await goto(`/runs/${r.id}`);
     } catch (e) {
@@ -270,11 +296,11 @@
   {/snippet}
 </PageHeader>
 
-<Confirm bind:open={confirmingCancel} title="取消这次执行？" danger confirmText="取消执行" {busy} onconfirm={cancel}>
+<Confirm open={confirmingCancel} onclose={() => (confirmingCancel = false)} title="取消这次执行？" danger confirmText="取消执行" {busy} onconfirm={cancel}>
   <p>正在跑的步骤会被中断。已经落地的改动不会回滚，已经花掉的钱也不会退。</p>
 </Confirm>
 
-<Confirm bind:open={confirmingDelete} title="删除这次执行记录？" danger confirmText="删除" {busy} onconfirm={removeRun}>
+<Confirm open={confirmingDelete} onclose={() => (confirmingDelete = false)} title="删除这次执行记录？" danger confirmText="删除" {busy} onconfirm={removeRun}>
   <p>
     连同它的 {events.length} 条事件和资源采样一起删掉。那里面有成本记录和策略判决，是审计材料。
   </p>
@@ -292,8 +318,25 @@
 {#if pending.length}
   <section class="gate">
     {#each pending as approval (approval.id)}
-      <ApprovalCard {approval} ondecided={loadApprovals} />
+      <ApprovalCard {approval} ondecided={() => invalidate('approvals', 'overview')} />
     {/each}
+  </section>
+{/if}
+
+{#if task?.spec}
+  <section class="card">
+    <header class="card-head">
+      <h2>编排</h2>
+      <span class="sub">点节点跳到下面对应的那一段</span>
+    </header>
+    <!-- README 一直写着"叠加实时执行状态"，在这之前界面上并没有这张图。
+         状态色和 StatusPill、状态点用的是同一套语义色——同一个状态在两个地方
+         长得不一样，人就会停下来确认。 -->
+    <DagView
+      spec={task.spec}
+      status={nodeStatus}
+      onselect={scrollToNode}
+    />
   </section>
 {/if}
 
@@ -311,7 +354,7 @@
 
 <details class="events-block">
   <summary>
-    <svg viewBox="0 0 24 24" class="chev"><path d="M9 6l6 6-6 6" /></svg>
+    <Icon name="chevron-right" />
     <h2>原始事件流</h2>
     <span class="faint">{events.length} 条 · 按 seq 排、不合并、不过滤。排查用。</span>
   </summary>
@@ -343,7 +386,7 @@
     border: none;
     background: none;
     padding: 0;
-    font-size: 0.8rem;
+    font-size: var(--t-sm);
   }
   .idbtn:hover {
     color: var(--accent-fg);
@@ -364,7 +407,7 @@
     align-items: center;
     gap: var(--s3);
     color: var(--fg-dim);
-    font-size: 0.85rem;
+    font-size: var(--t-base);
     margin-top: var(--s4);
   }
 
@@ -391,7 +434,7 @@
     stroke-width: 2;
     stroke-linecap: round;
     stroke-linejoin: round;
-    transition: transform 0.12s ease;
+    transition: transform var(--dur-2) var(--ease);
   }
   .events-block[open] .chev {
     transform: rotate(90deg);
@@ -420,9 +463,9 @@
     gap: var(--s3);
     align-items: baseline;
     padding: 0.35rem var(--s4);
-    font-size: 0.83rem;
+    font-size: var(--t-sm);
     /* 新事件从上方滑入。实时流里"有新东西来了"要看得见 */
-    animation: slide-in 0.18s ease-out;
+    animation: slide-in var(--dur-3) var(--ease-out);
   }
   @keyframes slide-in {
     from {
@@ -438,20 +481,20 @@
   }
   .seq {
     color: var(--fg-faint);
-    font-size: 0.75rem;
+    font-size: var(--t-xs);
     text-align: right;
   }
   time {
     color: var(--fg-faint);
-    font-size: 0.75rem;
+    font-size: var(--t-xs);
   }
   .kind {
     color: var(--fg-faint);
-    font-size: 0.75rem;
+    font-size: var(--t-xs);
   }
   .node {
     color: var(--fg-dim);
-    font-size: 0.75rem;
+    font-size: var(--t-xs);
     overflow: hidden;
     text-overflow: ellipsis;
   }
@@ -490,7 +533,7 @@
     color: var(--ok);
   }
 
-  @media (max-width: 900px) {
+  @media (max-width: 960px) {
     .events li {
       grid-template-columns: 2.5rem 1fr;
     }

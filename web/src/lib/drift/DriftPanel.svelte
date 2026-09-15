@@ -110,7 +110,7 @@
   }
   .shadow {
     font-weight: 400;
-    font-size: 0.72rem;
+    font-size: var(--t-xs);
     color: var(--fg-dim);
     border: 1px solid var(--line);
     border-radius: 999px;
@@ -118,13 +118,13 @@
   }
   .verdict {
     margin: 0 0 var(--s2);
-    font-size: 0.88rem;
+    font-size: var(--t-base);
   }
   .verdict a {
     margin-left: 0.5rem;
   }
   table {
-    font-size: 0.82rem;
+    font-size: var(--t-sm);
   }
   td {
     overflow-wrap: anywhere;

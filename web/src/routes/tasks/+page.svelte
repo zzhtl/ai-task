@@ -6,8 +6,9 @@
    * 光列名字和 id 的列表，看完还得再点进去才知道有没有配定时。
    */
   import { goto } from '$app/navigation';
-  import { listTasks, listRuns, triggerRun } from '$api/runs';
-  import { api, describeError } from '$api/client';
+  import { listTasks, listRuns, triggerRun, newIdempotencyKey } from '$api/runs';
+  import { api, describeError, ignoreForbidden } from '$api/client';
+  import { resource } from '$api/resource.svelte';
   import { listSchedules, type Schedule } from '$api/models';
   import type { TaskSummary } from '$api/types/TaskSummary';
   import type { RunSummary } from '$api/types/RunSummary';
@@ -18,41 +19,44 @@
   import Confirm from '$lib/ui/Confirm.svelte';
   import { toast, toastError } from '$lib/ui/toast.svelte';
   import { ago, stamp } from '$lib/ui/format';
+  import Icon from '$lib/ui/Icon.svelte';
 
-  let tasks = $state<TaskSummary[]>([]);
-  let runs = $state<RunSummary[]>([]);
-  let schedules = $state<Schedule[]>([]);
-  let error = $state<string | null>(null);
-  let loaded = $state(false);
   let busy = $state<string | null>(null);
   let query = $state('');
 
-  async function refresh() {
-    try {
-      const [t, r, s] = await Promise.all([
-        listTasks(),
-        listRuns(200),
-        listSchedules().catch(() => [] as Schedule[])
-      ]);
-      tasks = t.items;
-      runs = r.items;
-      schedules = s;
-      error = null;
-    } catch (e) {
-      error = describeError(e);
-    } finally {
-      loaded = true;
-    }
-  }
+  // 三个 key 全站共享：任务列表和命令面板、审批页是同一份。
+  // 原来这里每 5 秒把 200 条完整 run 拉回来，只为在每一行里找"上次执行"。
+  const tasksRes = resource<TaskSummary[]>(
+    'tasks',
+    (signal) => listTasks(signal).then((page) => page.items),
+    { pollMs: 5000 }
+  );
+  const schedulesRes = resource<Schedule[]>(
+    'schedules',
+    () =>
+      listSchedules().catch((e) => {
+        ignoreForbidden(e);
+        return [] as Schedule[];
+      }),
+    { pollMs: 10_000 }
+  );
 
-  $effect(() => {
-    void refresh();
-    const timer = setInterval(refresh, 5000);
-    return () => clearInterval(timer);
+  const tasks = $derived(tasksRes.data ?? []);
+  const schedules = $derived(schedulesRes.data ?? []);
+  const loaded = $derived(!tasksRes.pending);
+  const error = $derived(tasksRes.error ? describeError(tasksRes.error) : null);
+  const refresh = () => void tasksRes.refresh();
+
+  const schedulesByTask = $derived.by(() => {
+    const out = new Map<string, Schedule[]>();
+    for (const s of schedules) (out.get(s.task_id) ?? out.set(s.task_id, []).get(s.task_id)!).push(s);
+    return out;
   });
 
-  const lastRun = (taskId: string) => runs.find((r) => r.task_id === taskId);
-  const scheduleOf = (taskId: string) => schedules.filter((s) => s.task_id === taskId);
+  // last_run 现在由 /api/v1/tasks 直接带回来（服务端一条 LATERAL）。
+  // 之前这里每 5 秒拉 100 条 run 回来，只为在每一行里找"上次执行"。
+  const lastRun = (taskId: string) => tasks.find((t) => t.id === taskId)?.last_run ?? undefined;
+  const scheduleOf = (taskId: string) => schedulesByTask.get(taskId) ?? [];
 
   const shown = $derived.by(() => {
     const q = query.trim().toLowerCase();
@@ -67,9 +71,37 @@
    * 是审计材料，没有撤销键。所以先把会被牵连的数量摆出来。
    */
   let pendingDelete = $state<TaskSummary | null>(null);
-  const affectedRuns = $derived.by(() => {
+  /**
+   * 会被牵连的执行记录数。`null` 表示还在查。
+   *
+   * **打开确认框时才查。** 之前是常驻一份 100–200 条的 run 列表在内存里数，
+   * 而这个数一分钟里用不上一次。接口不返回总数（ADR 0002：默认不返回总数），
+   * 所以拉一页上限回来数；顶到上限就说"至少"，不编一个确切的数字。
+   */
+  const RUN_PROBE_LIMIT = 200;
+  let affectedRuns = $state<number | null>(null);
+  let affectedAtLeast = $state(false);
+
+  $effect(() => {
     const task = pendingDelete;
-    return task ? runs.filter((r) => r.task_id === task.id).length : 0;
+    if (!task) {
+      affectedRuns = null;
+      affectedAtLeast = false;
+      return;
+    }
+    let cancelled = false;
+    listRuns({ taskId: task.id, limit: RUN_PROBE_LIMIT })
+      .then((page) => {
+        if (cancelled) return;
+        affectedRuns = page.items.length;
+        affectedAtLeast = page.items.length >= RUN_PROBE_LIMIT;
+      })
+      .catch(() => {
+        if (!cancelled) affectedRuns = null;
+      });
+    return () => {
+      cancelled = true;
+    };
   });
 
   async function remove(task: TaskSummary) {
@@ -85,10 +117,21 @@
     }
   }
 
+  /**
+   * 这次「想触发某个任务」的幂等键。
+   *
+   * 按任务存着，成功之后才丢掉：中途失败重试复用同一个键，
+   * 服务端认得出这是同一次意图，不会建出第二个 run。
+   */
+  const triggerKeys = new Map<string, string>();
+
   async function run(task: TaskSummary) {
     busy = task.id;
+    const key = triggerKeys.get(task.id) ?? newIdempotencyKey();
+    triggerKeys.set(task.id, key);
     try {
-      const r = await triggerRun(task.id);
+      const r = await triggerRun(task.id, { dry_run: false }, key);
+      triggerKeys.delete(task.id);
       toast(`已触发「${task.name}」`);
       await goto(`/runs/${r.id}`);
     } catch (e) {
@@ -100,6 +143,7 @@
 
 <Confirm
   open={pendingDelete !== null}
+  onclose={() => (pendingDelete = null)}
   title="删除任务「{pendingDelete?.name ?? ''}」？"
   danger
   confirmText="删除"
@@ -109,10 +153,12 @@
     if (task) void remove(task);
   }}
 >
-  {#if affectedRuns}
+  {#if affectedRuns === null}
+    <p class="muted">正在数会被牵连的执行记录…</p>
+  {:else if affectedRuns > 0}
     <p>
-      会同时删掉 <b>{affectedRuns}</b> 次执行记录和它们的完整事件流。
-      那里面有成本记录和策略判决，是审计材料。
+      会同时删掉{#if affectedAtLeast}<b>至少 {affectedRuns}</b>{:else}<b>{affectedRuns}</b>{/if}
+      次执行记录和它们的完整事件流。那里面有成本记录和策略判决，是审计材料。
     </p>
     <p class="warn-text">删掉之后拿不回来。</p>
   {:else}
@@ -208,7 +254,7 @@
                   aria-label="编辑"
                   onclick={(e) => e.stopPropagation()}
                 >
-                  <svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4zM13 7l4 4" /></svg>
+                  <Icon name="pencil" />
                 </a>
                 <button
                   class="btn-ghost btn-sm btn-icon danger"
@@ -220,7 +266,7 @@
                     pendingDelete = task;
                   }}
                 >
-                  <svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" /></svg>
+                  <Icon name="trash" />
                 </button>
               </div>
             </td>
@@ -243,9 +289,6 @@
 {/if}
 
 <style>
-  .search {
-    width: 14rem;
-  }
   .name-cell {
     max-width: 34ch;
   }
@@ -261,7 +304,7 @@
   }
   .desc {
     margin-top: 2px;
-    font-size: 0.78rem;
+    font-size: var(--t-sm);
     color: var(--fg-faint);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -271,7 +314,7 @@
     display: flex;
     gap: var(--s2);
     align-items: baseline;
-    font-size: 0.8rem;
+    font-size: var(--t-sm);
     white-space: nowrap;
   }
   .sched.off {
@@ -282,11 +325,5 @@
     gap: var(--s2);
     align-items: center;
     white-space: nowrap;
-  }
-  .err {
-    margin-top: 2px;
-    font-size: 0.74rem;
-    color: var(--bad);
-    max-width: 36ch;
   }
 </style>

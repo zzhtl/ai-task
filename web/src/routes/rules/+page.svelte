@@ -10,14 +10,17 @@
    * 把它们并排列成一张表，会让人以为「写一条规则就管住了」——那是这类系统
    * 最常见的致命误解。
    */
-  import { api, describeError } from '$api/client';
+  import { api, describeError, fieldErrors } from '$api/client';
   import { listRules, listSkills, type Rule, type Skill } from '$api/models';
   import { session } from '$lib/auth/session.svelte';
   import PageHeader from '$lib/ui/PageHeader.svelte';
   import Empty from '$lib/ui/Empty.svelte';
   import Loading from '$lib/ui/Loading.svelte';
   import Confirm from '$lib/ui/Confirm.svelte';
+  import Modal from '$lib/ui/Modal.svelte';
+  import Field from '$lib/ui/Field.svelte';
   import { toast, toastError } from '$lib/ui/toast.svelte';
+  import Icon from '$lib/ui/Icon.svelte';
 
   type Tab = 'policy' | 'prompt' | 'skills';
 
@@ -28,6 +31,8 @@
   let busy = $state(false);
   let tab = $state<Tab>('policy');
   let adding = $state(false);
+  /** 后端 422 里按字段拆出来的错误（正则写不通是最常见的一种）。 */
+  let fieldErr = $state<Record<string, string>>({});
   /** 正在改的那条规则。表单复用新增的那一套，只是提交走 PUT。 */
   let editing = $state<Rule | null>(null);
 
@@ -69,12 +74,15 @@
   async function act(run: () => Promise<unknown>, done?: string) {
     busy = true;
     error = null;
+    fieldErr = {};
     try {
       await run();
       await load();
       if (done) toast(done);
     } catch (e) {
-      error = describeError(e);
+      // 正则编译不过是这里最常见的失败，显示在模式框底下比丢进页头有用
+      fieldErr = fieldErrors(e);
+      error = Object.keys(fieldErr).length ? null : describeError(e);
       throw e;
     } finally {
       busy = false;
@@ -133,6 +141,7 @@
 
   function closeForm() {
     adding = false;
+    fieldErr = {};
     editing = null;
     ruleName = '';
     ruleText = '';
@@ -229,6 +238,7 @@
 
 <Confirm
   open={pendingDelete !== null}
+  onclose={() => (pendingDelete = null)}
   title="删除{pendingDelete?.kind === 'policy' ? '策略' : '软规则'}「{pendingDelete?.name ?? ''}」？"
   danger
   confirmText="删除"
@@ -286,73 +296,77 @@
       <code>ask</code> 会把那次工具调用挂起等人点头，超时按拒绝处理。
     </div>
 
-    {#if adding}
-      <section class="card form">
-        <header class="card-head">
-          <h2>{editing ? `编辑策略 ${editing.name}` : '新增策略'}</h2>
-          <span class="spacer"></span>
-          <button class="btn-ghost btn-sm" onclick={closeForm}>收起</button>
-        </header>
-        <div class="form-grid">
-          <label class="field">
-            名称
-            <input bind:value={policyName} placeholder="prod-no-write" spellcheck="false" disabled={editing !== null} />
-            {#if editing}<span class="hint">名字不能改：任务是按名字挂规则的</span>{/if}
-          </label>
-          <label class="field">
-            工具
-            <input bind:value={policyTool} placeholder="Bash / remote_bash / remote_write" spellcheck="false" />
-          </label>
-          <label class="field">
-            判决
-            <select bind:value={policyEffect}>
-              <option value="deny">deny — 直接拒绝</option>
-              <option value="ask">ask — 挂起等人审批</option>
-              <option value="allow">allow — 放行（配合高优先级做白名单）</option>
-            </select>
-          </label>
-          <label class="field">
-            优先级
-            <input type="number" bind:value={policyPriority} />
-            <span class="hint">数值大的先判，首个命中生效</span>
-          </label>
-          <label class="field">
-            作用范围
-            <select bind:value={policyGlobal}>
-              <option value={true}>全局 — 所有任务都生效</option>
-              <option value={false}>按任务挂载 — 只对勾上它的任务生效</option>
-            </select>
-          </label>
-        </div>
-        <div class="form-grid">
-          <label class="field">匹配参数<input bind:value={policyArg} placeholder="command / path" spellcheck="false" /></label>
-          <label class="field">
-            匹配方式
-            <select bind:value={policyKind}>
-              <option value="regex">正则</option>
-              <option value="glob">glob</option>
-              <option value="contains">包含</option>
-            </select>
-          </label>
-          <label class="field wide">
-            模式
-            <input bind:value={policyPattern} placeholder={'^\\s*rm\\s+-rf\\s+/'} spellcheck="false" class="mono" />
-            <span class="hint">留空表示匹配这个工具的所有调用</span>
-          </label>
-        </div>
-        <label class="field">
-          原因
-          <input bind:value={policyReason} placeholder="生产机禁止递归删除" />
-          <span class="hint">会作为 tool_result 回给模型，写清为什么比写「不行」有用</span>
-        </label>
-        <div class="form-actions">
-          <button class="btn-primary" onclick={savePolicy} disabled={busy || !policyName || !policyReason}>
-            {editing ? '保存' : '添加策略'}
-          </button>
-          {#if editing}<button class="btn-ghost" onclick={closeForm} disabled={busy}>取消</button>{/if}
-        </div>
-      </section>
-    {/if}
+    <Modal
+      open={adding}
+      title={editing ? `编辑策略 ${editing.name}` : '新增策略'}
+      size="lg"
+      onclose={closeForm}
+    >
+      <div class="form-grid">
+      <Field label="名称" hint={editing ? '名字不能改：任务是按名字挂规则的' : undefined} error={fieldErr.name}>
+        {#snippet control(p)}
+          <input {...p} bind:value={policyName} placeholder="prod-no-write" spellcheck="false" disabled={editing !== null} />
+        {/snippet}
+      </Field>
+      <Field label="工具" error={fieldErr.match}>
+        {#snippet control(p)}
+          <input {...p} bind:value={policyTool} placeholder="Bash / remote_bash / remote_write" spellcheck="false" />
+        {/snippet}
+      </Field>
+      <Field label="判决" error={fieldErr.effect}>
+        {#snippet control(p)}
+          <select {...p} bind:value={policyEffect}>
+            <option value="deny">deny — 直接拒绝</option>
+            <option value="ask">ask — 挂起等人审批</option>
+            <option value="allow">allow — 放行（配合高优先级做白名单）</option>
+          </select>
+        {/snippet}
+      </Field>
+      <Field label="优先级" hint="数值大的先判，首个命中生效" error={fieldErr.priority}>
+        {#snippet control(p)}
+          <input {...p} type="number" bind:value={policyPriority} />
+        {/snippet}
+      </Field>
+      <Field label="作用范围" error={fieldErr.global}>
+        {#snippet control(p)}
+          <select {...p} bind:value={policyGlobal}>
+            <option value={true}>全局 — 所有任务都生效</option>
+            <option value={false}>按任务挂载 — 只对勾上它的任务生效</option>
+          </select>
+        {/snippet}
+      </Field>
+      <Field label="匹配参数" error={fieldErr.arg}>
+        {#snippet control(p)}
+          <input {...p} bind:value={policyArg} placeholder="command / path" spellcheck="false" />
+        {/snippet}
+      </Field>
+      <Field label="匹配方式" error={fieldErr.kind}>
+        {#snippet control(p)}
+          <select {...p} bind:value={policyKind}>
+            <option value="regex">正则</option>
+            <option value="glob">glob</option>
+            <option value="contains">包含</option>
+          </select>
+        {/snippet}
+      </Field>
+      <Field label="模式" hint="留空表示匹配这个工具的所有调用" error={fieldErr.pattern} wide>
+        {#snippet control(p)}
+          <input {...p} bind:value={policyPattern} placeholder={'^\\s*rm\\s+-rf\\s+/'} spellcheck="false" class="mono" />
+        {/snippet}
+      </Field>
+      <Field label="原因" hint="会作为 tool_result 回给模型，写清为什么比写「不行」有用" error={fieldErr.reason} wide>
+        {#snippet control(p)}
+          <input {...p} bind:value={policyReason} placeholder="生产机禁止递归删除" />
+        {/snippet}
+      </Field>
+      </div>
+      {#snippet footer()}
+        <button class="btn-ghost" onclick={closeForm} disabled={busy}>取消</button>
+        <button class="btn-primary" onclick={savePolicy} disabled={busy || !policyName || !policyReason}>
+          {editing ? '保存' : '添加策略'}
+        </button>
+      {/snippet}
+    </Modal>
 
     {#if !loaded}
       <div class="card"><Loading rows={3} /></div>
@@ -381,7 +395,7 @@
                       {rule.enabled ? '停用' : '启用'}
                     </button>
                     <button class="btn-ghost btn-sm btn-icon" title="编辑" aria-label="编辑" disabled={busy} onclick={() => openEdit(rule)}>
-                      <svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4zM13 7l4 4" /></svg>
+                      <Icon name="pencil" />
                     </button>
                     <!-- 只是暂时不生效的话用停用：删除会让历史 run 的规则指纹对不上 -->
                     <button
@@ -391,7 +405,7 @@
                       disabled={busy}
                       onclick={() => (pendingDelete = rule)}
                     >
-                      <svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" /></svg>
+                      <Icon name="trash" />
                     </button>
                   </div>
                 </td>
@@ -414,39 +428,42 @@
       真正要拦住的事情必须同时配一条硬策略。软规则的价值在于让模型少走弯路，不在于阻止它。
     </div>
 
-    {#if adding}
-      <section class="card form">
-        <header class="card-head">
-          <h2>{editing ? `编辑软规则 ${editing.name}` : '新增软规则'}</h2>
-          <span class="spacer"></span>
-          <button class="btn-ghost btn-sm" onclick={closeForm}>收起</button>
-        </header>
-        <div class="form-grid">
-          <label class="field">
-            名称
-            <input bind:value={ruleName} placeholder="no-restart" spellcheck="false" disabled={editing !== null} />
-            {#if editing}<span class="hint">名字不能改：任务是按名字挂规则的</span>{/if}
-          </label>
-          <label class="field">
-            作用范围
-            <select bind:value={ruleGlobal}>
+    <Modal
+      open={adding}
+      title={editing ? `编辑软规则 ${editing.name}` : '新增软规则'}
+      onclose={closeForm}
+    >
+      <div class="form-grid">
+        <Field
+          label="名称"
+          hint={editing ? '名字不能改：任务是按名字挂规则的' : undefined}
+          error={fieldErr.name}
+        >
+          {#snippet control(p)}
+            <input {...p} bind:value={ruleName} placeholder="no-restart" spellcheck="false" disabled={editing !== null} />
+          {/snippet}
+        </Field>
+        <Field label="作用范围" error={fieldErr.global}>
+          {#snippet control(p)}
+            <select {...p} bind:value={ruleGlobal}>
               <option value={true}>全局 — 所有任务都生效</option>
               <option value={false}>按任务挂载 — 只对勾上它的任务生效</option>
             </select>
-          </label>
-        </div>
-        <label class="field">
-          规则文本
-          <textarea bind:value={ruleText} rows="3" class="prose" placeholder="不要重启任何服务。需要重启时先报告，等人确认。"></textarea>
-        </label>
-        <div class="form-actions">
-          <button class="btn-primary" onclick={savePromptRule} disabled={busy || !ruleName || !ruleText}>
-            {editing ? '保存' : '添加规则'}
-          </button>
-          {#if editing}<button class="btn-ghost" onclick={closeForm} disabled={busy}>取消</button>{/if}
-        </div>
-      </section>
-    {/if}
+          {/snippet}
+        </Field>
+        <Field label="规则文本" error={fieldErr.text} wide>
+          {#snippet control(p)}
+            <textarea {...p} bind:value={ruleText} rows="4" class="prose" placeholder="不要重启任何服务。需要重启时先报告，等人确认。"></textarea>
+          {/snippet}
+        </Field>
+      </div>
+      {#snippet footer()}
+        <button class="btn-ghost" onclick={closeForm} disabled={busy}>取消</button>
+        <button class="btn-primary" onclick={savePromptRule} disabled={busy || !ruleName || !ruleText}>
+          {editing ? '保存' : '添加规则'}
+        </button>
+      {/snippet}
+    </Modal>
 
     {#if !loaded}
       <div class="card"><Loading rows={3} /></div>
@@ -472,7 +489,7 @@
                       {rule.enabled ? '停用' : '启用'}
                     </button>
                     <button class="btn-ghost btn-sm btn-icon" title="编辑" aria-label="编辑" disabled={busy} onclick={() => openEdit(rule)}>
-                      <svg viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4zM13 7l4 4" /></svg>
+                      <Icon name="pencil" />
                     </button>
                     <!-- 只是暂时不生效的话用停用：删除会让历史 run 的规则指纹对不上 -->
                     <button
@@ -482,7 +499,7 @@
                       disabled={busy}
                       onclick={() => (pendingDelete = rule)}
                     >
-                      <svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" /></svg>
+                      <Icon name="trash" />
                     </button>
                   </div>
                 </td>
@@ -505,34 +522,38 @@
       ——只有 name 和 description 进上下文，正文按需加载。在任务的 AI 步骤里勾选即可。
     </div>
 
-    {#if adding}
-      <section class="card form">
-        <header class="card-head">
-          <h2>导入技能</h2>
-          <span class="spacer"></span>
-          <button class="btn-ghost btn-sm" onclick={closeForm}>收起</button>
-        </header>
-        <div class="form-grid">
-          <label class="field">名称<input bind:value={skillName} placeholder="linux-perf" spellcheck="false" /></label>
-          <label class="field wide">
-            描述
-            <!-- 渐进式披露时模型只看得到描述。写不清楚等于这个技能不会被用上 -->
-            <input bind:value={skillDesc} placeholder="Linux 性能排查：CPU / 内存 / IO / 网络的定位顺序" />
-            <span class="hint">模型只凭这一句决定要不要加载它，写清楚适用场景</span>
-          </label>
-        </div>
-        <label class="field">
-          正文（Markdown，就是 SKILL.md 的内容）
-          <textarea bind:value={skillBody} rows="10" spellcheck="false"
-            placeholder="## 定位顺序&#10;&#10;1. 先看整机负载：uptime、vmstat 1&#10;2. ..."></textarea>
-        </label>
-        <div class="form-actions">
-          <button class="btn-primary" onclick={importSkill} disabled={busy || !skillName || !skillDesc || !skillBody}>
-            导入
-          </button>
-        </div>
-      </section>
-    {/if}
+    <Modal open={adding} title="导入技能" size="lg" onclose={closeForm}>
+      <div class="form-grid">
+        <Field label="名称" error={fieldErr.name}>
+          {#snippet control(p)}
+            <input {...p} bind:value={skillName} placeholder="linux-perf" spellcheck="false" />
+          {/snippet}
+        </Field>
+        <!-- 渐进式披露时模型只看得到描述。写不清楚等于这个技能不会被用上 -->
+        <Field
+          label="描述"
+          hint="模型只凭这一句决定要不要加载它，写清楚适用场景"
+          error={fieldErr.description}
+          wide
+        >
+          {#snippet control(p)}
+            <input {...p} bind:value={skillDesc} placeholder="Linux 性能排查：CPU / 内存 / IO / 网络的定位顺序" />
+          {/snippet}
+        </Field>
+        <Field label="正文（Markdown，就是 SKILL.md 的内容）" error={fieldErr.body} wide>
+          {#snippet control(p)}
+            <textarea {...p} bind:value={skillBody} rows="12" spellcheck="false"
+              placeholder="## 定位顺序&#10;&#10;1. 先看整机负载：uptime、vmstat 1&#10;2. ..."></textarea>
+          {/snippet}
+        </Field>
+      </div>
+      {#snippet footer()}
+        <button class="btn-ghost" onclick={closeForm} disabled={busy}>取消</button>
+        <button class="btn-primary" onclick={importSkill} disabled={busy || !skillName || !skillDesc || !skillBody}>
+          导入
+        </button>
+      {/snippet}
+    </Modal>
 
     {#if !loaded}
       <div class="card"><Loading rows={3} /></div>
@@ -569,12 +590,6 @@
   .callout {
     margin-bottom: var(--s4);
   }
-  .form {
-    display: flex;
-    flex-direction: column;
-    gap: var(--s3);
-    margin-bottom: var(--s4);
-  }
   .name {
     font-weight: 500;
     color: var(--fg);
@@ -591,9 +606,6 @@
   }
   textarea.prose {
     font-family: var(--font);
-    font-size: 0.86rem;
-  }
-  tr.on td {
-    background: var(--accent-soft);
+    font-size: var(--t-base);
   }
 </style>

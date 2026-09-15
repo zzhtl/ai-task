@@ -13,6 +13,7 @@
   import StatusPill from '$lib/ui/StatusPill.svelte';
   import { duration, money } from '$lib/ui/format';
   import { groupProcess, nodeNames } from './process';
+  import StepRail from '$lib/ui/StepRail.svelte';
 
   let {
     events,
@@ -54,11 +55,9 @@
     </header>
 
     {#each nodes as node, i (node.key)}
-      <article class="node">
-        <div class="rail">
-          <span class="num">{i + 1}</span>
-          {#if i < nodes.length - 1}<span class="wire"></span>{/if}
-        </div>
+      <!-- data-node 是编排图点节点时滚过来的锚点 -->
+      <article class="node" data-node={node.key}>
+        <StepRail index={i + 1} last={i === nodes.length - 1} />
 
         <div class="body">
           <header class="node-head">
@@ -191,7 +190,7 @@
     margin: 0;
   }
   .faint {
-    font-size: 0.76rem;
+    font-size: var(--t-xs);
     color: var(--fg-faint);
   }
 
@@ -199,30 +198,6 @@
     display: grid;
     grid-template-columns: 2rem 1fr;
     gap: var(--s3);
-  }
-  .rail {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: var(--s1);
-  }
-  .num {
-    width: 1.6rem;
-    height: 1.6rem;
-    border-radius: 50%;
-    border: 1px solid var(--line-strong);
-    background: var(--surface-2);
-    display: grid;
-    place-items: center;
-    font-size: 0.78rem;
-    color: var(--fg-dim);
-    flex: 0 0 auto;
-  }
-  .wire {
-    flex: 1;
-    width: 1px;
-    background: var(--line);
-    min-height: var(--s4);
   }
   .body {
     background: var(--surface-1);
@@ -245,7 +220,7 @@
     font-weight: 500;
   }
   .key {
-    font-size: 0.72rem;
+    font-size: var(--t-xs);
     color: var(--fg-faint);
   }
   .idle {
@@ -263,13 +238,13 @@
   }
   .blk p {
     margin: 0;
-    font-size: 0.86rem;
+    font-size: var(--t-base);
     line-height: 1.7;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
   .lbl {
-    font-size: 0.72rem;
+    font-size: var(--t-xs);
     color: var(--fg-faint);
     padding-top: 0.2rem;
   }
@@ -280,7 +255,7 @@
   }
   .thinking p {
     color: var(--fg-faint);
-    font-size: 0.82rem;
+    font-size: var(--t-sm);
   }
   .say {
     border-left-color: var(--accent-dim);
@@ -303,7 +278,7 @@
     display: flex;
     align-items: center;
     gap: var(--s2);
-    font-size: 0.84rem;
+    font-size: var(--t-base);
     flex-wrap: wrap;
   }
   .arg,
@@ -312,7 +287,7 @@
     padding: var(--s2);
     background: var(--surface-2);
     border-radius: var(--r2);
-    font-size: 0.76rem;
+    font-size: var(--t-xs);
     line-height: 1.6;
     color: var(--fg-dim);
     white-space: pre-wrap;
@@ -329,7 +304,7 @@
   }
   .denied-why {
     margin: 0;
-    font-size: 0.8rem;
+    font-size: var(--t-sm);
     color: var(--bad);
   }
 
@@ -349,7 +324,7 @@
     display: flex;
     align-items: center;
     gap: var(--s2);
-    font-size: 0.72rem;
+    font-size: var(--t-xs);
     color: var(--fg-faint);
   }
   .turn::after {
@@ -367,7 +342,7 @@
   }
   .note {
     margin: 0;
-    font-size: 0.8rem;
+    font-size: var(--t-sm);
     color: var(--fg-faint);
   }
   .note.warn {
@@ -380,7 +355,7 @@
   .cmd summary,
   .out-detail summary {
     cursor: pointer;
-    font-size: 0.78rem;
+    font-size: var(--t-sm);
     color: var(--fg-faint);
   }
   .cmd summary::before,
@@ -407,7 +382,7 @@
     background: var(--surface-2);
     border: 1px solid var(--line);
     border-radius: var(--r2);
-    font-size: 0.76rem;
+    font-size: var(--t-xs);
     line-height: 1.65;
     color: var(--fg-dim);
     white-space: pre-wrap;

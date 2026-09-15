@@ -8,12 +8,15 @@
    * 保存后会回显接下来三次触发的**本地时间**——`0 0 * * *` 和 `0 0 * * 0`
    * 光看字符串是分不出来的，看时间就一目了然。
    */
-  import { api, describeError } from '$api/client';
+  import { api, describeError, fieldErrors } from '$api/client';
   import { listSchedules, type Schedule } from '$api/models';
   import Confirm from '$lib/ui/Confirm.svelte';
+  import Modal from '$lib/ui/Modal.svelte';
+  import Field from '$lib/ui/Field.svelte';
   import Loading from '$lib/ui/Loading.svelte';
   import { toast, toastError } from '$lib/ui/toast.svelte';
   import { DISPLAY_TIMEZONE, stamp } from '$lib/ui/format';
+  import Icon from '$lib/ui/Icon.svelte';
 
   let { taskId, taskEnabled = true }: { taskId: string; taskEnabled?: boolean } = $props();
 
@@ -22,6 +25,8 @@
   let error = $state<string | null>(null);
   let busy = $state(false);
   let adding = $state(false);
+  /** 后端 422 里按字段拆出来的错误（cron 写错是最常见的一种）。 */
+  let fieldErr = $state<Record<string, string>>({});
 
   let cron = $state('0 2 * * *');
   let timezone = $state(DISPLAY_TIMEZONE);
@@ -64,12 +69,15 @@
   async function act(run: () => Promise<unknown>, done?: string) {
     busy = true;
     error = null;
+    fieldErr = {};
     try {
       await run();
       await load();
       if (done) toast(done);
     } catch (e) {
-      error = describeError(e);
+      // cron 写错是这里最常见的失败，显示在表达式框底下比丢进页头有用得多
+      fieldErr = fieldErrors(e);
+      error = Object.keys(fieldErr).length ? null : describeError(e);
     } finally {
       busy = false;
     }
@@ -113,6 +121,7 @@
 
 <Confirm
   open={pendingDelete !== null}
+  onclose={() => (pendingDelete = null)}
   title="删除这条定时？"
   danger
   confirmText="删除"
@@ -133,9 +142,7 @@
       <span class="sub">{items.filter((s) => s.enabled).length}/{items.length} 条启用</span>
     {/if}
     <span class="spacer"></span>
-    {#if !adding}
-      <button class="btn-sm" onclick={() => (adding = true)}>添加定时</button>
-    {/if}
+    <button class="btn-sm" onclick={() => (adding = true)}>添加定时</button>
   </header>
 
   {#if !taskEnabled && items.some((s) => s.enabled)}
@@ -163,7 +170,7 @@
               aria-label="删除定时"
               onclick={() => (pendingDelete = s)}
             >
-              <svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" /></svg>
+              <Icon name="trash" />
             </button>
           </div>
           <div class="line meta">
@@ -181,64 +188,66 @@
         </li>
       {/each}
     </ul>
-  {:else if !adding}
+  {:else}
     <p class="faint small">还没有定时，这个任务只能手动触发。</p>
   {/if}
 
   {#if error}<div class="banner">{error}</div>{/if}
 
-  {#if adding}
-    <div class="new">
-      <div class="presets">
-        {#each PRESETS as p (p.expr)}
-          <button class="btn-sm" class:on={cron === p.expr} onclick={() => (cron = p.expr)}>
-            {p.label}
-          </button>
-        {/each}
-      </div>
-      <div class="form-grid">
-        <label class="field">
-          cron 表达式
-          <input bind:value={cron} class="mono" placeholder="0 2 * * *" spellcheck="false" />
-        </label>
-        <label class="field">
-          时区
-          <input bind:value={timezone} placeholder="Asia/Shanghai" />
-        </label>
-      </div>
-      <div class="form-grid">
-        <label class="field">
-          错过了怎么办
-          <select bind:value={misfire}>
-            <option value="skip">不补</option>
-            <option value="fire_once">只补一次</option>
-            <option value="fire_all">全部补上</option>
-          </select>
-        </label>
-        <label class="field">
-          上次没跑完
-          <select bind:value={overlap}>
-            <option value="skip">跳过这次</option>
-            <option value="allow">允许并行</option>
-            <option value="queue">排队</option>
-          </select>
-        </label>
-        <label class="field">
-          抖动（秒）
-          <input bind:value={jitter} type="number" min="0" max="3600" />
-        </label>
-      </div>
-      <p class="faint small">
-        支持 5 段（分 时 日 月 周）和 6 段（秒 分 时 日 月 周），以及 <code>L</code>、<code>#</code>。
-        表达式在保存时就会编译一次，跑不通会当场拒绝。
-      </p>
-      <div class="form-actions">
-        <button class="btn-primary btn-sm" onclick={create} disabled={busy || !cron}>添加</button>
-        <button class="btn-ghost btn-sm" onclick={() => (adding = false)} disabled={busy}>取消</button>
-      </div>
-    </div>
-  {/if}
 </section>
+
+<Modal open={adding} title="添加定时" onclose={() => (adding = false)}>
+  <div class="presets">
+    {#each PRESETS as p (p.expr)}
+      <button class="btn-sm" class:on={cron === p.expr} onclick={() => (cron = p.expr)}>
+        {p.label}
+      </button>
+    {/each}
+  </div>
+  <div class="form-grid">
+    <Field label="cron 表达式" error={fieldErr.cron}>
+      {#snippet control(p)}
+        <input {...p} bind:value={cron} class="mono" placeholder="0 2 * * *" spellcheck="false" />
+      {/snippet}
+    </Field>
+    <Field label="时区" error={fieldErr.timezone}>
+      {#snippet control(p)}
+        <input {...p} bind:value={timezone} placeholder="Asia/Shanghai" />
+      {/snippet}
+    </Field>
+    <Field label="错过了怎么办" error={fieldErr.misfire}>
+      {#snippet control(p)}
+        <select {...p} bind:value={misfire}>
+          <option value="skip">不补</option>
+          <option value="fire_once">只补一次</option>
+          <option value="fire_all">全部补上</option>
+        </select>
+      {/snippet}
+    </Field>
+    <Field label="上次没跑完" error={fieldErr.overlap}>
+      {#snippet control(p)}
+        <select {...p} bind:value={overlap}>
+          <option value="skip">跳过这次</option>
+          <option value="allow">允许并行</option>
+          <option value="queue">排队</option>
+        </select>
+      {/snippet}
+    </Field>
+    <Field label="抖动（秒）" error={fieldErr.jitter_s}>
+      {#snippet control(p)}
+        <input {...p} bind:value={jitter} type="number" min="0" max="3600" />
+      {/snippet}
+    </Field>
+  </div>
+  <p class="faint small">
+    支持 5 段（分 时 日 月 周）和 6 段（秒 分 时 日 月 周），以及 <code>L</code>、<code>#</code>。
+    表达式在保存时就会编译一次，跑不通会当场拒绝。
+  </p>
+  {#snippet footer()}
+    <button class="btn-ghost" onclick={() => (adding = false)} disabled={busy}>取消</button>
+    <button class="btn-primary" onclick={create} disabled={busy || !cron}>添加</button>
+  {/snippet}
+</Modal>
 
 <style>
   .items {
@@ -263,15 +272,15 @@
     gap: var(--s2);
     align-items: center;
     flex-wrap: wrap;
-    font-size: 0.84rem;
+    font-size: var(--t-base);
   }
   .cron {
-    font-size: 0.86rem;
+    font-size: var(--t-base);
     color: var(--fg);
   }
   .meta {
     margin-top: 2px;
-    font-size: 0.76rem;
+    font-size: var(--t-xs);
     color: var(--fg-faint);
     gap: var(--s3);
   }

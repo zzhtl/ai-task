@@ -5,76 +5,38 @@
    * 回答四个问题，按紧急程度排：**有什么卡住等人？现在有什么在跑？最近有什么坏了？
    * 接下来什么时候会自己跑？**一个执行控制平面的首页不该是"任务列表"——
    * 那是配置视角，不是运行视角。
+   *
+   * 数字全部来自 `GET /api/v1/overview`。之前是拉最近 200 条 run 回这里自己算，
+   * 于是"24 小时"那三个数在实例忙起来之后就是错的——第 201 条之后的静静地不算，
+   * 而界面上看不出来。窗口聚合只能在数据库里做。
    */
-  import { listRuns, listTasks } from '$api/runs';
-  import { listApprovals, listSchedules, type Approval, type Schedule } from '$api/models';
-  import { describeError } from '$api/client';
-  import type { RunSummary } from '$api/types/RunSummary';
-  import type { TaskSummary } from '$api/types/TaskSummary';
+  import { api, describeError } from '$api/client';
+  import { resource } from '$api/resource.svelte';
+  import { listApprovals, type Approval } from '$api/models';
+  import type { Overview } from '$api/types/Overview';
   import PageHeader from '$lib/ui/PageHeader.svelte';
   import StatusPill from '$lib/ui/StatusPill.svelte';
   import Empty from '$lib/ui/Empty.svelte';
   import Loading from '$lib/ui/Loading.svelte';
-  import { ago, money, mmss, stamp, triggerLabel, FAILED_STATUSES } from '$lib/ui/format';
+  import { ago, money, mmss, stamp, triggerLabel } from '$lib/ui/format';
 
-  let runs = $state<RunSummary[]>([]);
-  let tasks = $state<TaskSummary[]>([]);
-  let approvals = $state<Approval[]>([]);
-  let schedules = $state<Schedule[]>([]);
-  let error = $state<string | null>(null);
-  let loaded = $state(false);
-
-  async function refresh() {
-    try {
-      const [r, t, a, s] = await Promise.all([
-        listRuns(200),
-        listTasks(),
-        listApprovals().catch(() => [] as Approval[]),
-        listSchedules().catch(() => [] as Schedule[])
-      ]);
-      runs = r.items;
-      tasks = t.items;
-      approvals = a;
-      schedules = s;
-      error = null;
-    } catch (e) {
-      error = describeError(e);
-    } finally {
-      loaded = true;
-    }
-  }
-
-  // 首页是"现在怎么样"，必须自己刷新。3 秒是人盯着屏幕时不会觉得卡顿的节奏。
-  $effect(() => {
-    void refresh();
-    const timer = setInterval(refresh, 3000);
-    return () => clearInterval(timer);
-  });
-
-  const DAY = 86_400_000;
-  const live = $derived(runs.filter((r) => r.status === 'running' || r.status === 'queued'));
-  const recent = $derived(runs.filter((r) => !live.includes(r)).slice(0, 10));
-  const failed24h = $derived(
-    runs.filter(
-      (r) => FAILED_STATUSES.includes(r.status) && Date.now() - Date.parse(r.created_at) < DAY
-    )
+  // 3 秒是人盯着屏幕时不会觉得卡顿的节奏。标签页隐藏时共享的心跳会自己停。
+  const overview = resource<Overview>(
+    'overview',
+    (signal) => api<Overview>('/api/v1/overview', { signal }),
+    { pollMs: 3000 }
   );
-  const spend24h = $derived(
-    runs
-      .filter((r) => Date.now() - Date.parse(r.created_at) < DAY)
-      .reduce((sum, r) => sum + Number(r.cost_usd), 0)
-  );
-  const runs24h = $derived(runs.filter((r) => Date.now() - Date.parse(r.created_at) < DAY).length);
+  // 审批卡片要倒计时，和首页其它数据分开拉：它在 /approvals 和 Shell 里也用同一个 key，
+  // 三处订阅只会产生一条请求。
+  const approvalsRes = resource<Approval[]>('approvals', () => listApprovals(), { pollMs: 5000 });
 
-  /** 接下来要自己响的定时，按最近的排。停用的任务不会响，过滤掉。 */
-  const upcoming = $derived(
-    schedules
-      .filter((s) => s.enabled && s.next_fire_at && tasks.find((t) => t.id === s.task_id)?.enabled)
-      .sort((a, b) => Date.parse(a.next_fire_at!) - Date.parse(b.next_fire_at!))
-      .slice(0, 6)
-  );
-
-  const taskName = (id: string) => tasks.find((t) => t.id === id)?.name ?? id.slice(0, 8);
+  const stats = $derived(overview.data?.stats);
+  const live = $derived(overview.data?.live ?? []);
+  const recent = $derived(overview.data?.recent ?? []);
+  const upcoming = $derived(overview.data?.upcoming ?? []);
+  const approvals = $derived(approvalsRes.data ?? []);
+  const loaded = $derived(!overview.pending);
+  const error = $derived(overview.error ? describeError(overview.error) : null);
 
   /** 到某个时刻还有多久。定时的"下次"看相对值比看绝对时间快。 */
   function until(iso: string): string {
@@ -97,34 +59,32 @@
 {#if error}<div class="banner">{error}</div>{/if}
 
 <section class="metrics">
-  <a class="metric" class:live={live.length > 0} href="/runs?status=live">
+  <a class="metric" class:live={(stats?.running ?? 0) > 0} href="/runs?status=live">
     <span class="k">正在执行</span>
-    <strong>{live.length}</strong>
-    <span class="hint">{live.length ? '点开看进度' : '空闲'}</span>
+    <strong>{stats?.running ?? 0}</strong>
+    <span class="hint">
+      {stats?.queued ? `另有 ${stats.queued} 个排队` : stats?.running ? '点开看进度' : '空闲'}
+    </span>
   </a>
-  <a class="metric" class:alert={approvals.length > 0} href="/approvals">
+  <a class="metric" class:alert={(stats?.pending_approvals ?? 0) > 0} href="/approvals">
     <span class="k">等待审批</span>
-    <strong>{approvals.length}</strong>
-    <span class="hint">{approvals.length ? '超时会按拒绝处理' : '没有卡住的'}</span>
+    <strong>{stats?.pending_approvals ?? 0}</strong>
+    <span class="hint">{stats?.pending_approvals ? '超时会按拒绝处理' : '没有卡住的'}</span>
   </a>
-  <a class="metric" class:alert={failed24h.length > 0} href="/runs?status=failed">
-    <span class="k">24h 失败</span>
-    <strong>{failed24h.length}</strong>
-    <span class="hint">共 {runs24h} 次执行</span>
+  <a class="metric" class:alert={(stats?.failed ?? 0) > 0} href="/runs?status=failed">
+    <span class="k">{stats?.window_hours ?? 24}h 失败</span>
+    <strong>{stats?.failed ?? 0}</strong>
+    <span class="hint">共 {stats?.runs ?? 0} 次执行</span>
   </a>
   <div class="metric">
-    <span class="k">24h 花费</span>
-    <strong>{money(spend24h)}</strong>
+    <span class="k">{stats?.window_hours ?? 24}h 花费</span>
+    <strong>{money(stats?.spend_usd ?? '0')}</strong>
     <span class="hint">按 run 累计的模型费用</span>
   </div>
   <a class="metric" href="/tasks">
     <span class="k">任务</span>
-    <strong>{tasks.filter((t) => t.enabled).length}</strong>
-    <span class="hint">
-      {tasks.length - tasks.filter((t) => t.enabled).length
-        ? `另有 ${tasks.length - tasks.filter((t) => t.enabled).length} 个已停用`
-        : `${schedules.filter((s) => s.enabled).length} 条定时在跑`}
-    </span>
+    <strong>{stats?.tasks ?? 0}</strong>
+    <span class="hint">去任务页配置和触发</span>
   </a>
 </section>
 
@@ -143,7 +103,7 @@
             <span class="dot awaiting_approval"></span>
             <span class="main ellipsis">{a.title}</span>
             <span class="spacer"></span>
-            <span class="faint">{taskName(runs.find((r) => r.id === a.run_id)?.task_id ?? '')}</span>
+            <span class="faint">{live.find((r) => r.id === a.run_id)?.task_name ?? ''}</span>
             <span class="clock" class:soon={a.expires_in_s < 60}>剩余 {mmss(a.expires_in_s)}</span>
           </a>
         </li>
@@ -168,7 +128,7 @@
           <li>
             <a href="/runs/{r.id}">
               <StatusPill status={r.status} />
-              <span class="main ellipsis">{taskName(r.task_id)}</span>
+              <span class="main ellipsis">{r.task_name}</span>
               {#if r.dry_run}<span class="tag">影子</span>{/if}
               <span class="spacer"></span>
               <span class="faint">{triggerLabel(r.trigger)}</span>
@@ -199,7 +159,7 @@
             <a href="/runs/{r.id}">
               <StatusPill status={r.status} />
               <span class="main">
-                <span class="ellipsis">{taskName(r.task_id)}</span>
+                <span class="ellipsis">{r.task_name}</span>
                 {#if r.error}<span class="err ellipsis" title={r.error}>{r.error}</span>{/if}
               </span>
               <span class="spacer"></span>
@@ -229,16 +189,15 @@
       <Loading rows={2} />
     {:else if upcoming.length}
       <ul class="list">
-        {#each upcoming as s (s.id)}
+        {#each upcoming as s (s.schedule_id)}
           <li>
             <a href="/tasks/{s.task_id}">
               <span class="dot ready"></span>
-              <span class="main ellipsis">{taskName(s.task_id)}</span>
+              <span class="main ellipsis">{s.task_name}</span>
               <code class="cron">{s.cron}</code>
-              <span class="faint">{s.timezone}</span>
               <span class="spacer"></span>
-              <span class="faint" title={s.next_three.join('\n')}>{s.next_three[0] ?? stamp(s.next_fire_at)}</span>
-              <span class="next">{until(s.next_fire_at!)}</span>
+              <span class="faint" title={stamp(s.next_fire_at)}>{stamp(s.next_fire_at)}</span>
+              <span class="next">{until(s.next_fire_at)}</span>
             </a>
           </li>
         {/each}
@@ -266,7 +225,7 @@
     flex-direction: column;
     gap: 2px;
     overflow: hidden;
-    transition: border-color 0.12s ease;
+    transition: border-color var(--dur-2) var(--ease);
     color: inherit;
   }
   a.metric:hover {
@@ -289,11 +248,11 @@
     background: var(--bad);
   }
   .k {
-    font-size: 0.74rem;
+    font-size: var(--t-xs);
     color: var(--fg-faint);
   }
   .metric strong {
-    font-size: 1.7rem;
+    font-size: var(--t-3xl);
     font-weight: 600;
     letter-spacing: -0.02em;
     line-height: 1.2;
@@ -305,7 +264,7 @@
     color: var(--bad);
   }
   .metric .hint {
-    font-size: 0.72rem;
+    font-size: var(--t-xs);
     color: var(--fg-faint);
   }
 
@@ -323,7 +282,7 @@
   .cols .wide {
     grid-column: 1 / -1;
   }
-  @media (max-width: 1000px) {
+  @media (max-width: 960px) {
     .cols {
       grid-template-columns: 1fr;
     }
@@ -342,8 +301,8 @@
     gap: var(--s3);
     padding: 0.5rem var(--s2);
     border-radius: var(--r2);
-    font-size: 0.85rem;
-    transition: background 0.1s ease;
+    font-size: var(--t-base);
+    transition: background var(--dur-1) var(--ease);
     min-width: 0;
     color: inherit;
   }
@@ -356,13 +315,8 @@
     min-width: 0;
     line-height: 1.35;
   }
-  .err {
-    font-size: 0.74rem;
-    color: var(--bad);
-    max-width: 40ch;
-  }
   .clock {
-    font-size: 0.8rem;
+    font-size: var(--t-sm);
     color: var(--warn);
   }
   .clock.soon {
@@ -372,7 +326,7 @@
     color: var(--fg-dim);
   }
   .next {
-    font-size: 0.8rem;
+    font-size: var(--t-sm);
     color: var(--accent-fg);
   }
 </style>

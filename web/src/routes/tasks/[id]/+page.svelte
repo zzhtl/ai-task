@@ -8,13 +8,15 @@
    */
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
-  import { api, describeError } from '$api/client';
-  import { listRuns, triggerRun } from '$api/runs';
+  import { api, describeError, ignoreForbidden } from '$api/client';
+  import { pollWhileVisible } from '$api/resource.svelte';
+  import { listRuns, triggerRun, newIdempotencyKey } from '$api/runs';
   import { listHosts } from '$api/models';
   import type { TaskDetail } from '$api/types/TaskDetail';
   import type { RunSummary } from '$api/types/RunSummary';
   import SchedulePanel from '$lib/schedules/SchedulePanel.svelte';
   import StepList from '$lib/tasks/StepList.svelte';
+  import DagView from '$lib/dag/DagView.svelte';
   import { fromSpec } from '$lib/tasks/compose';
   import PageHeader from '$lib/ui/PageHeader.svelte';
   import Confirm from '$lib/ui/Confirm.svelte';
@@ -70,10 +72,11 @@
     // 主机是 admin 才能读；operator 看任务时读不到不该报错
     listHosts()
       .then((h) => (hosts = h))
-      .catch(() => {});
-    // 有 run 在跑时这页就是"看进度"的地方，得自己刷新
-    const timer = setInterval(loadRuns, 5000);
-    return () => clearInterval(timer);
+      .catch(ignoreForbidden);
+    // 有 run 在跑时这页就是"看进度"的地方，得自己刷新。
+    // 执行记录是游标翻页追加的，用不了通用缓存那套"整份替换"，
+    // 但"看不见就别打"这件事可以单独拿过来。
+    return pollWhileVisible(() => void loadRuns(), 5000);
   });
 
   // 步骤列表表示不了的编排（分支、并行、map）现在没有任何界面路径能创建，
@@ -87,10 +90,17 @@
     return { total: runs.length, ok, done: done.length, spend };
   });
 
+  /** 正式执行和影子执行是两种意图，各自一个幂等键，成功后才丢。 */
+  const triggerKeys = new Map<string, string>();
+
   async function run(dryRun: boolean) {
     busy = true;
+    const slot = dryRun ? 'dry' : 'live';
+    const key = triggerKeys.get(slot) ?? newIdempotencyKey();
+    triggerKeys.set(slot, key);
     try {
-      const r = await triggerRun(taskId, { dry_run: dryRun });
+      const r = await triggerRun(taskId, { dry_run: dryRun }, key);
+      triggerKeys.delete(slot);
       toast(dryRun ? '已触发影子执行' : '已触发执行');
       await goto(`/runs/${r.id}`);
     } catch (e) {
@@ -214,7 +224,7 @@
 </PageHeader>
 
 <Confirm
-  bind:open={confirming}
+  open={confirming} onclose={() => (confirming = false)}
   title="删除任务「{task?.name ?? ''}」？"
   danger
   confirmText="删除"
@@ -257,16 +267,23 @@
         <Loading rows={4} />
       {:else if comp}
         <StepList {comp} {hosts} />
+        <details class="graph">
+          <summary class="faint small">看编排图</summary>
+          <DagView spec={task.spec} />
+        </details>
         {#if comp.budgetUsd}
           <p class="faint small budget">
             花费上限 <b>${comp.budgetUsd}</b>，累计到这个数就不再启动新步骤。
           </p>
         {/if}
-      {:else}
+      {:else if task.spec}
+        <!-- 步骤列表是一条直线，表示不了分支/并行/map。以前这里只说一句
+             "显示不了"，现在把图画出来——编排工具画不出你编排的图是说不过去的。 -->
         <div class="callout">
-          这个任务的编排里有分支、并行或 map 这类结构，步骤列表是一条直线，表示不了。
-          它是通过接口直接写进来的；界面上改不了它。
+          这个编排有分支、并行或 map 这类结构，直线的步骤列表表示不了，所以画成图。
+          界面上还改不了它——它是通过接口写进来的。
         </div>
+        <DagView spec={task.spec} />
       {/if}
     </section>
 
@@ -347,6 +364,13 @@
 </div>
 
 <style>
+  .graph {
+    margin-top: var(--s3);
+  }
+  .graph > summary {
+    padding: var(--s1) 0;
+  }
+
   .desc {
     color: var(--fg);
   }
@@ -354,7 +378,7 @@
     border: none;
     background: none;
     padding: 0;
-    font-size: 0.8rem;
+    font-size: var(--t-sm);
   }
   .idbtn:hover {
     color: var(--accent-fg);
@@ -369,7 +393,7 @@
     gap: var(--s4);
     align-items: start;
   }
-  @media (max-width: 1100px) {
+  @media (max-width: 1280px) {
     .layout {
       grid-template-columns: 1fr;
     }
@@ -396,7 +420,7 @@
     gap: var(--s3);
     padding: 0.45rem var(--s2);
     border-radius: var(--r2);
-    font-size: 0.84rem;
+    font-size: var(--t-base);
     color: inherit;
   }
   .runs a:hover {
@@ -408,11 +432,6 @@
     min-width: 0;
     line-height: 1.35;
   }
-  .err {
-    font-size: 0.74rem;
-    color: var(--bad);
-    max-width: 40ch;
-  }
   .more {
     display: flex;
     justify-content: center;
@@ -423,7 +442,7 @@
     grid-template-columns: auto 1fr;
     gap: 0.4rem var(--s3);
     margin: 0;
-    font-size: 0.82rem;
+    font-size: var(--t-sm);
   }
   .facts dt {
     color: var(--fg-faint);

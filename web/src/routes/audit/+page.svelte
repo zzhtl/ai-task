@@ -6,6 +6,7 @@
    * "这条 deny 是什么时候被谁停掉的"必须查得到。后端一直在记，这里把它摆出来。
    */
   import { describeError } from '$api/client';
+  import { pollWhileVisible } from '$api/resource.svelte';
   import { listAudit, listUsers, type AuditItem, type User } from '$api/models';
   import { session } from '$lib/auth/session.svelte';
   import PageHeader from '$lib/ui/PageHeader.svelte';
@@ -74,8 +75,9 @@
   $effect(() => {
     if (!session.can('admin')) return;
     void load();
-    const timer = setInterval(load, 10_000);
-    return () => clearInterval(timer);
+    // 审计是硬拉一页再前端过滤（服务端筛选还没做），同样用不了通用缓存；
+    // 但看不见时别打。
+    return pollWhileVisible(() => void load(), 10_000);
   });
 
   const actorName = (id: string | null) =>
@@ -191,12 +193,6 @@
 {/if}
 
 <style>
-  .search {
-    width: 14rem;
-  }
-  .nowrap {
-    white-space: nowrap;
-  }
   .system {
     color: var(--fg-faint);
     font-style: italic;
@@ -219,7 +215,7 @@
   .lbl {
     display: block;
     margin-top: var(--s2);
-    font-size: 0.7rem;
+    font-size: var(--t-2xs);
     color: var(--fg-faint);
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -233,6 +229,6 @@
     overflow-wrap: anywhere;
     max-height: 14rem;
     overflow: auto;
-    font-size: 0.74rem;
+    font-size: var(--t-xs);
   }
 </style>

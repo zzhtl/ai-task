@@ -6,6 +6,7 @@
    * 事的两个状态，而不是两套需要各自学习的东西。
    */
   import { reachOf, type Composition, type Step } from './compose';
+  import StepRail from '$lib/ui/StepRail.svelte';
 
   let {
     comp,
@@ -41,10 +42,7 @@
 <ol class="steps">
   {#each comp.steps as step, i (step.uid)}
     <li class="step {step.kind}" class:on={selected === `step-${i + 1}`}>
-      <div class="rail">
-        <span class="num">{i + 1}</span>
-        {#if i < comp.steps.length - 1}<span class="wire"></span>{/if}
-      </div>
+      <StepRail index={i + 1} last={i === comp.steps.length - 1} kind={step.kind} />
 
       <div class="body">
         <header>
@@ -100,38 +98,6 @@
     grid-template-columns: 2rem 1fr;
     gap: var(--s3);
   }
-  .rail {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: var(--s1);
-  }
-  .num {
-    width: 1.6rem;
-    height: 1.6rem;
-    border-radius: 50%;
-    border: 1px solid var(--line-strong);
-    background: var(--surface-2);
-    display: grid;
-    place-items: center;
-    font-size: 0.78rem;
-    color: var(--fg-dim);
-    flex: 0 0 auto;
-  }
-  .wire {
-    flex: 1;
-    width: 1px;
-    background: var(--line);
-    min-height: var(--s4);
-  }
-  .step.ai .num {
-    border-color: color-mix(in srgb, #56b6f5 55%, var(--line-strong));
-    color: #7cc4f8;
-  }
-  .step.approval .num {
-    border-color: color-mix(in srgb, var(--warn) 55%, var(--line-strong));
-    color: var(--warn);
-  }
 
   .body {
     background: var(--surface-1);
@@ -142,7 +108,7 @@
     display: flex;
     flex-direction: column;
     gap: var(--s2);
-    transition: border-color 0.12s ease;
+    transition: border-color var(--dur-2) var(--ease);
   }
   /* 画布上点了哪个节点，这里就亮哪一步 */
   .step.on .body {
@@ -154,13 +120,13 @@
     gap: var(--s2);
   }
   .title {
-    font-size: 0.95rem;
+    font-size: var(--t-md);
     font-weight: 500;
   }
   pre {
     margin: 0;
     font-family: var(--font);
-    font-size: 0.86rem;
+    font-size: var(--t-base);
     line-height: 1.65;
     color: var(--fg-dim);
     /* 提示词是整段自然语言，要换行显示全，不要横向滚动条 */
@@ -169,13 +135,13 @@
   }
   pre.mono {
     font-family: var(--mono);
-    font-size: 0.8rem;
+    font-size: var(--t-sm);
   }
   .facts {
     display: flex;
     gap: var(--s3);
     flex-wrap: wrap;
-    font-size: 0.76rem;
+    font-size: var(--t-xs);
     color: var(--fg-faint);
   }
   .warn-text {
@@ -187,14 +153,14 @@
   }
   .hint {
     margin: 0;
-    font-size: 0.8rem;
+    font-size: var(--t-sm);
     color: var(--fg-faint);
   }
   .sees {
     margin: 0;
     padding-left: var(--s2);
     border-left: 2px solid var(--line-strong);
-    font-size: 0.76rem;
+    font-size: var(--t-xs);
     color: var(--fg-faint);
   }
 </style>

@@ -102,6 +102,12 @@ export interface AuditItem {
   ts: string;
 }
 
+/**
+ * 只取 items。
+ *
+ * **这会丢掉 `next_cursor`**——在服务端给这些接口补上真游标之前，调用方本来也用不上；
+ * 但别忘了这一层在：等后端能分页了，这里就是那个"为什么翻不了下一页"的地方。
+ */
 const items = <T>(p: Promise<Page<T>>) => p.then((page) => page.items);
 
 /** 主机是 admin 才能读。operator 页面上读不到时不该报错，调用方自己 catch。 */

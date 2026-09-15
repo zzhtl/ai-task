@@ -25,6 +25,10 @@ export interface EventStream {
 export function subscribeRunEvents(runId: string, handlers: EventStreamHandlers): EventStream {
   const source = new EventSource(`/api/v1/runs/${runId}/events`);
   let closed = false;
+  // 服务端在 `Last-Event-ID` 缺失或解析不了时会**从头全量重放**（sse.rs 的
+  // `unwrap_or(0)`）。真发生时，下游那个按 seq 做 key 的 {#each} 会直接抛
+  // each_key_duplicate 把页面打崩。在流的边界上挡住，比让每个消费者各自记一遍强。
+  let lastSeq = 0;
 
   const close = () => {
     if (closed) return;
@@ -44,6 +48,8 @@ export function subscribeRunEvents(runId: string, handlers: EventStreamHandlers)
       // 解析不了就跳过这一条。一条坏事件不该让整个流断掉。
       return;
     }
+    if (event.seq <= lastSeq) return;
+    lastSeq = event.seq;
     handlers.onEvent(event);
     if (event.body.kind === 'run_finished') close();
   };

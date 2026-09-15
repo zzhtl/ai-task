@@ -22,7 +22,7 @@
     font-weight: 500;
   }
   .hint {
-    font-size: 0.84rem;
+    font-size: var(--t-base);
     max-width: 44ch;
     line-height: 1.6;
   }

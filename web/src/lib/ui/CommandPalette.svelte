@@ -8,6 +8,9 @@
    * 结果是**实时拉的**，不是预加载的静态列表：任务和 run 一直在变。
    */
   import { api } from '$api/client';
+  import type { Page } from '$api/types/Page';
+  import type { TaskSummary } from '$api/types/TaskSummary';
+  import type { RunSummary } from '$api/types/RunSummary';
 
   let { onclose, onnavigate }: { onclose: () => void; onnavigate: (href: string) => void } =
     $props();
@@ -35,6 +38,13 @@
   let dynamic = $state<Item[]>([]);
   let cursor = $state(0);
   let input = $state<HTMLInputElement | null>(null);
+  let el = $state<HTMLDialogElement | null>(null);
+
+  // showModal() 才有焦点收拢、::backdrop 和 Esc；之前这里是个 div 拼的"模态"，
+  // Tab 能一路跑到背后的页面上去。
+  $effect(() => {
+    if (el && !el.open) el.showModal();
+  });
 
   $effect(() => {
     input?.focus();
@@ -44,12 +54,9 @@
     // 任务和 run 一直在变，每次开面板都重拉一次
     void query;
     Promise.all([
-      api<{ items: Array<{ id: string; name: string }> }>('/api/v1/tasks?limit=50').catch(() => ({
-        items: []
-      })),
-      api<{ items: Array<{ id: string; status: string; task_id: string }> }>(
-        '/api/v1/runs?limit=20'
-      ).catch(() => ({ items: [] }))
+      // 用 ts-rs 生成的类型，不是内联的匿名结构：后端改了字段这里才会编译报错
+      api<Page<TaskSummary>>('/api/v1/tasks?limit=50').catch(() => ({ items: [] })),
+      api<Page<RunSummary>>('/api/v1/runs?limit=20').catch(() => ({ items: [] }))
     ]).then(([tasks, runs]) => {
       dynamic = [
         ...tasks.items.map((t) => ({
@@ -83,8 +90,8 @@
     cursor = 0;
   });
 
+  // Escape 不在这里处理：原生 <dialog> 自己会关，然后派发 close 事件。
   function onKey(event: KeyboardEvent) {
-    if (event.key === 'Escape') return onclose();
     if (event.key === 'ArrowDown' || (event.ctrlKey && event.key === 'n')) {
       event.preventDefault();
       cursor = (cursor + 1) % Math.max(results.length, 1);
@@ -98,28 +105,37 @@
   }
 </script>
 
-<!-- 点背景关掉。键盘用户走 Escape，上面已经处理 -->
-<div
-  class="scrim"
-  role="button"
-  tabindex="-1"
-  aria-label="关闭命令面板"
-  onclick={onclose}
-  onkeydown={() => {}}
-></div>
-
-<div class="palette" role="dialog" aria-modal="true" aria-label="命令面板">
+<!-- 点 ::backdrop 时 e.target 就是 dialog 本身，这是原生 dialog 认背景点击的标准写法 -->
+<dialog
+  bind:this={el}
+  class="palette"
+  aria-label="命令面板"
+  onclose={() => onclose()}
+  onclick={(event) => {
+    if (event.target === el) onclose();
+  }}
+>
   <input
     bind:this={input}
     bind:value={query}
     onkeydown={onKey}
     placeholder="跳转到任务、执行记录，或直接输入动作…"
     spellcheck="false"
+    role="combobox"
+    aria-expanded="true"
+    aria-controls="cmdk-results"
+    aria-activedescendant={results[cursor] ? `cmdk-${cursor}` : undefined}
   />
-  <ul>
+  <!-- 焦点始终留在输入框里，选中项靠 aria-activedescendant 播报 -->
+  <ul id="cmdk-results" role="listbox" aria-label="搜索结果">
     {#each results as item, i (item.href + item.label)}
-      <li>
-        <button class:on={i === cursor} onmouseenter={() => (cursor = i)} onclick={() => onnavigate(item.href)}>
+      <li id="cmdk-{i}" role="option" aria-selected={i === cursor}>
+        <button
+          tabindex="-1"
+          class:on={i === cursor}
+          onmouseenter={() => (cursor = i)}
+          onclick={() => onnavigate(item.href)}
+        >
           <span class="kind">{item.kind}</span>
           <span class="label">{item.label}</span>
           {#if item.hint}<span class="hint mono">{item.hint}</span>{/if}
@@ -132,33 +148,33 @@
   <footer>
     <kbd>↑</kbd><kbd>↓</kbd> 选择　<kbd>↵</kbd> 打开　<kbd>esc</kbd> 关闭
   </footer>
-</div>
+</dialog>
 
 <style>
-  .scrim {
-    position: fixed;
-    inset: 0;
+  .palette::backdrop {
     background: rgba(0, 0, 0, 0.55);
     backdrop-filter: blur(2px);
-    z-index: var(--z-overlay);
-    border: none;
-    padding: 0;
   }
   .palette {
     position: fixed;
     top: 12vh;
     left: 50%;
     transform: translateX(-50%);
+    margin: 0;
+    padding: 0;
+    max-width: none;
+    max-height: none;
     width: min(560px, 92vw);
-    z-index: calc(var(--z-overlay) + 1);
+    color: var(--fg);
     background: var(--surface-2);
     border: 1px solid var(--line-strong);
     border-radius: var(--r3);
     box-shadow: var(--shadow-pop);
     overflow: hidden;
-    animation: rise 0.13s ease-out;
+    animation: palette-in var(--dur-2) var(--ease-out);
   }
-  @keyframes rise {
+  /* 这个不能并进全局 rise：居中靠 translateX(-50%)，动画里得一起带着 */
+  @keyframes palette-in {
     from {
       opacity: 0;
       transform: translateX(-50%) translateY(-6px);
@@ -171,7 +187,7 @@
     border-radius: 0;
     background: transparent;
     padding: var(--s3) var(--s4);
-    font-size: 0.95rem;
+    font-size: var(--t-md);
   }
   input:focus-visible {
     outline: none;
@@ -201,7 +217,7 @@
   }
   .kind {
     flex: 0 0 2.6rem;
-    font-size: 0.7rem;
+    font-size: var(--t-2xs);
     color: var(--fg-faint);
   }
   .label {
@@ -212,17 +228,17 @@
   }
   .hint {
     color: var(--fg-faint);
-    font-size: 0.75rem;
+    font-size: var(--t-xs);
   }
   .none {
     padding: var(--s4);
     color: var(--fg-faint);
-    font-size: 0.85rem;
+    font-size: var(--t-base);
   }
   footer {
     border-top: 1px solid var(--line);
     padding: var(--s2) var(--s4);
-    font-size: 0.72rem;
+    font-size: var(--t-xs);
     color: var(--fg-faint);
   }
   kbd {
