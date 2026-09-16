@@ -320,9 +320,11 @@ impl Store {
         let rows = sqlx::query(
             "SELECT id, name, address, port, username, tags, agent_sha256, ai_clis, cgroup_mode,
                     last_seen_at
-             FROM hosts WHERE workspace_id = $1 ORDER BY name",
+             FROM hosts WHERE workspace_id = $1 ORDER BY name
+             LIMIT $2",
         )
         .bind(uuid::Uuid::from(workspace_id))
+        .bind(crate::pool::CONFIG_LIST_CAP)
         .fetch_all(self.pool())
         .await?;
         rows.iter().map(host_from_row).collect()

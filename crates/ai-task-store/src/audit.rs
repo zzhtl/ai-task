@@ -43,6 +43,40 @@ pub struct AuditRecord {
     pub ts: DateTime<Utc>,
 }
 
+/// 审计查询的过滤条件。
+///
+/// 收成一个结构体是因为它们总是一起传，而且 `target` 的两个分量
+/// 挨着传很容易写反。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AuditFilter<'a> {
+    /// 只看某个类型的对象，如 `host` / `rule`。
+    pub target_kind: Option<&'a str>,
+    /// 再收窄到某一个具体对象。给了它就必须同时给 `target_kind`，调用方保证。
+    pub target_id: Option<&'a str>,
+    /// 只看这些动作。
+    ///
+    /// **和 `search` 取并集，不是交集。** 它们是同一次搜索的两种表达：
+    /// 界面上的动作名是中文（「触发执行」），库里存的是 `run.trigger`，
+    /// 中文只存在于前端的映射表里。前端把命中的动作码一起送过来，
+    /// 这里要的是「文本匹配**或**动作命中」——写成 AND 的话搜中文永远是空的。
+    /// `None` 表示不参与筛选。
+    pub actions: Option<&'a [String]>,
+    /// 文本搜索。和 `actions` 取并集。
+    pub search: Option<&'a str>,
+    /// 上一页最后一条的 `(ts, id)`。
+    pub cursor: Option<(chrono::DateTime<chrono::Utc>, i64)>,
+}
+
+/// 转义 LIKE 的元字符。
+///
+/// 不转义的话，用户搜一个 `%` 就等于匹配全部——看起来像"搜什么都出来"，
+/// 而不是"这个查询有问题"。
+fn escape_like(raw: &str) -> String {
+    raw.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 impl Store {
     /// 记一条审计。
     ///
@@ -67,36 +101,62 @@ impl Store {
     }
 
     /// 最近的审计条目。
-    pub async fn recent_audit(
+    /// 审计流水。
+    ///
+    /// **筛选在这里做，不在客户端做。** 之前是硬拉 300 条回浏览器再过滤——
+    /// 一旦实例忙起来，"最近 300 条里恰好没有"和"根本没发生过"在界面上
+    /// 长得一模一样，而审计恰恰是不能这样糊弄的东西。
+    pub async fn list_audit(
         &self,
         workspace_id: WorkspaceId,
-        target: Option<(&str, &str)>,
+        filter: AuditFilter<'_>,
         limit: i64,
     ) -> Result<Vec<AuditRecord>, StoreError> {
-        let rows = match target {
-            Some((kind, id)) => {
-                sqlx::query(
-                    "SELECT * FROM audit_log
-                     WHERE workspace_id = $1 AND target_kind = $2 AND target_id = $3
-                     ORDER BY ts DESC LIMIT $4",
-                )
-                .bind(uuid::Uuid::from(workspace_id))
-                .bind(kind)
-                .bind(id)
-                .bind(limit.clamp(1, 500))
-                .fetch_all(self.pool())
-                .await?
-            }
-            None => {
-                sqlx::query(
-                    "SELECT * FROM audit_log WHERE workspace_id = $1 ORDER BY ts DESC LIMIT $2",
-                )
-                .bind(uuid::Uuid::from(workspace_id))
-                .bind(limit.clamp(1, 500))
-                .fetch_all(self.pool())
-                .await?
-            }
-        };
+        let AuditFilter {
+            target_kind,
+            target_id,
+            actions,
+            search,
+            cursor,
+        } = filter;
+        // 文本搜索顺带覆盖操作人：界面上显示的是人名/邮箱，
+        // 而库里存的是 actor_id，不 JOIN 的话"按人找"就搜不到。
+        let pattern = search.map(|q| format!("%{}%", escape_like(q)));
+
+        let rows = sqlx::query(
+            "SELECT a.* FROM audit_log a
+             LEFT JOIN users u ON u.id = a.actor_id
+             WHERE a.workspace_id = $1
+               AND ($2::text IS NULL OR a.target_kind = $2)
+               AND ($3::text IS NULL OR a.target_id = $3)
+               -- actions 和 search 取并集，不是交集。理由写在 AuditFilter 上：
+               -- 中文动作名只存在于前端的映射表里，写成 AND 的话搜中文永远是空的。
+               AND (
+                    ($4::text[] IS NULL AND $5::text IS NULL)
+                    OR ($4::text[] IS NOT NULL AND a.action = ANY($4))
+                    OR ($5::text IS NOT NULL AND (
+                         a.action ILIKE $5 ESCAPE '\\'
+                      OR a.target_kind ILIKE $5 ESCAPE '\\'
+                      OR a.target_id ILIKE $5 ESCAPE '\\'
+                      OR u.email ILIKE $5 ESCAPE '\\'
+                      OR u.display_name ILIKE $5 ESCAPE '\\'
+                      OR a.before::text ILIKE $5 ESCAPE '\\'
+                      OR a.after::text ILIKE $5 ESCAPE '\\'))
+               )
+               AND ($6::timestamptz IS NULL OR (a.ts, a.id) < ($6, $7))
+             ORDER BY a.ts DESC, a.id DESC
+             LIMIT $8",
+        )
+        .bind(uuid::Uuid::from(workspace_id))
+        .bind(target_kind)
+        .bind(target_id)
+        .bind(actions)
+        .bind(pattern)
+        .bind(cursor.map(|(ts, _)| ts))
+        .bind(cursor.map(|(_, id)| id))
+        .bind(limit.clamp(1, 200))
+        .fetch_all(self.pool())
+        .await?;
         rows.iter().map(audit_from_row).collect()
     }
 }

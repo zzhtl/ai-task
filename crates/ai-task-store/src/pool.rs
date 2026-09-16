@@ -66,6 +66,14 @@ pub enum StoreError {
     Corrupt { what: &'static str, detail: String },
 }
 
+/// 配置类列表的硬上限。
+///
+/// 主机、用户、技能、定时这些都是人手配的，正常量级是几十。
+/// 加上限不是为了翻页，是为了**不让一次失控的写入把列表接口拖垮**——
+/// 没有 LIMIT 的查询在数据异常时会变成一次全表扫加一个巨大的 JSON 响应，
+/// 而那正是最需要界面还能打开的时候。
+pub const CONFIG_LIST_CAP: i64 = 500;
+
 impl Store {
     /// 建池并探活。
     pub async fn connect(config: &StoreConfig) -> Result<Self, StoreError> {

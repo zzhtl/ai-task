@@ -373,9 +373,11 @@ impl Store {
     pub async fn list_skills(&self, workspace_id: WorkspaceId) -> Result<Vec<Skill>, StoreError> {
         let rows = sqlx::query(
             "SELECT DISTINCT ON (name) id, name, version, description, body, files, content_hash
-             FROM skills WHERE workspace_id = $1 ORDER BY name, version DESC",
+             FROM skills WHERE workspace_id = $1 ORDER BY name, version DESC
+             LIMIT $2",
         )
         .bind(uuid::Uuid::from(workspace_id))
+        .bind(crate::pool::CONFIG_LIST_CAP)
         .fetch_all(self.pool())
         .await?;
         rows.into_iter().map(skill_from_row).collect()

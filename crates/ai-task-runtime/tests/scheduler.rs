@@ -124,7 +124,7 @@ impl Harness {
     async fn mark_running(&self, task_id: TaskId) {
         let (_, version) = self
             .store
-            .list_tasks(self.workspace, 100)
+            .list_tasks(self.workspace, None, 100)
             .await
             .expect("列任务")
             .into_iter()

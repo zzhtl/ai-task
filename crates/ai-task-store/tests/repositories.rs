@@ -821,3 +821,30 @@ db_test!(
         );
     }
 );
+
+db_test!(the_task_cursor_walks_every_task_exactly_once, |f| {
+    // `PageQuery` 一直收 cursor，但 list_tasks 以前根本不看它——
+    // 客户端翻第二页会拿到和第一页一模一样的内容，而且不报错。
+    for _ in 0..12 {
+        f.seed_task().await;
+    }
+
+    let mut seen = Vec::new();
+    let mut cursor = None;
+    for _ in 0..6 {
+        let page = f
+            .store
+            .list_tasks(f.workspace, cursor, 5)
+            .await
+            .expect("翻页");
+        if page.is_empty() {
+            break;
+        }
+        cursor = page.last().map(|t| (t.created_at, t.id));
+        seen.extend(page.into_iter().map(|t| t.id));
+    }
+
+    assert_eq!(seen.len(), 12, "每个任务都要出现一次");
+    let unique: std::collections::HashSet<_> = seen.iter().copied().collect();
+    assert_eq!(unique.len(), 12, "游标不该让某个任务重复出现");
+});

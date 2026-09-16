@@ -173,10 +173,22 @@ pub async fn list(
     State(state): State<AppState>,
     Query(page): Query<PageQuery>,
 ) -> Result<Json<Page<TaskSummary>>, AppError> {
-    let tasks = state
+    let limit = i64::from(page.effective_limit());
+    let cursor = page.cursor.as_deref().map(decode_task_cursor).transpose()?;
+    // 多取一条来判断还有没有下一页，比单独 count 便宜
+    let mut tasks = state
         .store
-        .list_tasks(state.workspace_id, i64::from(page.effective_limit()))
+        .list_tasks(state.workspace_id, cursor, limit + 1)
         .await?;
+    let has_more = tasks.len() as i64 > limit;
+    tasks.truncate(limit as usize);
+    let next_cursor = has_more
+        .then(|| {
+            tasks
+                .last()
+                .map(|t| format!("{}|{}", t.created_at.timestamp_micros(), t.id))
+        })
+        .flatten();
 
     // `last_run` 以前恒为 None——DTO 里有这个字段、列表页也要显示"上次执行"，
     // 于是前端只好自己再拉 200 条 run 回去逐行 find。
@@ -189,7 +201,7 @@ pub async fn list(
             .iter()
             .map(|t| task_summary(t, last.remove(&t.id).map(|r| to_summary(&r))))
             .collect(),
-        next_cursor: None,
+        next_cursor,
     }))
 }
 
@@ -335,6 +347,15 @@ pub async fn trigger(
         headers.insert(axum::http::header::LOCATION, location);
     }
     Ok((StatusCode::ACCEPTED, headers, Json(summary)).into_response())
+}
+
+/// 解游标 `(created_at, id)`。和 runs 那边同一个形状。
+fn decode_task_cursor(cursor: &str) -> Result<(chrono::DateTime<chrono::Utc>, TaskId), AppError> {
+    let bad = || AppError::BadRequest("cursor 不合法；它只应当来自上一页的 next_cursor".into());
+    let (micros, id) = cursor.split_once('|').ok_or_else(bad)?;
+    let created_at = chrono::DateTime::from_timestamp_micros(micros.parse().map_err(|_| bad())?)
+        .ok_or_else(bad)?;
+    Ok((created_at, TaskId(id.parse().map_err(|_| bad())?)))
 }
 
 fn task_summary(task: &ai_task_store::TaskRecord, last_run: Option<RunSummary>) -> TaskSummary {

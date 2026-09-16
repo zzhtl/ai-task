@@ -213,10 +213,12 @@ impl Store {
              FROM schedules s
              JOIN tasks t ON t.id = s.task_id
              WHERE s.workspace_id = $1 AND ($2::uuid IS NULL OR s.task_id = $2)
-             ORDER BY s.next_fire_at NULLS LAST",
+             ORDER BY s.next_fire_at NULLS LAST
+             LIMIT $3",
         )
         .bind(uuid::Uuid::from(workspace_id))
         .bind(task_id.map(uuid::Uuid::from))
+        .bind(crate::pool::CONFIG_LIST_CAP)
         .fetch_all(self.pool())
         .await?;
 

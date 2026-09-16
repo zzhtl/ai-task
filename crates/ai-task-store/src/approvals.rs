@@ -118,9 +118,11 @@ impl Store {
             "SELECT a.* FROM approvals a
              JOIN runs r ON r.id = a.run_id
              WHERE r.workspace_id = $1 AND a.decided_at IS NULL AND a.expires_at > now()
-             ORDER BY a.expires_at",
+             ORDER BY a.expires_at
+             LIMIT $2",
         )
         .bind(uuid::Uuid::from(workspace_id))
+        .bind(crate::pool::CONFIG_LIST_CAP)
         .fetch_all(self.pool())
         .await?;
         rows.iter().map(approval_from_row).collect()

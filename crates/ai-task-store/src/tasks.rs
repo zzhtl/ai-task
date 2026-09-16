@@ -311,18 +311,26 @@ impl Store {
     }
 
     /// 列任务，按创建时间倒序。
+    /// 列任务。游标是 `(created_at, id)`，和 runs 一样是 keyset，不用 OFFSET。
+    ///
+    /// `PageQuery` 一直收 `cursor`，但这里以前根本不看它——
+    /// 客户端翻第二页会拿到和第一页一模一样的内容，而且不报错。
     pub async fn list_tasks(
         &self,
         workspace_id: WorkspaceId,
+        cursor: Option<(DateTime<Utc>, TaskId)>,
         limit: i64,
     ) -> Result<Vec<TaskRecord>, StoreError> {
         sqlx::query(
             "SELECT id, workspace_id, name, description, current_version_id, enabled,
                     version, created_at, updated_at
              FROM tasks WHERE workspace_id = $1
-             ORDER BY created_at DESC, id DESC LIMIT $2",
+               AND ($2::timestamptz IS NULL OR (created_at, id) < ($2, $3))
+             ORDER BY created_at DESC, id DESC LIMIT $4",
         )
         .bind(uuid::Uuid::from(workspace_id))
+        .bind(cursor.map(|(ts, _)| ts))
+        .bind(cursor.map(|(_, id)| uuid::Uuid::from(id)))
         .bind(limit)
         .fetch_all(self.pool())
         .await?

@@ -73,7 +73,11 @@ pub struct RuleView {
 ///
 /// 建完看不见的规则等于没有：既不知道有哪些能挂到任务上，也不知道某条为什么
 /// 没生效。不分页，规则是人手工维护的东西。
-pub async fn list_rules(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
+/// `GET /api/v1/rules`
+///
+/// 以前这里返回的是手拼的 `{"items": [...]}`，是全站唯一一个不走 `Page`
+/// 的列表接口——客户端得为它单独写一套解析。改成标准形状。
+pub async fn list_rules(State(state): State<AppState>) -> Result<Json<Page<RuleView>>, AppError> {
     let items: Vec<RuleView> = state
         .store
         .list_rules(state.workspace_id)
@@ -90,7 +94,12 @@ pub async fn list_rules(State(state): State<AppState>) -> Result<impl IntoRespon
             created_at: r.created_at,
         })
         .collect();
-    Ok(Json(serde_json::json!({ "items": items })))
+    // store 侧封顶 500 条。规则是人手写的护栏，到不了这个量级；
+    // 真到了的话是配置本身出了问题，不是需要翻页。
+    Ok(Json(Page {
+        items,
+        next_cursor: None,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
