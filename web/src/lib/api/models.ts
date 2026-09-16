@@ -118,4 +118,24 @@ export const listApprovals = () => items(api<Page<Approval>>('/api/v1/approvals'
 export const listRules = () => items(api<Page<Rule>>('/api/v1/rules'));
 export const listSkills = () => items(api<Page<Skill>>('/api/v1/skills'));
 export const listUsers = () => items(api<Page<User>>('/api/v1/users'));
-export const listAudit = (limit = 200) => items(api<Page<AuditItem>>(`/api/v1/audit?limit=${limit}`));
+export interface AuditQuery {
+  /** 文本搜索：动作、对象 id、操作人、变更前后的内容。 */
+  q?: string;
+  /** 只看这些对象类型。 */
+  targetKind?: string;
+  /** 只看这些动作码。界面上的中文动作名由调用方翻译成动作码放进来。 */
+  actions?: string[];
+  cursor?: string | null;
+  limit?: number;
+}
+
+/** 审计带真游标，所以它不走 `items()`——调用方要拿 `next_cursor` 翻下一页。 */
+export function listAudit(query: AuditQuery = {}): Promise<Page<AuditItem>> {
+  const params = new URLSearchParams();
+  params.set('limit', String(query.limit ?? 50));
+  if (query.q) params.set('q', query.q);
+  if (query.targetKind) params.set('target_kind', query.targetKind);
+  if (query.actions?.length) params.set('action', query.actions.join(','));
+  if (query.cursor) params.set('cursor', query.cursor);
+  return api(`/api/v1/audit?${params}`);
+}

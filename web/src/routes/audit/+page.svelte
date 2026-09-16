@@ -59,10 +59,37 @@
     user: '用户'
   };
 
+  const PAGE = 50;
+  let cursor = $state<string | null>(null);
+  let loadingMore = $state(false);
+
+  /**
+   * 界面上的动作名是中文（"创建主机"），而库里存的是 `host.create`。
+   * 这张映射表只存在于前端，服务端搜不到它——所以搜索词命中哪些中文名，
+   * 就把对应的动作码一起送过去，而不是把整张表复制一份到后端。
+   */
+  function matchedActions(q: string): string[] {
+    const needle = q.trim().toLowerCase();
+    if (!needle) return [];
+    return Object.entries(ACTION)
+      .filter(([, label]) => label.toLowerCase().includes(needle))
+      .map(([code]) => code);
+  }
+
+  const filter = $derived({
+    q: query.trim() || undefined,
+    targetKind: kind || undefined,
+    actions: matchedActions(query)
+  });
+
   async function load() {
     try {
-      const [a, u] = await Promise.all([listAudit(300), listUsers().catch(() => [] as User[])]);
-      items = a;
+      const [page, u] = await Promise.all([
+        listAudit({ ...filter, limit: PAGE }),
+        listUsers().catch(() => [] as User[])
+      ]);
+      items = page.items;
+      cursor = page.next_cursor ?? null;
       users = u;
       error = null;
     } catch (e) {
@@ -72,16 +99,44 @@
     }
   }
 
+  /** 已经翻过页了。翻过之后就停掉自动刷新——见下面 pollWhileVisible 处的说明。 */
+  let paged = $state(false);
+
+  /** 翻下一页。追加而不是替换，保住已经看过的和滚动位置。 */
+  async function loadMore() {
+    if (!cursor || loadingMore) return;
+    loadingMore = true;
+    try {
+      const page = await listAudit({ ...filter, cursor, limit: PAGE });
+      items = [...items, ...page.items];
+      cursor = page.next_cursor ?? null;
+      paged = true;
+    } catch (e) {
+      error = describeError(e);
+    } finally {
+      loadingMore = false;
+    }
+  }
+
   $effect(() => {
     if (!session.can('admin')) return;
+    // 筛选条件变了就重新从第一页拉。**筛选在服务端做**——
+    // 之前是硬拉最近 300 条回来自己过滤，于是"最近 300 条里恰好没有"
+    // 和"根本没发生过"在界面上长得一模一样，而审计恰恰不能这样糊弄。
+    void filter;
+    paged = false;
     void load();
-    // 审计是硬拉一页再前端过滤（服务端筛选还没做），同样用不了通用缓存；
-    // 但看不见时别打。
-    return pollWhileVisible(() => void load(), 10_000);
+    // **翻过页之后就不再自动刷新。** load() 是整份替换，而用户往下翻了几页
+    // 正说明他在查历史——十秒后把他弹回第一页，比不刷新难受得多。
+    // 审计是 append-only 的，翻页期间错过的新记录换个筛选或刷新就回来了。
+    return pollWhileVisible(() => {
+      if (!paged) void load();
+    }, 10_000);
   });
 
+  const userNames = $derived(new Map(users.map((u) => [u.id, u.display_name])));
   const actorName = (id: string | null) =>
-    id === null ? '系统' : (users.find((u) => u.id === id)?.display_name ?? id.slice(0, 8));
+    id === null ? '系统' : (userNames.get(id) ?? id.slice(0, 8));
 
   const href = (item: AuditItem): string | null => {
     if (item.target_kind === 'run') return `/runs/${item.target_id}`;
@@ -89,27 +144,13 @@
     return null;
   };
 
-  const kinds = $derived([...new Set(items.map((i) => i.target_kind))].sort());
+  /** 可选的对象类型。取自 KIND 表而不是当前这一页——
+      按类型筛选的选项不该因为这一页里恰好没有主机就消失。 */
+  const kinds = Object.keys(KIND).sort();
 
-  const shown = $derived.by(() => {
-    const q = query.trim().toLowerCase();
-    return items.filter((i) => {
-      if (kind && i.target_kind !== kind) return false;
-      if (!q) return true;
-      const hay = [
-        i.action,
-        ACTION[i.action] ?? '',
-        i.target_kind,
-        i.target_id,
-        actorName(i.actor),
-        JSON.stringify(i.after ?? ''),
-        JSON.stringify(i.before ?? '')
-      ]
-        .join(' ')
-        .toLowerCase();
-      return hay.includes(q);
-    });
-  });
+  // 筛选已经在服务端做完了，这里直接用
+  const shown = $derived(items);
+  const hasFilter = $derived(!!query.trim() || !!kind);
 
   const pretty = (v: unknown) => JSON.stringify(v, null, 2);
 </script>
@@ -185,14 +226,26 @@
         </tbody>
       </table>
     </div>
-  {:else if items.length}
-    <Empty title="没有匹配的记录" hint="换个关键词或对象类型。" />
+    {#if cursor}
+      <div class="more">
+        <button class="btn-sm" onclick={loadMore} disabled={loadingMore}>
+          {loadingMore ? '加载中…' : '加载更早的记录'}
+        </button>
+      </div>
+    {/if}
+  {:else if hasFilter}
+    <Empty title="没有匹配的记录" hint="换个关键词或对象类型。这次查的是全部历史，不只是最近几页。" />
   {:else}
     <Empty title="还没有审计记录" hint="建任务、触发执行、改策略这些动作发生后会出现在这里。" />
   {/if}
 {/if}
 
 <style>
+  .more {
+    display: flex;
+    justify-content: center;
+    padding: var(--s3) 0;
+  }
   .system {
     color: var(--fg-faint);
     font-style: italic;
