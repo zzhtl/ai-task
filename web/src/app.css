@@ -70,6 +70,13 @@
   --st-budget: var(--warn-fg);
   --st-resource: var(--violet-fg);
   --st-skipped: #6b7587;
+
+  /* ---- 图表的色块。和上面的状态"文字色"分开：文字色要对底色 4.5:1，
+     暗色下亮而且彼此明度接近，红绿堆在一起时绿色盲分不开（模拟 ΔE 3.8）。
+     这一组过了 dataviz 校验：相邻两段色盲模拟 ΔE ≥ 12、正常视觉 ≥ 20，对底色 ≥ 3:1。 */
+  --viz-failed: #b3363a;
+  --viz-succeeded: #34a86c;
+  --viz-other: #5d6676;
   --st-awaiting: var(--warn-fg);
   /* AI 步骤的序号色、编排图里 AI 节点的描边。曾经写成 `var(--st-ai)` 自己引用自己——
      那是个无效值，暗色下序号没颜色、AI 节点连边框都没有，而且没有任何报错。 */
@@ -198,6 +205,10 @@
   --st-timeout: #7f5200;
   --st-budget: #7f5200;
   --st-resource: #83279f;
+
+  --viz-failed: #bd2228;
+  --viz-succeeded: #146c41;
+  --viz-other: #7a8391;
   --st-skipped: #737c8a;
   --st-awaiting: #7f5200;
   --st-ai: #176d9f;

@@ -140,3 +140,275 @@ db_test!(overview_never_leaks_across_workspaces, |f| {
             .is_empty()
     );
 });
+
+// ---------------------------------------------------------------- 按天、按任务
+
+/// 在给定任务下建一个 run，再把它摆到某个确切时刻、某个终态。
+async fn place(
+    f: &common::Fixture,
+    task: (ai_task_proto::TaskId, ai_task_proto::TaskVersionId),
+    at: &str,
+    status: &str,
+    dry_run: bool,
+    cost_micros: i64,
+    error: Option<&str>,
+) -> ai_task_proto::RunId {
+    let run = f
+        .store
+        .create_run(
+            ai_task_store::NewRun {
+                workspace_id: f.workspace,
+                task_id: task.0,
+                task_version_id: task.1,
+                trigger: ai_task_proto::TriggerKind::Manual,
+                dry_run,
+                inputs: None,
+                compare_to: None,
+                created_by: None,
+            },
+            ai_task_store::PendingEvent::run(ai_task_proto::RunEventBody::RunQueued {
+                task_version_id: task.1,
+                trigger: ai_task_proto::TriggerKind::Manual,
+                inputs: None,
+                dry_run,
+            }),
+        )
+        .await
+        .expect("建 run");
+    sqlx::query(
+        "UPDATE runs SET created_at = $2::timestamptz, status = $3, cost_micros = $4,
+                         error = $5, finished_at = $2::timestamptz
+         WHERE id = $1",
+    )
+    .bind(uuid::Uuid::from(run.id))
+    .bind(at)
+    .bind(status)
+    .bind(cost_micros)
+    .bind(error)
+    .execute(f.store.pool())
+    .await
+    .expect("摆时间");
+    run.id
+}
+
+fn day(s: &str) -> chrono::NaiveDate {
+    s.parse().expect("日期")
+}
+
+db_test!(daily_buckets_follow_the_local_calendar_day, |f| {
+    let task = f.seed_task().await;
+    // 东八区的 23:30 和 00:30 只差一小时，但属于两天
+    place(
+        &f,
+        task,
+        "2026-09-10T15:30:00Z",
+        "succeeded",
+        false,
+        1_000,
+        None,
+    )
+    .await;
+    place(
+        &f,
+        task,
+        "2026-09-10T15:59:59Z",
+        "timed_out",
+        false,
+        0,
+        None,
+    )
+    .await;
+    place(
+        &f,
+        task,
+        "2026-09-10T16:30:00Z",
+        "failed",
+        false,
+        2_000,
+        None,
+    )
+    .await;
+    // 影子执行：不算次数，但它花的钱是真花了
+    place(
+        &f,
+        task,
+        "2026-09-11T02:00:00Z",
+        "succeeded",
+        true,
+        500,
+        None,
+    )
+    .await;
+    // 范围外：前一天的 23:00、最后一天之后的 00:00
+    place(
+        &f,
+        task,
+        "2026-09-08T15:00:00Z",
+        "failed",
+        false,
+        9_000,
+        None,
+    )
+    .await;
+    place(
+        &f,
+        task,
+        "2026-09-11T16:00:00Z",
+        "failed",
+        false,
+        9_000,
+        None,
+    )
+    .await;
+
+    let days = f
+        .store
+        .overview_daily(
+            f.workspace,
+            "Asia/Shanghai",
+            day("2026-09-09"),
+            day("2026-09-11"),
+        )
+        .await
+        .expect("按天");
+    let got: Vec<_> = days
+        .iter()
+        .map(|d| {
+            (
+                d.date.to_string(),
+                d.runs,
+                d.succeeded,
+                d.failed,
+                d.spend_usd.0,
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("2026-09-09".to_string(), 0, 0, 0, 0),
+            ("2026-09-10".to_string(), 2, 1, 1, 1_000),
+            ("2026-09-11".to_string(), 1, 0, 1, 2_500),
+        ],
+        "没有执行的日子也要有一行；23:30 落在当天，00:30 落在次日"
+    );
+
+    // 同一批数据按 UTC 分，00:30（东八区）那条就回到了 9 月 10 日：时区真的参与了分桶
+    let utc = f
+        .store
+        .overview_daily(f.workspace, "UTC", day("2026-09-10"), day("2026-09-10"))
+        .await
+        .expect("按 UTC");
+    assert_eq!(utc[0].runs, 3);
+
+    let other = f.new_workspace().await;
+    let empty = f
+        .store
+        .overview_daily(other, "Asia/Shanghai", day("2026-09-10"), day("2026-09-10"))
+        .await
+        .expect("别的租户");
+    assert_eq!(empty[0].runs, 0, "别的租户的执行不能算进来");
+});
+
+db_test!(
+    failing_tasks_rank_by_failures_and_leave_out_shadow_runs,
+    |f| {
+        let now = chrono::Utc::now();
+        let ago = |minutes: i64| (now - chrono::Duration::minutes(minutes)).to_rfc3339();
+
+        let noisy = f.seed_task().await;
+        place(
+            &f,
+            noisy,
+            &ago(120),
+            "failed",
+            false,
+            100,
+            Some("早一点的错误"),
+        )
+        .await;
+        let long = "磁".repeat(300);
+        place(
+            &f,
+            noisy,
+            &ago(60),
+            "budget_exceeded",
+            false,
+            200,
+            Some(&long),
+        )
+        .await;
+        let latest = place(&f, noisy, &ago(30), "succeeded", false, 300, None).await;
+
+        let flaky = f.seed_task().await;
+        place(&f, flaky, &ago(300), "failed", false, 0, Some("一次")).await;
+        place(&f, flaky, &ago(200), "failed", true, 0, Some("影子")).await;
+
+        let healthy = f.seed_task().await;
+        place(&f, healthy, &ago(10), "succeeded", false, 0, None).await;
+        let stale = f.seed_task().await;
+        place(
+            &f,
+            stale,
+            &ago(60 * 24 * 10),
+            "failed",
+            false,
+            0,
+            Some("十天前"),
+        )
+        .await;
+
+        let items = f
+            .store
+            .overview_failing_tasks(f.workspace, 168, 5)
+            .await
+            .expect("排行");
+        assert_eq!(
+            items.iter().map(|t| t.task_id).collect::<Vec<_>>(),
+            vec![noisy.0, flaky.0],
+            "只列窗口内有失败的，失败多的在前"
+        );
+        let first = &items[0];
+        assert_eq!((first.runs, first.failed, first.spend_usd.0), (3, 2, 600));
+        assert_eq!(first.last_run_id, latest);
+        assert_eq!(first.last_status, ai_task_proto::RunStatus::Succeeded);
+        assert_eq!(
+            first.last_error.as_deref().map(|e| e.chars().count()),
+            Some(200),
+            "最近一次失败的原因，截到 200 个字符"
+        );
+        assert_eq!((items[1].runs, items[1].failed), (1, 1), "影子执行不算");
+        assert_eq!(items[1].last_error.as_deref(), Some("一次"));
+
+        let other = f.new_workspace().await;
+        assert!(
+            f.store
+                .overview_failing_tasks(other, 168, 5)
+                .await
+                .expect("别的租户")
+                .is_empty()
+        );
+    }
+);
+
+db_test!(outcomes_leave_out_shadow_runs, |f| {
+    let task = f.seed_task().await;
+    let now = chrono::Utc::now();
+    let at = (now - chrono::Duration::hours(1)).to_rfc3339();
+    place(&f, task, &at, "succeeded", false, 0, None).await;
+    place(&f, task, &at, "succeeded", true, 0, None).await;
+    place(&f, task, &at, "failed", false, 0, None).await;
+    place(&f, task, &at, "resource_exceeded", true, 0, None).await;
+
+    let stats = f
+        .store
+        .overview_stats(f.workspace, 24)
+        .await
+        .expect("stats");
+    assert_eq!(stats.failed, 2, "原来的失败数含影子执行，语义不变");
+    assert_eq!(
+        (stats.outcomes.succeeded, stats.outcomes.failed),
+        (1, 1),
+        "成功率用的结局不含影子执行"
+    );
+});

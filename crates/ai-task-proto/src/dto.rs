@@ -10,7 +10,7 @@
 //! - **幂等**：创建/触发类 POST 走 `Idempotency-Key` 头，不放 body
 //! - **并发**：更新走 `ETag` / `If-Match` 头，不放 body
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -438,6 +438,18 @@ pub struct OverviewStats {
     pub pending_approvals: i64,
     /// 任务总数。
     pub tasks: i64,
+    /// 窗口内**不含影子执行**的结局。成功率按它算：影子执行是在试提示词，
+    /// 它失败了不代表任务出了问题。上面的 `runs` / `failed` 含影子执行，语义不变。
+    #[serde(default)]
+    pub outcomes: OutcomeCounts,
+}
+
+/// 成功和失败各几次。失败指 failed / timed_out / budget_exceeded / resource_exceeded。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct OutcomeCounts {
+    pub succeeded: i64,
+    pub failed: i64,
 }
 
 /// 首页列表里的一行。
@@ -472,6 +484,94 @@ pub struct UpcomingFire {
     pub task_name: String,
     pub cron: String,
     pub next_fire_at: DateTime<Utc>,
+}
+
+/// `GET /api/v1/overview/daily` 的查询参数。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(deny_unknown_fields)]
+pub struct OverviewDailyQuery {
+    /// 看最近几天（含今天），1–90，默认 14。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub days: Option<u32>,
+    /// 按哪个时区的日历日分桶，IANA 名，默认 `Asia/Shanghai`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+impl OverviewDailyQuery {
+    pub const DEFAULT_DAYS: u32 = 14;
+    pub const MAX_DAYS: u32 = 90;
+    pub const DEFAULT_TIMEZONE: &'static str = "Asia/Shanghai";
+}
+
+/// 每天的执行结果，旧的在前，没有执行的日子也有一行（全是 0）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct OverviewDaily {
+    /// 分桶用的时区。`days[].date` 是这个时区的日历日。
+    pub timezone: String,
+    pub days: Vec<DailyBucket>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DailyBucket {
+    pub date: NaiveDate,
+    /// 这一天开始的执行次数，**不含影子执行**。
+    pub runs: i64,
+    pub succeeded: i64,
+    /// 落在失败类终态的次数（failed / timed_out / budget_exceeded / resource_exceeded）。
+    pub failed: i64,
+    /// 这一天的花费，**含影子执行**：影子执行的模型调用一样要钱。
+    pub spend_usd: UsdMicros,
+}
+
+/// `GET /api/v1/overview/tasks` 的查询参数。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(deny_unknown_fields)]
+pub struct OverviewTasksQuery {
+    /// 看最近几小时，1–720，默认 168（7 天）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_hours: Option<u32>,
+    /// 最多几个任务，1–20，默认 5。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+impl OverviewTasksQuery {
+    pub const DEFAULT_WINDOW_HOURS: u32 = 168;
+    pub const MAX_WINDOW_HOURS: u32 = 720;
+    pub const DEFAULT_LIMIT: u32 = 5;
+    pub const MAX_LIMIT: u32 = 20;
+}
+
+/// 窗口内失败最多的几个任务。只列有失败的，失败次数多的在前；不分页，这是一份排行。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct OverviewTasks {
+    pub window_hours: u32,
+    pub items: Vec<TaskHealth>,
+}
+
+/// 一个任务在窗口内的表现。**不含影子执行。**
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TaskHealth {
+    pub task_id: TaskId,
+    pub task_name: String,
+    pub runs: i64,
+    pub failed: i64,
+    pub spend_usd: UsdMicros,
+    /// 窗口内最近一次执行。
+    pub last_run_id: RunId,
+    pub last_status: RunStatus,
+    pub last_run_at: DateTime<Utc>,
+    pub last_failed_at: DateTime<Utc>,
+    /// 最近一次失败的原因，最多 200 个字符。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 /// `GET /api/v1/runs` 的查询参数。服务端直接按这个类型解析，所以它就是契约本身。

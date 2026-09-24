@@ -34,6 +34,8 @@ reqwest = { workspace = true, features = ["blocking"] }
 sqlx.workspace = true
 tokio-util.workspace = true
 chrono.workspace = true
+# 总览按天分桶要校验时区、算「今天」。和定时的 cron 用同一份时区数据（runtime 本来就依赖它）。
+chrono-tz.workspace = true
 clap.workspace = true
 mime_guess.workspace = true
 rust-embed.workspace = true

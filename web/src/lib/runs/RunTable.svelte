@@ -6,7 +6,8 @@
    * 翻页和轮询由调用方管（两处的查询条件不一样），这里只管画和行内动作。
    */
   import { goto } from '$app/navigation';
-  import { deleteRun, getRun, newIdempotencyKey, triggerRun } from '$api/runs';
+  import { deleteRun } from '$api/runs';
+  import { rerun as rerunRun } from './rerun';
   import { describeError } from '$api/client';
   import { resource } from '$api/resource.svelte';
   import { listApprovals, type Approval } from '$api/models';
@@ -77,18 +78,13 @@
     }
   }
 
-  /** 重跑：原样带上那一次的输入（列表里没有，先取一下详情）。 */
+  /** 重跑：原样带上那一次的输入。 */
   async function rerun(run: RunListItem) {
     busy = run.id;
     try {
-      const detail = await getRun(run.id);
-      const r = await triggerRun(
-        run.task_id,
-        { dry_run: run.dry_run, inputs: detail.inputs ?? undefined },
-        newIdempotencyKey()
-      );
+      const id = await rerunRun(run);
       toast(`已重新触发「${run.task_name}」`);
-      await goto(`/runs/${r.id}`);
+      await goto(`/runs/${id}`);
     } catch (e) {
       toastError(describeError(e));
       busy = null;

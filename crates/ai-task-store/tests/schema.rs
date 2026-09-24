@@ -495,6 +495,59 @@ db_test!(status_filtered_run_listing_uses_the_status_index, |f| {
     );
 });
 
+db_test!(a_local_day_range_is_an_index_range, |f| {
+    // 首页按天分桶的范围写成"本地零点换算成的时刻"。它必须是 runs_recent_idx 上的
+    // 范围条件：改成对列做运算（`(created_at AT TIME ZONE tz)::date >= ...`）的话，
+    // 索引就用不上了，首页每分钟都要把全部历史读一遍。
+    let ids = seed(&f).await;
+    sqlx::query(
+        "INSERT INTO runs (id, workspace_id, task_id, task_version_id, trigger, status, created_at)
+         SELECT gen_random_uuid(), $1, $2, $3, 'manual', 'succeeded',
+                now() - make_interval(secs => s * 1800)
+         FROM generate_series(1, 30000) s",
+    )
+    .bind(ids.workspace)
+    .bind(ids.task)
+    .bind(ids.version)
+    .execute(f.store.pool())
+    .await
+    .expect("写 run");
+    sqlx::query("ANALYZE runs")
+        .execute(f.store.pool())
+        .await
+        .expect("ANALYZE");
+
+    let plan: String = sqlx::query(
+        "EXPLAIN SELECT (created_at AT TIME ZONE $2)::date, count(*) FROM runs
+         WHERE workspace_id = $1
+           AND created_at >= (current_date - 13)::timestamp AT TIME ZONE $2
+           AND created_at < (current_date + 1)::timestamp AT TIME ZONE $2
+         GROUP BY 1",
+    )
+    .bind(ids.workspace)
+    .bind("Asia/Shanghai")
+    .fetch_all(f.store.pool())
+    .await
+    .expect("EXPLAIN")
+    .iter()
+    .map(|row| row.get::<String, _>(0))
+    .collect::<Vec<_>>()
+    .join("\n");
+
+    assert!(
+        plan.contains("runs_recent_idx"),
+        "按天分桶没走 runs_recent_idx，计划是：\n{plan}"
+    );
+    let index_cond = plan
+        .lines()
+        .find(|line| line.contains("Index Cond"))
+        .unwrap_or_default();
+    assert!(
+        index_cond.contains("created_at"),
+        "created_at 的范围没进 Index Cond，计划是：\n{plan}"
+    );
+});
+
 db_test!(a_time_window_on_the_run_list_is_an_index_range, |f| {
     // 执行记录页的"最近 24 小时 / 7 天"。`created_at >= since` 必须成为
     // runs_recent_idx 上的范围条件（Index Cond），而不是沿着索引一路扫下去再过滤——
