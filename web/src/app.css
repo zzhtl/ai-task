@@ -48,8 +48,9 @@
   /* 圆点是非文字元素，3:1 就够；但 #4a5261 对 --surface-3 只有 2.0，
      等于画了个看不见的点——"跳过"和"这里什么都没有"就分不出来了。 */
   --st-skipped: #626d80;
-  /* AI 步骤的序号色。原来是三个文件里各写一遍的 var(--st-ai) / var(--st-ai) */
-  --st-ai: var(--st-ai);
+  /* AI 步骤的序号色、编排图里 AI 节点的描边。曾经写成 `var(--st-ai)` 自己引用自己——
+     那是个无效值，暗色下序号没颜色、AI 节点连边框都没有，而且没有任何报错。 */
+  --st-ai: #56b6e8;
   --st-awaiting: #e0a33e;
 
   --ok: var(--st-succeeded);
@@ -155,7 +156,7 @@
   --st-awaiting: #8c631f;
   --st-resource: #ad25ce;
   --st-skipped: #4a5261;
-  --st-ai: #1d7fb8;
+  --st-ai: #176d9f;
 
   color-scheme: light;
 }

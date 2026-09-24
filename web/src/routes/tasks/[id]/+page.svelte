@@ -6,11 +6,13 @@
    * 不保存。它既拦住了看不懂 YAML 的人，又骗了看得懂的人。现在左边是步骤和
    * 执行记录，右边是定时和元信息，要改就去编辑页。
    */
+  import { session } from '$lib/auth/session.svelte';
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
   import { api, describeError, ignoreForbidden } from '$api/client';
   import { pollWhileVisible } from '$api/resource.svelte';
   import { listRuns, triggerRun, newIdempotencyKey } from '$api/runs';
+  import { mergeFirstPage } from '$lib/runs/merge';
   import { listHosts } from '$api/models';
   import type { TaskDetail } from '$api/types/TaskDetail';
   import type { RunSummary } from '$api/types/RunSummary';
@@ -30,6 +32,8 @@
   const taskId = $derived(page.params.id ?? '');
 
   let task = $state<TaskDetail | null>(null);
+  /** viewer 只能看：写操作的入口灰掉，而不是点了再弹 403。 */
+  const canOperate = $derived(session.can('operator'));
   let error = $state<string | null>(null);
   let busy = $state(false);
   let hosts = $state<Array<{ id: string; name: string }>>([]);
@@ -49,8 +53,14 @@
   async function loadRuns() {
     try {
       const r = await listRuns({ taskId, limit: 20 });
-      runs = r.items;
-      runsCursor = r.next_cursor ?? null;
+      // 首次整页放进来；之后的轮询只合并第一页，保住"更早的记录"翻出来的那几页
+      if (!runsLoaded) {
+        runs = r.items;
+        runsCursor = r.next_cursor ?? null;
+      } else {
+        runs = mergeFirstPage(runs, r.items);
+        runsCursor ??= r.next_cursor ?? null;
+      }
     } catch {
       /* 执行记录读不到不该把整个任务页弄坏 */
     } finally {
@@ -67,6 +77,11 @@
 
   $effect(() => {
     if (!taskId) return;
+    // 从一个任务直接跳到另一个任务时组件是复用的：不清空的话，
+    // 下面的"合并第一页"会把两个任务的执行记录并到一张表里
+    runs = [];
+    runsCursor = null;
+    runsLoaded = false;
     void loadTask();
     void loadRuns();
     // 主机是 admin 才能读；operator 看任务时读不到不该报错
@@ -190,7 +205,7 @@
     {/if}
   {/snippet}
   {#snippet actions()}
-    <Dropdown label="更多" disabled={busy || !task}>
+    <Dropdown label="更多" disabled={busy || !task || !canOperate}>
       <a href="/tasks/new?id={taskId}" role="menuitem">
         编辑定义
         <span class="hint">保存会产生新版本</span>
@@ -209,8 +224,8 @@
         <span class="hint">连同全部执行记录</span>
       </button>
     </Dropdown>
-    <a class="btn" href="/tasks/new?id={taskId}">编辑</a>
-    <Dropdown label="运行" primary disabled={busy || !task || !task.enabled}>
+    {#if canOperate}<a class="btn" href="/tasks/new?id={taskId}">编辑</a>{/if}
+    <Dropdown label="运行" primary disabled={busy || !task || !task.enabled || !canOperate}>
       <button onclick={() => run(false)}>
         立即执行
         <span class="hint">真的会在目标机上动手</span>

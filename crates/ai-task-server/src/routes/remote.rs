@@ -15,11 +15,11 @@ use ai_task_proto::{
 };
 use ai_task_runtime::{Command, HostExecOutcome};
 use ai_task_store::PendingEvent;
-use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
 
 use crate::error::AppError;
+use crate::extract::Json;
 use crate::routes::policy;
 use crate::state::AppState;
 

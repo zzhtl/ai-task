@@ -10,22 +10,47 @@ import { describe, expect, test } from 'bun:test';
 
 const CSS = await Bun.file(new URL('../../app.css', import.meta.url)).text();
 
-/** 从一个 `:root` 块里抽出所有 `--x: #hex;`。 */
-function tokens(selector: string): Record<string, string> {
+/** 从一个 `:root` 块里抽出全部 `--x: 值;`，值原样保留。 */
+function declarations(selector: string): Record<string, string> {
   const start = CSS.indexOf(selector);
   if (start < 0) throw new Error(`app.css 里找不到 ${selector}`);
   const open = CSS.indexOf('{', start);
   const close = CSS.indexOf('\n}', open);
-  const block = CSS.slice(open, close);
+  const block = CSS.slice(open, close).replace(/\/\*[\s\S]*?\*\//g, '');
   const out: Record<string, string> = {};
-  for (const [, name, hex] of block.matchAll(/(--[\w-]+):\s*(#[0-9a-fA-F]{6})\s*;/g)) {
-    out[name] = hex.toLowerCase();
+  for (const [, name, value] of block.matchAll(/(--[\w-]+):\s*([^;]+);/g)) out[name] = value.trim();
+  return out;
+}
+
+/**
+ * 把 `var()` 链解到底。
+ *
+ * 只认 `#rrggbb` 的旧版测试看不见 `--st-ai: var(--st-ai)` 这种写法——它是个无效值，
+ * 暗色下 AI 步骤的序号没颜色、编排图的 AI 节点没有描边，而浏览器和构建都不报错。
+ * 自引用、循环、指向没声明的名字，一律在这里失败。
+ */
+function resolve(theme: Record<string, string>, name: string, seen: string[] = []): string {
+  if (seen.includes(name)) throw new Error(`循环引用：${[...seen, name].join(' → ')}`);
+  const value = theme[name];
+  if (value === undefined) throw new Error(`未声明：${[...seen, name].join(' → ')}`);
+  const ref = value.match(/^var\((--[\w-]+)\)$/);
+  return ref ? resolve(theme, ref[1], [...seen, name]) : value;
+}
+
+/** 解开之后是 `#rrggbb` 的那些 token——能算对比度的就是它们。 */
+function hexTokens(theme: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const name of Object.keys(theme)) {
+    const value = resolve(theme, name);
+    if (/^#[0-9a-fA-F]{6}$/.test(value)) out[name] = value.toLowerCase();
   }
   return out;
 }
 
-const DARK = tokens(':root {');
-const LIGHT = { ...DARK, ...tokens(":root[data-theme='light'] {") };
+const DARK_RAW = declarations(':root {');
+const LIGHT_RAW = { ...DARK_RAW, ...declarations(":root[data-theme='light'] {") };
+const DARK = hexTokens(DARK_RAW);
+const LIGHT = hexTokens(LIGHT_RAW);
 
 function channel(c: number): number {
   const v = c / 255;
@@ -66,16 +91,19 @@ const AS_TEXT = [
   '--fg',
   '--fg-dim',
   '--fg-faint',
+  '--accent-fg',
   // StatusPill 把这五个当文字色用
   '--st-running',
   '--st-succeeded',
   '--st-failed',
   '--st-timeout',
-  '--st-resource'
+  '--st-resource',
+  // 步骤序号
+  '--st-ai'
 ];
 
 /** 只当圆点/描边用的 token：AA 非文字 3:1。 */
-const AS_GRAPHIC = ['--st-queued', '--st-cancelled', '--st-skipped', '--accent'];
+const AS_GRAPHIC = ['--st-queued', '--st-cancelled', '--st-skipped', '--st-awaiting', '--accent'];
 
 describe.each([
   ['暗色', DARK],
@@ -96,11 +124,33 @@ describe.each([
   });
 });
 
+describe.each([
+  ['暗色', DARK_RAW],
+  ['浅色', LIGHT_RAW]
+])('%s主题的 var() 链', (_name, theme) => {
+  test.each(Object.keys(theme))('%s 能解开：没有自引用、循环或未声明的名字', (token) => {
+    expect(() => resolve(theme, token)).not.toThrow();
+  });
+});
+
+test('组件里用到的每个 var(--x) 都在 app.css 里声明过', async () => {
+  // 写错一个名字，浏览器只会安静地回退成继承值或初始值
+  const root = new URL('../../', import.meta.url).pathname;
+  const used = new Set<string>();
+  for await (const file of new Bun.Glob('**/*.{svelte,css}').scan({ cwd: root, absolute: true })) {
+    const text = await Bun.file(file).text();
+    for (const [, name] of text.matchAll(/var\(\s*(--[\w-]+)/g)) used.add(name);
+  }
+  const missing = [...used].filter((name) => !(name in LIGHT_RAW)).sort();
+  expect(missing).toEqual([]);
+});
+
 test('浅色主题必须自己定义全部状态色，不能继承暗色的', () => {
-  const own = tokens(":root[data-theme='light'] {");
+  const own = hexTokens({ ...DARK_RAW, ...declarations(":root[data-theme='light'] {") });
+  const lightOnly = declarations(":root[data-theme='light'] {");
   // 继承暗色的 hex 正是最初那个 bug：同一个绿在白底上只有 2.3:1。
   for (const token of ['--st-running', '--st-succeeded', '--st-failed', '--st-timeout']) {
-    expect(own[token]).toBeDefined();
+    expect(lightOnly[token]).toBeDefined();
     expect(own[token]).not.toBe(DARK[token]);
   }
 });

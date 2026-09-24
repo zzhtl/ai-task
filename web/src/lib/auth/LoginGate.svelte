@@ -4,87 +4,53 @@
    *
    * 后端没开认证时（`AI_TASK_REQUIRE_AUTH=false`，回环上的默认）直接放行，
    * 不给单人自托管平添一道门。
+   *
+   * **会话中途过期时不换页。**以前是整页切回登录表单——那会卸载外壳和当前页面，
+   * 编辑器里写了十分钟的提示词就没了。现在登录过之后再过期，页面原样留着，
+   * 上面盖一层重新登录的弹层；登录回来接着干。
    */
-  import { ApiFailure, describeError } from '$api/client';
-  import { session, refreshIdentity, login, bootstrap } from './session.svelte';
+  import { session, refreshIdentity } from './session.svelte';
+  import LoginForm from './LoginForm.svelte';
 
   let { children } = $props();
 
-  let email = $state('');
-  let password = $state('');
-  let displayName = $state('');
-  /** 首次部署：一个用户都没有，要先建管理员。 */
-  let firstRun = $state(false);
-  let error = $state<string | null>(null);
-  let busy = $state(false);
+  /** 这个页面上登录成功过。之后再出现"未登录"就是会话过期，不是首次打开。 */
+  let hadSession = $state(false);
+  /** 过期前是谁。重新登录时替他把邮箱填好。 */
+  let lastEmail = $state('');
 
   $effect(() => {
     void refreshIdentity();
   });
-
-  async function submit(event: SubmitEvent) {
-    event.preventDefault();
-    busy = true;
-    error = null;
-    try {
-      if (firstRun) {
-        await bootstrap(email, password, displayName || email);
-      } else {
-        await login(email, password);
-      }
-    } catch (e) {
-      error = describeError(e);
-      // 409 = 已经有用户了，说明不是首次部署
-      if (e instanceof ApiFailure && e.status === 409) firstRun = false;
-    } finally {
-      busy = false;
-      password = '';
+  $effect(() => {
+    if (session.identity) {
+      hadSession = true;
+      lastEmail = session.identity.email ?? '';
     }
-  }
+  });
+
+  const signedOut = $derived(session.identity === null && !session.authDisabled);
+
+  let dialog = $state<HTMLDialogElement | null>(null);
+  $effect(() => {
+    if (!dialog) return;
+    const want = signedOut && hadSession;
+    if (want && !dialog.open) dialog.showModal();
+    if (!want && dialog.open) dialog.close();
+  });
 </script>
 
 {#if session.identity === undefined}
   <!-- 还没问过后端。不渲染登录页：闪一下再跳走比多等 100ms 更糟 -->
   <div class="loading"><span class="mark"></span></div>
-{:else if session.identity === null && !session.authDisabled}
-  <div class="gate">
-    <form onsubmit={submit}>
-      <div class="brand"><span class="mark"></span><h1>ai-task</h1></div>
-      <p class="sub">{firstRun ? '首次部署：创建管理员账号' : 'AI 执行控制平面'}</p>
-
-      <label class="field">
-        邮箱
-        <input type="email" bind:value={email} required autocomplete="username" />
-      </label>
-      {#if firstRun}
-        <label class="field">
-          显示名
-          <input bind:value={displayName} placeholder="可留空，默认用邮箱" />
-        </label>
-      {/if}
-      <label class="field">
-        口令
-        <input
-          type="password"
-          bind:value={password}
-          placeholder={firstRun ? '至少 12 个字符' : ''}
-          required
-          autocomplete={firstRun ? 'new-password' : 'current-password'}
-        />
-      </label>
-
-      {#if error}<div class="banner">{error}</div>{/if}
-
-      <button type="submit" class="btn-primary" disabled={busy}>
-        {busy ? '请稍候…' : firstRun ? '创建并登录' : '登录'}
-      </button>
-      <button type="button" class="link" onclick={() => (firstRun = !firstRun)}>
-        {firstRun ? '已有账号，去登录' : '还没有任何账号？创建管理员'}
-      </button>
-    </form>
-  </div>
+{:else if signedOut && !hadSession}
+  <div class="gate"><LoginForm /></div>
 {:else}
   {@render children?.()}
+  <!-- Esc 关不掉：不登录的话，下面的页面每个请求都是 401 -->
+  <dialog bind:this={dialog} class="reauth" oncancel={(e) => e.preventDefault()}>
+    {#if signedOut && hadSession}<LoginForm reauth email={lastEmail} />{/if}
+  </dialog>
 {/if}
 
 <style>
@@ -97,72 +63,25 @@
       radial-gradient(60% 50% at 50% 0%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 70%),
       var(--bg);
   }
-  form {
-    width: min(380px, 100%);
-    display: flex;
-    flex-direction: column;
-    gap: var(--s3);
-    background: var(--surface-1);
-    border: 1px solid var(--line);
-    border-radius: var(--r4);
-    padding: var(--s6);
-    box-shadow: var(--shadow-pop);
+  .reauth {
+    padding: 0;
+    border: none;
+    background: transparent;
+    overflow: visible;
   }
-  .brand {
-    display: flex;
-    align-items: center;
-    gap: var(--s2);
+  .reauth::backdrop {
+    background: rgb(0 0 0 / 0.55);
+    backdrop-filter: blur(3px);
+  }
+  .loading {
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
   }
   .mark {
     width: 12px;
     height: 12px;
     border-radius: 3px;
     background: var(--accent);
-    box-shadow: 0 0 14px color-mix(in srgb, var(--accent) 60%, transparent);
-    animation: breathe 3.5s ease-in-out infinite;
-  }
-  @keyframes breathe {
-    0%,
-    100% {
-      opacity: 1;
-      transform: scale(1);
-    }
-    50% {
-      opacity: 0.55;
-      transform: scale(0.86);
-    }
-  }
-  h1 {
-    font-size: var(--t-xl);
-  }
-  .sub {
-    margin: 0 0 var(--s2);
-    color: var(--fg-dim);
-    font-size: var(--t-base);
-  }
-  form button[type='submit'] {
-    justify-content: center;
-    padding: 0.55rem;
-    margin-top: var(--s1);
-  }
-  button.link {
-    border: none;
-    background: none;
-    color: var(--fg-faint);
-    font-size: var(--t-sm);
-    padding: 0;
-    justify-content: center;
-  }
-  button.link:hover {
-    background: none;
-    color: var(--accent-fg);
-  }
-  .banner {
-    margin: 0;
-  }
-  .loading {
-    min-height: 100vh;
-    display: grid;
-    place-items: center;
   }
 </style>

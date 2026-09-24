@@ -3,12 +3,13 @@
 use ai_task_core::PolicyRule;
 use ai_task_proto::{FieldError, Page};
 use ai_task_store::{NewRule, NewSkill, RuleKind};
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
-use axum::{Json, response::IntoResponse};
+use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
+use crate::extract::{Json, Path};
 use crate::state::AppState;
 
 /// `POST /api/v1/rules`

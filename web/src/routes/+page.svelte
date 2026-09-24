@@ -10,6 +10,7 @@
    * 于是"24 小时"那三个数在实例忙起来之后就是错的——第 201 条之后的静静地不算，
    * 而界面上看不出来。窗口聚合只能在数据库里做。
    */
+  import { session } from '$lib/auth/session.svelte';
   import { api, describeError } from '$api/client';
   import { resource } from '$api/resource.svelte';
   import { listApprovals, type Approval } from '$api/models';
@@ -52,7 +53,7 @@
 
 <PageHeader title="概览">
   {#snippet actions()}
-    <a class="btn btn-primary" href="/tasks/new">新建任务</a>
+    {#if session.can('operator')}<a class="btn btn-primary" href="/tasks/new">新建任务</a>{/if}
   {/snippet}
 </PageHeader>
 
@@ -174,7 +175,7 @@
     {:else}
       <Empty compact title="还没有执行记录" hint="建一个任务，手动跑一次试试。">
         {#snippet action()}
-          <a class="btn" href="/tasks/new">建一个任务</a>
+          {#if session.can('operator')}<a class="btn" href="/tasks/new">建一个任务</a>{/if}
         {/snippet}
       </Empty>
     {/if}

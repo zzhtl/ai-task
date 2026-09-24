@@ -8,12 +8,14 @@
    * 筛选在服务端做。以前是拉最近 100 条再在浏览器里过滤，翻不了页，
    * 而且"失败 0"可能只是因为失败的那几条不在这 100 条里。
    */
+  import { session } from '$lib/auth/session.svelte';
   import { untrack } from 'svelte';
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
-  import { deleteRun, listRuns, listTasks } from '$api/runs';
+  import { deleteRun, listAllTasks, listRuns } from '$api/runs';
   import { describeError } from '$api/client';
   import { pollWhileVisible } from '$api/resource.svelte';
+  import { mergeFirstPage } from '$lib/runs/merge';
   import type { RunSummary } from '$api/types/RunSummary';
   import type { RunStatus } from '$api/types/RunStatus';
   import type { TaskSummary } from '$api/types/TaskSummary';
@@ -42,6 +44,7 @@
   let taskId = $state<string>(fromUrl('task') ?? '');
 
   let runs = $state<RunSummary[]>([]);
+  const canOperate = $derived(session.can('operator'));
   let tasks = $state<TaskSummary[]>([]);
   let nextCursor = $state<string | null>(null);
   let error = $state<string | null>(null);
@@ -56,11 +59,11 @@
     try {
       const [r, t] = await Promise.all([
         listRuns({ limit: PAGE, taskId: taskId || null, status: statusOf(filter) }),
-        listTasks()
+        listAllTasks()
       ]);
       runs = r.items;
       nextCursor = r.next_cursor ?? null;
-      tasks = t.items;
+      tasks = t;
       error = null;
     } catch (e) {
       error = describeError(e);
@@ -77,11 +80,7 @@
     if (!loaded) return;
     try {
       const r = await listRuns({ limit: PAGE, taskId: taskId || null, status: statusOf(filter) });
-      const fresh = new Map(r.items.map((x) => [x.id, x]));
-      const kept = runs.map((x) => fresh.get(x.id) ?? x);
-      const known = new Set(kept.map((x) => x.id));
-      const added = r.items.filter((x) => !known.has(x.id));
-      runs = [...added, ...kept];
+      runs = mergeFirstPage(runs, r.items);
       if (nextCursor === null) nextCursor = r.next_cursor ?? null;
       error = null;
     } catch (e) {
@@ -235,9 +234,9 @@
               <!-- 行本身是个链接，删除键不能顺带触发它 -->
               <button
                 class="btn-ghost btn-sm btn-icon danger"
-                title={isLive(r) ? '还在跑，先取消' : '删除这条执行记录'}
+                title={!canOperate ? '需要 operator 权限' : isLive(r) ? '还在跑，先取消' : '删除这条执行记录'}
                 aria-label="删除执行记录"
-                disabled={isLive(r) || busy === r.id}
+                disabled={isLive(r) || busy === r.id || !canOperate}
                 onclick={(e) => {
                   e.stopPropagation();
                   pendingDelete = r;

@@ -22,6 +22,8 @@
   import { DEFAULTS, fromSpec, newStep, toSpec, type Composition } from '$lib/tasks/compose';
   import StepEditor from '$lib/tasks/StepEditor.svelte';
   import Confirm from '$lib/ui/Confirm.svelte';
+  import Modal from '$lib/ui/Modal.svelte';
+  import { session } from '$lib/auth/session.svelte';
 
   const editingId = $derived(page.url.searchParams.get('id'));
 
@@ -125,8 +127,11 @@
   const stepsReady = $derived(
     comp.steps.length > 0 && comp.steps.every((s) => s.kind === 'approval' || s.body.trim() !== '')
   );
-  const canSave = $derived(!busy && !notLinear && name.trim() !== '' && stepsReady);
+  /** viewer 可以打开这一页看，但保存不了：早点说，别等点了保存才弹 403。 */
+  const canOperate = $derived(session.can('operator'));
+  const canSave = $derived(!busy && !notLinear && canOperate && name.trim() !== '' && stepsReady);
   const missing = $derived.by(() => {
+    if (!canOperate) return '需要 operator 权限才能保存';
     if (name.trim() === '') return '还没起名字';
     if (!stepsReady) return '有步骤还是空的';
     return null;
@@ -202,7 +207,11 @@
         await goto(`/tasks/${created.id}`);
       }
     } catch (e) {
-      if (e instanceof ApiFailure) {
+      if (e instanceof ApiFailure && e.status === 412) {
+        // 打开之后任务被改过（别人，或者你自己在另一个标签页）。直接覆盖会把
+        // 对方的改动悄悄冲掉，所以不保存，让人选
+        conflict = true;
+      } else if (e instanceof ApiFailure) {
         error = e.message;
         fieldErrors = e.body.details ?? [];
       } else {
@@ -212,7 +221,54 @@
       busy = false;
     }
   }
+
+  /** 保存时撞上了别人的改动（412）。 */
+  let conflict = $state(false);
+
+  /** 丢掉这一页的修改，重新读最新版本。 */
+  function reloadLatest() {
+    saved = true; // 不再拦离开：这正是用户选的
+    location.reload();
+  }
+
+  /** 这一页的修改另存成一个新任务，原任务不动。 */
+  async function saveAsNew() {
+    if (!spec) return;
+    busy = true;
+    try {
+      const created = await api<{ id: string }>('/api/v1/tasks', {
+        method: 'POST',
+        body: {
+          name: `${name.trim()} · 我的修改`,
+          description: description || null,
+          spec,
+          rules: picked,
+          enabled
+        },
+        idempotencyKey: crypto.randomUUID()
+      });
+      saved = true;
+      conflict = false;
+      toast('已另存为新任务，原任务没动');
+      await goto(`/tasks/${created.id}`);
+    } catch (e) {
+      conflict = false;
+      error = describeError(e);
+    } finally {
+      busy = false;
+    }
+  }
 </script>
+
+<Modal open={conflict} title="这个任务在你编辑期间被改过" onclose={() => (conflict = false)}>
+  <p>直接保存会把对方的改动覆盖掉，所以这次没有保存。你这一页的修改还在。</p>
+  <p class="faint small">可以另存为一个新任务，或者丢掉这一页的修改、重新加载最新版本再改。</p>
+  {#snippet footer()}
+    <button class="btn-ghost" onclick={() => (conflict = false)} disabled={busy}>先不处理</button>
+    <button class="btn-danger" onclick={reloadLatest} disabled={busy}>丢掉修改并重新加载</button>
+    <button class="btn-primary" onclick={saveAsNew} disabled={busy}>另存为新任务</button>
+  {/snippet}
+</Modal>
 
 <Confirm
   open={pendingNav !== null}

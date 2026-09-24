@@ -16,6 +16,13 @@ export interface Identity {
 let identity = $state<Identity | null | undefined>(undefined);
 /** 后端没开认证时为 true：所有人都是 admin，不显示登录页。 */
 let authDisabled = $state(false);
+/**
+ * 每登录成功一次加一。
+ *
+ * 会话过期后 EventSource 会被 401 永久关掉，它不会自己重连；订阅了事件流的页面
+ * 把这个数读进自己的 effect 里，重新登录后就会重新订阅。
+ */
+let epoch = $state(0);
 
 export const session = {
   get identity() {
@@ -23,6 +30,9 @@ export const session = {
   },
   get authDisabled() {
     return authDisabled;
+  },
+  get epoch() {
+    return epoch;
   },
   /** 够不够 `needed` 这一档。角色是包含关系。 */
   can(needed: Identity['role']): boolean {
@@ -33,7 +43,7 @@ export const session = {
 };
 
 // 任何一个接口报 401（登录探测除外）都说明会话没了。把身份清空，
-// LoginGate 会立刻切回登录页——不用整页重载，编辑器里没保存的内容还在。
+// LoginGate 在页面上盖一层重新登录的弹层——页面不卸载，编辑器里没保存的内容还在。
 setUnauthorizedHandler(() => {
   identity = null;
 });
@@ -66,6 +76,7 @@ export async function login(email: string, password: string): Promise<void> {
     // 口令不对就是 401，那是这个接口的正常答案，不是会话过期
     expected401: true
   });
+  epoch += 1;
 }
 
 export async function logout(): Promise<void> {

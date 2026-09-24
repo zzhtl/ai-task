@@ -13,11 +13,11 @@
 use ai_task_core::{DefaultPolicy, PolicySet, ToolCall};
 use ai_task_proto::{PolicyEffect, PolicyRequest, PolicyResponse, RunEventBody};
 use ai_task_store::PendingEvent;
-use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
 
 use crate::error::AppError;
+use crate::extract::Json;
 use crate::state::AppState;
 
 /// 令牌头。hook 用它证明自己是这个 run 的合法调用方。
@@ -176,7 +176,8 @@ pub async fn evaluate(
             let approval_id = open_approval(state, request, &reason, decision.rule_id).await?;
             match ask_mode {
                 AskMode::Wait => {
-                    let verdict = wait_for(state, request.run_id, approval_id).await?;
+                    let verdict =
+                        wait_for(state, request.run_id, &request.node_key, approval_id).await?;
                     (verdict.is_approved(), verdict.describe())
                 }
                 AskMode::Report => {
@@ -250,9 +251,13 @@ async fn open_approval(
 }
 
 /// 等到有结论，然后把结论写进事件日志。
+///
+/// 结论和请求落在**同一个节点**下：以前写成 run 级事件，过程视图按节点分组时
+/// 找不到它，那张审批卡就永远停在"等人点头"。
 async fn wait_for(
     state: &AppState,
     run_id: ai_task_proto::RunId,
+    node_key: &str,
     approval_id: ai_task_proto::ApprovalId,
 ) -> Result<ai_task_runtime::Verdict, AppError> {
     let verdict = ai_task_runtime::approval::wait_for_verdict(
@@ -263,16 +268,24 @@ async fn wait_for(
     .await
     .map_err(AppError::Store)?;
 
+    let decided_by = match &verdict {
+        ai_task_runtime::Verdict::Approved { by, .. }
+        | ai_task_runtime::Verdict::Denied { by, .. } => by.clone(),
+        _ => None,
+    };
     state
         .store
         .append_events(
             run_id,
-            &[PendingEvent::run(RunEventBody::ApprovalDecided {
-                approval_id,
-                approved: verdict.is_approved(),
-                decided_by: None,
-                reason: Some(verdict.describe()),
-            })],
+            &[PendingEvent::new(
+                Some(node_key.to_owned()),
+                RunEventBody::ApprovalDecided {
+                    approval_id,
+                    approved: verdict.is_approved(),
+                    decided_by,
+                    reason: Some(verdict.describe()),
+                },
+            )],
         )
         .await?;
     Ok(verdict)
@@ -291,7 +304,7 @@ pub async fn await_approval(
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(AWAIT_SLICE_S);
     loop {
-        if let Some((approved, reason, _)) =
+        if let Some((approved, reason, by)) =
             state.store.approval_verdict(request.approval_id).await?
         {
             // 结论进事件日志。**只在这里写一次**：`decide_approval` 的
@@ -303,16 +316,29 @@ pub async fn await_approval(
                     "已拒绝".to_owned()
                 }
             });
+            let decided_by = match by {
+                Some(user) => state.store.user_display_name(user).await?,
+                None => None,
+            };
+            // 和 ApprovalRequested 落在同一个节点下，过程视图才找得到它
+            let node_key = state
+                .store
+                .get_approval(state.workspace_id, request.approval_id)
+                .await?
+                .and_then(|a| a.node_key);
             state
                 .store
                 .append_events(
                     request.run_id,
-                    &[PendingEvent::run(RunEventBody::ApprovalDecided {
-                        approval_id: request.approval_id,
-                        approved,
-                        decided_by: None,
-                        reason: Some(detail.clone()),
-                    })],
+                    &[PendingEvent::new(
+                        node_key,
+                        RunEventBody::ApprovalDecided {
+                            approval_id: request.approval_id,
+                            approved,
+                            decided_by,
+                            reason: Some(detail.clone()),
+                        },
+                    )],
                 )
                 .await?;
             return Ok(Json(ai_task_proto::AwaitApprovalResponse {

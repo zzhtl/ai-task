@@ -8,6 +8,7 @@
    * 保存后会回显接下来三次触发的**本地时间**——`0 0 * * *` 和 `0 0 * * 0`
    * 光看字符串是分不出来的，看时间就一目了然。
    */
+  import { session } from '$lib/auth/session.svelte';
   import { api, describeError, fieldErrors } from '$api/client';
   import { listSchedules, type Schedule } from '$api/models';
   import Confirm from '$lib/ui/Confirm.svelte';
@@ -21,6 +22,7 @@
   let { taskId, taskEnabled = true }: { taskId: string; taskEnabled?: boolean } = $props();
 
   let items = $state<Schedule[]>([]);
+  const canOperate = $derived(session.can('operator'));
   let loaded = $state(false);
   let error = $state<string | null>(null);
   let busy = $state(false);
@@ -142,7 +144,7 @@
       <span class="sub">{items.filter((s) => s.enabled).length}/{items.length} 条启用</span>
     {/if}
     <span class="spacer"></span>
-    <button class="btn-sm" onclick={() => (adding = true)}>添加定时</button>
+    <button class="btn-sm" onclick={() => (adding = true)} disabled={!canOperate} title={canOperate ? undefined : '需要 operator 权限'}>添加定时</button>
   </header>
 
   {#if !taskEnabled && items.some((s) => s.enabled)}
@@ -160,12 +162,12 @@
             <span class="faint">{s.timezone}</span>
             {#if s.jitter_s > 0}<span class="tag">抖动 {s.jitter_s}s</span>{/if}
             <span class="spacer"></span>
-            <button class="btn-ghost btn-sm" disabled={busy} onclick={() => toggle(s)}>
+            <button class="btn-ghost btn-sm" disabled={busy || !canOperate} onclick={() => toggle(s)}>
               {s.enabled ? '停用' : '启用'}
             </button>
             <button
               class="btn-ghost btn-sm btn-icon danger"
-              disabled={busy}
+              disabled={busy || !canOperate}
               title="删除"
               aria-label="删除定时"
               onclick={() => (pendingDelete = s)}

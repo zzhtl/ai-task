@@ -112,19 +112,22 @@ describe('步骤编辑器的往返', () => {
   });
 
   test('引用跟着步骤走，不跟着位置走', () => {
-    // 第 3 步看第 1 步；把第 1、2 步对调之后，它该指向"原来那一步的新位置"，
-    // 而不是继续指着 step-1
+    // 第 3 步看第 1 步；把第 1、2 步对调之后，它看的仍然是"原来那一步"。
+    // key 跟着步骤走，不按新位置重新编号——重新编号会打断别处按 key 的引用
     const comp = fromSpec(RICH) as Composition;
     const first = comp.steps[0].uid;
     comp.steps[2].sees = [first];
     [comp.steps[0], comp.steps[1]] = [comp.steps[1], comp.steps[0]];
 
     const back = toSpec(comp) as unknown as {
-      nodes: Array<{ inputs?: Record<string, { node: string }> }>;
+      nodes: Array<{ key: string; inputs?: Record<string, { node: string }> }>;
+      edges: Array<{ from: string; to: string }>;
     };
+    expect(back.nodes.map((n) => n.key)).toEqual(['step-2', 'step-1', 'step-3']);
+    // 边按新的先后顺序连
+    expect(back.edges.map((e) => `${e.from}>${e.to}`)).toEqual(['step-2>step-1', 'step-1>step-3']);
     const refs = Object.values(back.nodes[2].inputs ?? {}).map((r) => r.node);
-    expect(refs).toContain('step-2');
-    expect(refs).not.toContain('step-1');
+    expect(refs).toEqual(['step-1']);
   });
 
   test('把一步挪到它的数据来源前面，那条引用会被丢掉而不是变成循环', () => {
@@ -193,5 +196,98 @@ describe('步骤编辑器的往返', () => {
     const off = toSpec(comp) as unknown as { nodes: Array<{ config: Record<string, unknown> }> };
     expect(off.nodes[0].config).not.toHaveProperty('cli');
     expect(off.nodes[0].config.executor).toBe('claude_code');
+  });
+});
+
+describe('编辑器管不到的东西，打开再保存也不能变', () => {
+  /** 一条用接口建的直线：自定义 key、只取上游一部分的输入、整体参数和超时。 */
+  const API_CHAIN = {
+    nodes: [
+      {
+        key: 'probe',
+        name: '看一眼',
+        config: { kind: 'ai', prompt: '读工单', executor: 'claude_code', model: 'claude-sonnet-5' },
+        retry: { max_attempts: 1, backoff_ms: 1000, backoff_factor: 2, feed_error_to_model: true },
+        on_failure: 'fail_fast'
+      },
+      {
+        key: 'fix',
+        name: '修',
+        config: { kind: 'shell', command: 'make fix' },
+        inputs: {
+          工单号: { from: 'node', node: 'probe', path: '$.id' },
+          摘要: { from: 'node', node: 'probe', path: '$.summary' },
+          环境: { from: 'run_input', path: '$.env' }
+        },
+        retry: { max_attempts: 1, backoff_ms: 1000, backoff_factor: 2, feed_error_to_model: true },
+        on_failure: 'fail_fast'
+      },
+      {
+        key: 'gate',
+        name: '确认上线',
+        config: { kind: 'approval', title: '确认上线', timeout_s: 1800, on_timeout: 'deny' },
+        retry: { max_attempts: 1, backoff_ms: 1000, backoff_factor: 2, feed_error_to_model: true },
+        on_failure: 'fail_fast'
+      }
+    ],
+    edges: [
+      { from: 'probe', to: 'fix', when: { op: 'on_success' } },
+      { from: 'fix', to: 'gate', when: { op: 'on_success' } }
+    ],
+    input_schema: { type: 'object', properties: { env: { type: 'string', default: 'staging' } } },
+    timeout_s: 3600
+  } as unknown as DagSpec;
+
+  test('原样打开、原样保存', () => {
+    const comp = fromSpec(API_CHAIN) as Composition;
+    expect(comp).not.toBeNull();
+    expect(toSpec(comp)).toEqual(API_CHAIN);
+  });
+
+  test('input_schema 和整体超时不会被丢掉', () => {
+    const comp = fromSpec(API_CHAIN) as Composition;
+    comp.steps[0].title = '换个名字';
+    const back = toSpec(comp) as unknown as Record<string, unknown>;
+    expect(back.input_schema).toEqual(API_CHAIN.input_schema);
+    expect(back.timeout_s).toBe(3600);
+  });
+
+  test('自定义 key 保留，只取上游一部分的输入 path 不被改成 $', () => {
+    const comp = fromSpec(API_CHAIN) as Composition;
+    expect(comp.steps.map((s) => s.key)).toEqual(['probe', 'fix', 'gate']);
+    expect(comp.steps[1].sees).toEqual([comp.steps[0].uid]);
+    const back = toSpec(comp) as unknown as {
+      nodes: Array<{ inputs?: Record<string, { node?: string; path: string }> }>;
+    };
+    expect(back.nodes[1].inputs).toEqual(API_CHAIN.nodes[1].inputs as never);
+  });
+
+  test('没设上限的 shell、没设轮数的 AI、没写节点超时的审批，保存后还是没设', () => {
+    const back = toSpec(fromSpec(API_CHAIN) as Composition) as unknown as {
+      nodes: Array<Record<string, unknown> & { config: Record<string, unknown> }>;
+    };
+    expect(back.nodes[0].config).not.toHaveProperty('max_turns');
+    expect(back.nodes[0]).not.toHaveProperty('timeout_s');
+    expect(back.nodes[1]).not.toHaveProperty('limits');
+    // 审批等人的时长在 config 里，不能被改成默认的 900
+    expect(back.nodes[2].config.timeout_s).toBe(1800);
+    expect(back.nodes[2]).not.toHaveProperty('timeout_s');
+  });
+
+  test('新加的步骤拿到不冲突的 key，默认上限只给新步骤', () => {
+    const comp = fromSpec(API_CHAIN) as Composition;
+    comp.steps.splice(1, 0, { ...newStep('shell'), body: 'echo hi' });
+    const back = toSpec(comp) as unknown as {
+      nodes: Array<{ key: string; limits?: unknown }>;
+    };
+    expect(back.nodes.map((n) => n.key)).toEqual(['probe', 'step-1', 'fix', 'gate']);
+    expect(back.nodes[1].limits).toBeDefined();
+    expect(back.nodes[2].limits).toBeUndefined();
+  });
+
+  test('清掉花费上限就真的删掉这个键', () => {
+    const comp = fromSpec(RICH) as Composition;
+    comp.budgetUsd = null;
+    expect(toSpec(comp) as unknown as Record<string, unknown>).not.toHaveProperty('budget_usd');
   });
 });

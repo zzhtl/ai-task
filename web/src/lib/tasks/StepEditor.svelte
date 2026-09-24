@@ -239,7 +239,7 @@
 
           <label class="field narrow">
             超时（秒）
-            <input type="number" bind:value={step.timeoutS} min="30" max="86400" />
+            <input type="number" bind:value={step.timeoutS} min="30" max="86400" placeholder="默认" />
           </label>
         </div>
 

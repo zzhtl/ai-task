@@ -41,7 +41,7 @@
 
 <ol class="steps">
   {#each comp.steps as step, i (step.uid)}
-    <li class="step {step.kind}" class:on={selected === `step-${i + 1}`}>
+    <li class="step {step.kind}" class:on={selected !== null && selected === step.key}>
       <StepRail index={i + 1} last={i === comp.steps.length - 1} kind={step.kind} />
 
       <div class="body">
@@ -78,7 +78,7 @@
             {#if step.model}<span class="mono">{step.model}</span>{:else}<span class="warn-text">模型未指定</span>{/if}
             {#if step.skills.length}<span>技能：{step.skills.join('、')}</span>{/if}
           {/if}
-          <span>{step.timeoutS}s 超时</span>
+          <span>{step.timeoutS != null ? `${step.timeoutS}s 超时` : '默认超时'}</span>
         </div>
       </div>
     </li>

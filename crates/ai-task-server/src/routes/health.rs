@@ -8,10 +8,10 @@
 use std::time::Instant;
 
 use ai_task_proto::{Health, HealthCheck, HealthStatus};
-use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 
+use crate::extract::Json;
 use crate::state::AppState;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");

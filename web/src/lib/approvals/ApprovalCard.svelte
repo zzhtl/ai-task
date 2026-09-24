@@ -6,6 +6,7 @@
    * 必须看得见具体的东西：哪台机器、跑什么命令、改哪个文件。
    * 一段"我将执行一些维护操作"只会让审批退化成无脑点通过。
    */
+  import { session } from '$lib/auth/session.svelte';
   import { api, describeError } from '$api/client';
   import type { Approval } from '$api/models';
   import { toast, toastError } from '$lib/ui/toast.svelte';
@@ -18,6 +19,7 @@
   }: { approval: Approval; taskName?: string | null; ondecided?: () => void } = $props();
 
   let reason = $state('');
+  const canDecide = $derived(session.can('operator'));
   let busy = $state(false);
   let error = $state<string | null>(null);
   /**
@@ -110,11 +112,11 @@
   <div class="actions">
     <input
       bind:value={reason}
-      placeholder="理由（可留空；会作为 tool_result 回给模型）"
-      disabled={busy || remaining === 0}
+      placeholder={canDecide ? '理由（可留空；会作为 tool_result 回给模型）' : '需要 operator 权限才能审批'}
+      disabled={busy || remaining === 0 || !canDecide}
     />
-    <button onclick={() => decide(false)} disabled={busy || remaining === 0} class="btn-danger">拒绝</button>
-    <button onclick={() => decide(true)} disabled={busy || remaining === 0} class="approve">批准</button>
+    <button onclick={() => decide(false)} disabled={busy || remaining === 0 || !canDecide} class="btn-danger">拒绝</button>
+    <button onclick={() => decide(true)} disabled={busy || remaining === 0 || !canDecide} class="approve">批准</button>
   </div>
 </article>
 

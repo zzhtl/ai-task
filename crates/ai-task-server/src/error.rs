@@ -41,6 +41,11 @@ pub enum AppError {
     #[error("{0}")]
     Conflict(String),
 
+    /// 在进 handler 之前就被拒的请求：不是 JSON（415）、太大（413）之类。
+    /// 状态码沿用原来的，只是换成统一的信封。
+    #[error("{message}")]
+    Rejected { status: StatusCode, message: String },
+
     /// `If-Match` 的前置条件不成立。
     ///
     /// 和 409 分开：409 是"这个操作现在做不了"，412 是"你以为的状态不是现在的状态"
@@ -69,6 +74,14 @@ impl AppError {
             // 全项目只用 422 表示「读懂了但你说的不对」，不与 400 混用
             Self::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation_failed"),
             Self::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
+            Self::Rejected { status, .. } => (
+                *status,
+                match *status {
+                    StatusCode::PAYLOAD_TOO_LARGE => "payload_too_large",
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE => "unsupported_media_type",
+                    _ => "bad_request",
+                },
+            ),
             Self::Store(_) | Self::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
     }

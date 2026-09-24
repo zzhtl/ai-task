@@ -11,12 +11,13 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use ai_task_proto::RunId;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::stream::Stream;
 
 use crate::error::AppError;
+use crate::extract::Path;
 use crate::state::AppState;
 
 /// 一次补读的上限。历史很长时分多轮补，避免一次查询把内存打满。

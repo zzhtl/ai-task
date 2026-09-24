@@ -45,8 +45,7 @@ where
         // 空 body 当成 `null`：TriggerRun 的字段全是可选的，
         // 前端"直接运行"时不带 body 是合法的。
         let slice: &[u8] = if bytes.is_empty() { b"null" } else { &bytes };
-        let body = serde_json::from_slice(slice)
-            .map_err(|err| AppError::BadRequest(format!("报文解析失败：{err}")).into_response())?;
+        let body = crate::extract::parse_json(slice).map_err(IntoResponse::into_response)?;
 
         Ok(Self { body, key, hash })
     }

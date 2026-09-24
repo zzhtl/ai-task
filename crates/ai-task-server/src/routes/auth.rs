@@ -7,10 +7,11 @@
 use ai_task_store::{NewUser, Role};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
-use axum::{Json, response::IntoResponse};
+use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
+use crate::extract::Json;
 use crate::state::AppState;
 
 /// 会话 cookie 名。

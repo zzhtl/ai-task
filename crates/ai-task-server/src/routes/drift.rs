@@ -5,11 +5,11 @@
 
 use ai_task_core::drift;
 use ai_task_proto::RunId;
-use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
+use crate::extract::{Json, Path, Query};
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]

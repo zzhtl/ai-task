@@ -5,18 +5,21 @@
    * 这个系统里最常做的事是"找到某个 run / 某个任务"，而它们的名字是人起的、
    * id 是 UUID。靠点导航要三四次点击，靠搜索是一次。
    *
-   * 结果是**实时拉的**，不是预加载的静态列表：任务和 run 一直在变。
+   * 每次打开面板拉一次最新的任务和 run，之后只在本地过滤。
    */
   import { api } from '$api/client';
+  import { listAllTasks } from '$api/runs';
   import type { Page } from '$api/types/Page';
-  import type { TaskSummary } from '$api/types/TaskSummary';
   import type { RunSummary } from '$api/types/RunSummary';
+  import { theme } from './theme.svelte';
 
   let { onclose, onnavigate }: { onclose: () => void; onnavigate: (href: string) => void } =
     $props();
 
   interface Item {
-    href: string;
+    /** 跳转类条目的目标。动作类条目没有它，走 `run`。 */
+    href?: string;
+    run?: () => void;
     label: string;
     hint?: string;
     kind: string;
@@ -31,8 +34,15 @@
     { href: '/hosts', label: '主机', hint: '加 SSH 机器', kind: '导航' },
     { href: '/rules', label: '规则与策略', kind: '导航' },
     { href: '/users', label: '用户', kind: '导航' },
-    { href: '/audit', label: '审计', hint: '谁做了什么', kind: '导航' }
+    { href: '/audit', label: '审计', hint: '谁做了什么', kind: '导航' },
+    {
+      run: () => theme.toggle(),
+      label: '切换深色 / 浅色',
+      kind: '动作'
+    }
   ];
+
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
   let query = $state('');
   let dynamic = $state<Item[]>([]);
@@ -50,16 +60,21 @@
     input?.focus();
   });
 
+  // 打开时拉一次。之前是每敲一个键就重拉两个接口——既浪费，响应乱序时还会
+  // 显示上一个关键词的结果。任务和 run 在面板开着的这几秒里变不了多少。
+  let taskIds = new Set<string>();
   $effect(() => {
-    // 任务和 run 一直在变，每次开面板都重拉一次
-    void query;
+    let cancelled = false;
     Promise.all([
+      listAllTasks().catch(() => []),
       // 用 ts-rs 生成的类型，不是内联的匿名结构：后端改了字段这里才会编译报错
-      api<Page<TaskSummary>>('/api/v1/tasks?limit=50').catch(() => ({ items: [] })),
-      api<Page<RunSummary>>('/api/v1/runs?limit=20').catch(() => ({ items: [] }))
+      api<Page<RunSummary>>('/api/v1/runs?limit=20').catch(() => ({ items: [] as RunSummary[] }))
     ]).then(([tasks, runs]) => {
+      if (cancelled) return;
+      taskIds = new Set(tasks.map((t) => t.id));
+      const names = new Map(tasks.map((t) => [t.id, t.name]));
       dynamic = [
-        ...tasks.items.map((t) => ({
+        ...tasks.map((t) => ({
           href: `/tasks/${t.id}`,
           label: t.name,
           hint: t.id.slice(0, 8),
@@ -67,22 +82,42 @@
         })),
         ...runs.items.map((r) => ({
           href: `/runs/${r.id}`,
-          label: `${tasks.items.find((t) => t.id === r.task_id)?.name ?? 'run'} · ${r.id.slice(0, 8)}`,
+          label: `${names.get(r.task_id) ?? 'run'} · ${r.id.slice(0, 8)}`,
           hint: r.status,
           kind: '执行'
         }))
       ];
     });
+    return () => {
+      cancelled = true;
+    };
   });
 
   const results = $derived.by(() => {
     const all = [...STATIC, ...dynamic];
     const q = query.trim().toLowerCase();
     if (!q) return all.slice(0, 12);
+    // 贴进来一个完整的 id：本地列表里只有最近 20 次执行，更早的只能按 id 直接去。
+    // 认得出是任务就先给任务，否则先给执行记录
+    if (UUID.test(q)) {
+      const direct: Item[] = [
+        { href: `/runs/${q}`, label: `打开执行记录 ${q.slice(0, 8)}`, kind: '执行' },
+        { href: `/tasks/${q}`, label: `打开任务 ${q.slice(0, 8)}`, kind: '任务' }
+      ];
+      return taskIds.has(q) ? direct.reverse() : direct;
+    }
     return all
       .filter((i) => `${i.label} ${i.hint ?? ''} ${i.kind}`.toLowerCase().includes(q))
       .slice(0, 12);
   });
+
+  function choose(item: Item) {
+    if (item.href) onnavigate(item.href);
+    else {
+      item.run?.();
+      onclose();
+    }
+  }
 
   $effect(() => {
     // 结果变了就把光标拉回顶部，免得停在一个已经不存在的行上
@@ -100,7 +135,7 @@
       cursor = (cursor - 1 + results.length) % Math.max(results.length, 1);
     } else if (event.key === 'Enter' && results[cursor]) {
       event.preventDefault();
-      onnavigate(results[cursor].href);
+      choose(results[cursor]);
     }
   }
 </script>
@@ -128,13 +163,13 @@
   />
   <!-- 焦点始终留在输入框里，选中项靠 aria-activedescendant 播报 -->
   <ul id="cmdk-results" role="listbox" aria-label="搜索结果">
-    {#each results as item, i (item.href + item.label)}
+    {#each results as item, i (item.kind + (item.href ?? '') + item.label)}
       <li id="cmdk-{i}" role="option" aria-selected={i === cursor}>
         <button
           tabindex="-1"
           class:on={i === cursor}
           onmouseenter={() => (cursor = i)}
-          onclick={() => onnavigate(item.href)}
+          onclick={() => choose(item)}
         >
           <span class="kind">{item.kind}</span>
           <span class="label">{item.label}</span>

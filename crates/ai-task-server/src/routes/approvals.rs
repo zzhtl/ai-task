@@ -6,11 +6,12 @@
 
 use ai_task_proto::{ApprovalId, Page};
 use ai_task_store::DecisionOutcome;
-use axum::extract::{Path, State};
-use axum::{Json, response::IntoResponse};
+use axum::extract::State;
+use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
+use crate::extract::{Json, Path};
 use crate::state::AppState;
 
 #[derive(Debug, Serialize)]
@@ -90,9 +91,9 @@ pub async fn decide(
             state.workspace_id,
             ApprovalId(id),
             body.approved,
-            // M5 还没接认证，决策人先留空。事件日志里已经记下了这次决策，
-            // 接上认证后这里换成会话里的 user id。
-            None,
+            // 事后要能回答"这次危险操作是谁点的头"。没开认证时拿不到人，只能留空——
+            // 界面据此显示原因而不是决策人，不能把空值当成"超时"。
+            crate::middleware::rbac::current_user(),
             body.reason.as_deref(),
         )
         .await?;

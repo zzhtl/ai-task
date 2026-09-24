@@ -5,8 +5,9 @@
    * 每行要回答的是「这个任务什么时候会自己跑、上次跑得怎么样」——
    * 光列名字和 id 的列表，看完还得再点进去才知道有没有配定时。
    */
+  import { session } from '$lib/auth/session.svelte';
   import { goto } from '$app/navigation';
-  import { listTasks, listRuns, triggerRun, newIdempotencyKey } from '$api/runs';
+  import { listAllTasks, listRuns, triggerRun, newIdempotencyKey } from '$api/runs';
   import { api, describeError, ignoreForbidden } from '$api/client';
   import { resource } from '$api/resource.svelte';
   import { listSchedules, type Schedule } from '$api/models';
@@ -23,12 +24,14 @@
 
   let busy = $state<string | null>(null);
   let query = $state('');
+  /** viewer 只能看：写操作的按钮灰掉并说明原因，而不是点了再弹 403。 */
+  const canOperate = $derived(session.can('operator'));
 
   // 三个 key 全站共享：任务列表和命令面板、审批页是同一份。
   // 原来这里每 5 秒把 200 条完整 run 拉回来，只为在每一行里找"上次执行"。
   const tasksRes = resource<TaskSummary[]>(
     'tasks',
-    (signal) => listTasks(signal).then((page) => page.items),
+    (signal) => listAllTasks(signal),
     { pollMs: 5000 }
   );
   const schedulesRes = resource<Schedule[]>(
@@ -172,7 +175,7 @@
   {/snippet}
   {#snippet actions()}
     <input class="search" bind:value={query} placeholder="按名称筛选" type="search" />
-    <a class="btn btn-primary" href="/tasks/new">新建任务</a>
+    {#if canOperate}<a class="btn btn-primary" href="/tasks/new">新建任务</a>{/if}
   {/snippet}
 </PageHeader>
 
@@ -240,26 +243,28 @@
               <div class="row">
                 <button
                   class="btn-sm"
-                  disabled={busy === task.id || !task.enabled}
-                  title={task.enabled ? '立即执行一次' : '任务已停用，先在详情页启用'}
+                  disabled={busy === task.id || !task.enabled || !canOperate}
+                  title={!canOperate ? '需要 operator 权限' : task.enabled ? '立即执行一次' : '任务已停用，先在详情页启用'}
                   onclick={(e) => {
                     e.stopPropagation();
                     void run(task);
                   }}>运行</button
                 >
-                <a
-                  class="btn btn-ghost btn-sm btn-icon"
-                  href="/tasks/new?id={task.id}"
-                  title="编辑"
-                  aria-label="编辑"
-                  onclick={(e) => e.stopPropagation()}
-                >
-                  <Icon name="pencil" />
-                </a>
+                {#if canOperate}
+                  <a
+                    class="btn btn-ghost btn-sm btn-icon"
+                    href="/tasks/new?id={task.id}"
+                    title="编辑"
+                    aria-label="编辑"
+                    onclick={(e) => e.stopPropagation()}
+                  >
+                    <Icon name="pencil" />
+                  </a>
+                {/if}
                 <button
                   class="btn-ghost btn-sm btn-icon danger"
-                  disabled={busy === task.id}
-                  title="删除任务"
+                  disabled={busy === task.id || !canOperate}
+                  title={canOperate ? '删除任务' : '需要 operator 权限'}
                   aria-label="删除任务"
                   onclick={(e) => {
                     e.stopPropagation();
@@ -283,7 +288,7 @@
     hint="按顺序列出步骤：让 AI 做一件事、跑一条命令、停下来等人确认。每一步都能指定在哪台机器上跑。"
   >
     {#snippet action()}
-      <a class="btn btn-primary" href="/tasks/new">新建任务</a>
+      {#if canOperate}<a class="btn btn-primary" href="/tasks/new">新建任务</a>{/if}
     {/snippet}
   </Empty>
 {/if}

@@ -6,10 +6,10 @@
 //! 这里一次算完，响应体是常数级的。
 
 use ai_task_proto::{Overview, OverviewQuery};
-use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::State;
 
 use crate::error::AppError;
+use crate::extract::{Json, Query};
 use crate::state::AppState;
 
 /// 列表长度上限。首页只是"现在怎么样"，要翻记录去 /runs。

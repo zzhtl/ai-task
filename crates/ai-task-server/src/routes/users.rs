@@ -5,12 +5,13 @@
 
 use ai_task_proto::{FieldError, Page, UserId};
 use ai_task_store::{NewUser, Role, UserUpdate};
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
-use axum::{Json, response::IntoResponse};
+use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
+use crate::extract::{Json, Path};
 use crate::state::AppState;
 
 #[derive(Debug, Serialize)]

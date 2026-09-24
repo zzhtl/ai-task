@@ -9,6 +9,7 @@
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
   import { api, describeError, ignoreForbidden } from '$api/client';
+  import { session } from '$lib/auth/session.svelte';
   import { resource, invalidate } from '$api/resource.svelte';
   import { subscribeRunEvents, type EventStream } from '$api/events';
   import { cancelRun, deleteRun, getRun, triggerRun, newIdempotencyKey } from '$api/runs';
@@ -41,6 +42,8 @@
   // 终态到了就把 run 概要刷新一次，拿到最终成本和耗时
   $effect(() => {
     if (!runId) return;
+    // 会话过期时 EventSource 被 401 永久关掉；重新登录后 epoch 变了，这里重新订阅一遍
+    void session.epoch;
     events = [];
     getRun(runId)
       .then((r) => (run = r))
@@ -244,7 +247,7 @@
       case 'policy_decided': return `策略 ${b.effect}：${b.reason}`;
       case 'usage': return `${b.model} · 入 ${b.input_tokens} / 出 ${b.output_tokens} · $${b.cost_usd}`;
       case 'approval_requested': return `等待审批：${b.title}`;
-      case 'approval_decided': return `审批${b.approved ? '通过' : '拒绝'}${b.decided_by ? `（${b.decided_by}）` : '（超时）'}`;
+      case 'approval_decided': return `审批${b.approved ? '通过' : '拒绝'}${b.decided_by ? `（${b.decided_by}）` : ''}${b.reason ? `：${b.reason}` : ''}`;
       case 'log': return b.message;
       default: return JSON.stringify(b);
     }
@@ -277,11 +280,11 @@
     {#if run}
       <Dropdown label="更多" disabled={busy}>
         <a href="/tasks/{run.task_id}" role="menuitem">看任务定义</a>
-        <button onclick={again}>
+        <button onclick={again} disabled={!session.can('operator')}>
           再跑一次
           <span class="hint">{run.dry_run ? '同样是影子执行' : '同一个任务，新的一次 run'}</span>
         </button>
-        {#if isTerminal(run.status)}
+        {#if isTerminal(run.status) && session.can('operator')}
           <hr />
           <button class="danger" onclick={() => (confirmingDelete = true)}>
             删除这条记录
@@ -289,7 +292,7 @@
           </button>
         {/if}
       </Dropdown>
-      {#if !isTerminal(run.status)}
+      {#if !isTerminal(run.status) && session.can('operator')}
         <button class="btn-danger" onclick={() => (confirmingCancel = true)} disabled={busy}>取消执行</button>
       {/if}
     {/if}

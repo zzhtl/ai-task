@@ -12,6 +12,28 @@ export function listTasks(signal?: AbortSignal): Promise<Page<TaskSummary>> {
   return api('/api/v1/tasks', { signal });
 }
 
+/** 翻页取全时最多拿这么多。任务是人配的，到这个量级说明该先清理了。 */
+export const ALL_TASKS_CAP = 1000;
+
+/**
+ * 全部任务（按游标翻到底，封顶 [`ALL_TASKS_CAP`]）。
+ *
+ * 以前各处只拿第一页（默认 50 条）还把游标扔了：第 51 个任务在任务页搜不到、
+ * 执行记录的任务筛选里没有、审批卡上显示不出任务名——而界面上看不出被截断了。
+ */
+export async function listAllTasks(signal?: AbortSignal): Promise<TaskSummary[]> {
+  const out: TaskSummary[] = [];
+  let cursor: string | null = null;
+  do {
+    const params = new URLSearchParams({ limit: '200' });
+    if (cursor) params.set('cursor', cursor);
+    const page: Page<TaskSummary> = await api(`/api/v1/tasks?${params}`, { signal });
+    out.push(...page.items);
+    cursor = page.next_cursor ?? null;
+  } while (cursor && out.length < ALL_TASKS_CAP);
+  return out;
+}
+
 /**
  * 幂等键。
  *

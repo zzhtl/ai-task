@@ -33,15 +33,25 @@ export type Block =
       ok: boolean | null;
       preview: string | null;
       durationMs: number | null;
+      /** run 已经结束而这次调用始终没等到结果（被取消、被中断）。不能一直显示"执行中"。 */
+      ended: boolean;
     }
   | {
       kind: 'gate';
       seq: number;
+      /** 决策事件靠它找回这张卡。按位置找会配错：同一步里可能挂着好几张。 */
+      approvalId: string;
       title: string;
       /** `null` = 还在等人。 */
       approved: boolean | null;
+      /**
+       * 谁做的决定。**空值不等于超时**：没开认证时人工决策也拿不到名字，
+       * 是不是超时看 `reason`。
+       */
       by: string | null;
       reason: string | null;
+      /** run 已经结束而这张卡始终没有结论。 */
+      ended: boolean;
     }
   | { kind: 'note'; seq: number; level: string; text: string }
   | { kind: 'retry'; seq: number; attempt: number; delayMs: number; reason: string; fedBack: boolean }
@@ -83,6 +93,8 @@ export function groupProcess(events: RunEvent[], names: Record<string, string>):
   const nodes = new Map<string, NodeRun>();
   /** tool_use_id → 那张卡，好让后到的判决和结果填进同一张。 */
   const tools = new Map<string, Extract<Block, { kind: 'tool' }>>();
+  /** approval_id → 那张审批卡。 */
+  const gates = new Map<string, Extract<Block, { kind: 'gate' }>>();
 
   const nodeOf = (key: string): NodeRun => {
     let node = nodes.get(key);
@@ -117,7 +129,27 @@ export function groupProcess(events: RunEvent[], names: Record<string, string>):
   for (const event of events) {
     const b = event.body;
     const seq = event.seq;
-    // run 级事件（入队 / 开始 / 结束）在页头已经写着了，这里只讲节点里发生的事
+
+    // 审批结论按 approval_id 找卡，不看它挂在哪个节点下：策略 ask 的结论
+    // 曾经写成 run 级事件（没有 node_key），按节点找会找不到，卡片永远停在"等人点头"。
+    // 同一个结论可能被写了两次（hook 重试），按 id 覆盖是幂等的。
+    if (b.kind === 'approval_decided') {
+      const gate = gates.get(b.approval_id);
+      if (gate) {
+        gate.approved = b.approved;
+        gate.by = b.decided_by ?? null;
+        gate.reason = b.reason ?? null;
+        continue;
+      }
+    }
+    // run 结束时还没有结论的，不能一直显示成"等人点头 / 执行中"
+    if (b.kind === 'run_finished') {
+      for (const gate of gates.values()) if (gate.approved === null) gate.ended = true;
+      for (const tool of tools.values()) if (tool.ok === null) tool.ended = true;
+      continue;
+    }
+
+    // 其余 run 级事件（入队 / 开始）在页头已经写着了，这里只讲节点里发生的事
     if (!event.node_key) continue;
     const node = nodeOf(event.node_key);
 
@@ -175,7 +207,8 @@ export function groupProcess(events: RunEvent[], names: Record<string, string>):
           reason: null,
           ok: null,
           preview: null,
-          durationMs: null
+          durationMs: null,
+          ended: false
         };
         tools.set(b.tool_use_id, card);
         node.blocks.push(card);
@@ -214,10 +247,23 @@ export function groupProcess(events: RunEvent[], names: Record<string, string>):
         break;
       }
 
-      case 'approval_requested':
-        push(node, { kind: 'gate', seq, title: b.title, approved: null, by: null, reason: null });
+      case 'approval_requested': {
+        const gate: Extract<Block, { kind: 'gate' }> = {
+          kind: 'gate',
+          seq,
+          approvalId: b.approval_id,
+          title: b.title,
+          approved: null,
+          by: null,
+          reason: null,
+          ended: false
+        };
+        gates.set(b.approval_id, gate);
+        node.blocks.push(gate);
         break;
+      }
       case 'approval_decided': {
+        // 走到这里说明 id 对不上请求（事件流不完整）：退回到"这一步里最近一张没结论的卡"
         const gate = [...node.blocks].reverse().find((x) => x.kind === 'gate' && x.approved === null);
         if (gate && gate.kind === 'gate') {
           gate.approved = b.approved;

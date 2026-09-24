@@ -8,7 +8,7 @@
   import { describeError, ignoreForbidden } from '$api/client';
   import { resource, invalidate } from '$api/resource.svelte';
   import { listApprovals, type Approval } from '$api/models';
-  import { listRuns, listTasks } from '$api/runs';
+  import { listRuns, listAllTasks } from '$api/runs';
   import type { RunSummary } from '$api/types/RunSummary';
   import type { TaskSummary } from '$api/types/TaskSummary';
   import ApprovalCard from '$lib/approvals/ApprovalCard.svelte';
@@ -38,7 +38,7 @@
   // 任务列表和 /tasks、命令面板共享同一个 key，所以这里不额外产生请求
   const tasks = resource<TaskSummary[]>(
     'tasks',
-    (signal) => listTasks(signal).then((page) => page.items),
+    (signal) => listAllTasks(signal),
     { ttlMs: 30_000 }
   );
 

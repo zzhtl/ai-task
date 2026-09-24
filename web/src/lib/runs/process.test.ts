@@ -125,3 +125,56 @@ describe('执行过程分组', () => {
     expect(nodes[0].blocks[0]).toMatchObject({ kind: 'gate', approved: false, by: null });
   });
 });
+
+describe('审批卡', () => {
+  const requested = (node: string, id: string) =>
+    ev(node, { kind: 'approval_requested', approval_id: id, title: '确认', intent: {}, expires_at: '2026-09-09T10:00:00Z' });
+
+  test('策略 ask 的结论是 run 级事件时，按 approval_id 找回那张卡', () => {
+    // 老数据里策略 ask 的 approval_decided 没有 node_key，按节点找会找不到
+    const nodes = groupProcess(
+      [
+        requested('a', 'ap1'),
+        ev(null, { kind: 'approval_decided', approval_id: 'ap1', approved: false, reason: '不许动生产库' })
+      ],
+      {}
+    );
+    const gate = nodes[0].blocks[0] as Extract<Block, { kind: 'gate' }>;
+    expect(gate).toMatchObject({ approved: false, reason: '不许动生产库', by: null });
+  });
+
+  test('同一步里挂着两张卡时，结论落到对的那张上', () => {
+    const nodes = groupProcess(
+      [
+        requested('a', 'ap1'),
+        requested('a', 'ap2'),
+        ev('a', { kind: 'approval_decided', approval_id: 'ap1', approved: true, decided_by: '张三' })
+      ],
+      {}
+    );
+    const [first, second] = nodes[0].blocks as Array<Extract<Block, { kind: 'gate' }>>;
+    expect(first).toMatchObject({ approved: true, by: '张三' });
+    expect(second.approved).toBeNull();
+  });
+
+  test('结论被写了两次（hook 重试）也只是同一个结论', () => {
+    const decided = { kind: 'approval_decided', approval_id: 'ap1', approved: true, decided_by: '张三' };
+    const nodes = groupProcess([requested('a', 'ap1'), ev('a', decided), ev(null, decided)], {});
+    expect(nodes[0].blocks).toHaveLength(1);
+    expect(nodes[0].blocks[0]).toMatchObject({ approved: true, by: '张三' });
+  });
+
+  test('run 结束时还没结论的卡和没等到结果的工具调用都收口', () => {
+    const nodes = groupProcess(
+      [
+        requested('a', 'ap1'),
+        ev('a', { kind: 'tool_requested', tool_use_id: 't1', tool: 'Bash', input: {} }),
+        ev(null, { kind: 'run_finished', status: 'cancelled', cost_usd: '0' })
+      ],
+      {}
+    );
+    const [gate, tool] = nodes[0].blocks as [Extract<Block, { kind: 'gate' }>, Extract<Block, { kind: 'tool' }>];
+    expect(gate).toMatchObject({ approved: null, ended: true });
+    expect(tool).toMatchObject({ ok: null, ended: true });
+  });
+});

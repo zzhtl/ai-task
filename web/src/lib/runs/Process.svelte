@@ -111,7 +111,9 @@
                   {/if}
                   <span class="spacer"></span>
                   {#if block.durationMs !== null}<span class="faint">{(block.durationMs / 1000).toFixed(1)}s</span>{/if}
-                  {#if block.ok === null && block.effect !== 'deny'}<span class="faint">执行中…</span>{/if}
+                  {#if block.ok === null && block.effect !== 'deny'}
+                    <span class="faint">{block.ended ? '没有结果（run 已结束）' : '执行中…'}</span>
+                  {/if}
                 </div>
                 <pre class="mono arg">{brief(block.input)}</pre>
                 {#if block.effect === 'deny'}
@@ -127,11 +129,12 @@
                 <p>
                   {block.title}
                   {#if block.approved === null}
-                    <span class="tag">等人点头</span>
+                    <span class="tag">{block.ended ? '没有结论（run 已结束）' : '等人点头'}</span>
                   {:else if block.approved}
                     <span class="tag ok">已通过{block.by ? `（${block.by}）` : ''}</span>
                   {:else}
-                    <span class="tag danger">已拒绝{block.by ? `（${block.by}）` : '（超时）'}</span>
+                    <!-- 决策人为空不代表超时：没开认证时人工拒绝也没有名字。是不是超时看原因 -->
+                    <span class="tag danger">已拒绝{block.by ? `（${block.by}）` : ''}</span>
                   {/if}
                   {#if block.reason}<em>{block.reason}</em>{/if}
                 </p>

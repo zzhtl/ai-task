@@ -16,6 +16,7 @@ import type { DagSpec } from '$api/types/DagSpec';
 interface RawRef {
   from?: string;
   node?: string;
+  path?: string;
 }
 
 /** 一步做什么。 */
@@ -46,6 +47,13 @@ export const REACH_TOOLS: Record<Reach, string[]> = {
 export interface Step {
   /** 仅用于列表渲染的稳定 key，不进 spec。 */
   uid: string;
+  /**
+   * 原节点的 key。新建的步骤没有，保存时按位置生成一个不冲突的。
+   *
+   * **不能按位置重新编号**：用接口建的任务 key 可能是 `probe` / `fix`，别的节点的输入、
+   * 边的条件、JSONPath 都按 key 指着它。改名等于把这些引用全部打断。
+   */
+  key?: string;
   kind: StepKind;
   /** 这一步叫什么。会成为节点 key 的来源，也显示在画布上。 */
   title: string;
@@ -70,7 +78,8 @@ export interface Step {
    * 收得更紧的白名单归到"只读"档再按档位写回去，等于**悄悄放宽了权限**。
    */
   tools: string[];
-  timeoutS: number;
+  /** 超时（秒）。`null` = 不设，交给引擎默认值。审批步骤是等人的时长。 */
+  timeoutS: number | null;
   skills: string[];
   /**
    * 这一步能看到**哪几步**的结果，按步骤 uid 记（uid 在拖动排序时不变，序号会变）。
@@ -94,6 +103,11 @@ export interface Composition {
   steps: Step[];
   /** 整个任务的花费上限（美元）。`null` 表示不设。 */
   budgetUsd: string | null;
+  /**
+   * 原始 spec。保存时以它为底：`input_schema`、整体的 `timeout_s` 这些编辑器不管的字段
+   * 原样带回。以前是从零拼 `{nodes, edges, budget_usd}`，界面一保存它们就没了。
+   */
+  rawSpec?: Record<string, unknown>;
 }
 
 /** 工具白名单 → 权限档位。认不出来就按最保守的算。 */
@@ -136,19 +150,24 @@ export const DEFAULTS: Composition = {
 };
 
 /**
- * 步骤 → 节点 key。
+ * 每一步的节点 key：原有的原样保留，新步骤从 `step-1` 起找第一个没被占用的。
  *
  * key 会进 JSONPath 和文件路径，字符集被后端限死在 `[A-Za-z0-9_-]`。
  * 标题是中文的居多，所以不拿标题当 key——用序号，稳定且永远合法。
  */
-function keyOf(index: number): string {
-  return `step-${index + 1}`;
-}
-
-/** `step-3` → 2。认不出来给 -1，调用方据此忽略这条引用。 */
-function indexOfKey(key: string | undefined): number {
-  const at = Number(key?.replace(/^step-/, ''));
-  return Number.isFinite(at) ? at - 1 : -1;
+function assignKeys(steps: Step[]): string[] {
+  const taken = new Set(steps.map((s) => s.key).filter((k): k is string => !!k));
+  let n = 0;
+  return steps.map((step) => {
+    if (step.key) return step.key;
+    let key: string;
+    do {
+      n += 1;
+      key = `step-${n}`;
+    } while (taken.has(key));
+    taken.add(key);
+    return key;
+  });
 }
 
 /** 编辑器管不到、但节点必须有的东西的默认值。只在原节点没有时才填。 */
@@ -159,6 +178,7 @@ const DEFAULT_RETRY = {
   feed_error_to_model: true
 };
 const DEFAULT_SHELL_LIMITS = { memory_mib: 1024, cpu_percent: 200, pids_max: 128 };
+const DEFAULT_APPROVAL_TIMEOUT_S = 900;
 const CONFIG_KIND: Record<StepKind, string> = { ai: 'ai', shell: 'shell', approval: 'approval' };
 
 /**
@@ -169,32 +189,41 @@ const CONFIG_KIND: Record<StepKind, string> = { ai: 'ai', shell: 'shell', approv
  * 会在保存时消失得无声无息。
  */
 export function toSpec(comp: Composition): DagSpec {
+  const keys = assignKeys(comp.steps);
   const nodes = comp.steps.map((step, i) => {
     const raw = step.raw ?? {};
     const node: Record<string, unknown> = { ...raw };
-    node.key = keyOf(i);
-    node.name = step.title || keyOf(i);
-    node.timeout_s = step.timeoutS;
+    node.key = keys[i];
+    node.name = step.title || keys[i];
     node.retry ??= DEFAULT_RETRY;
     node.on_failure ??= 'fail_fast';
 
     // 换了步骤类型就不能再沿用旧 config：ai 的字段留在 shell 节点上是垃圾，
     // 而且后端 deny_unknown_fields 会直接 422
     const rawConfig = (raw.config as Record<string, unknown> | undefined) ?? {};
-    const keep = rawConfig.kind === CONFIG_KIND[step.kind] ? { ...rawConfig } : {};
+    const sameKind = rawConfig.kind === CONFIG_KIND[step.kind];
+    const keep = sameKind ? { ...rawConfig } : {};
+
+    // 节点的墙钟上限。审批节点原来没写这一项的话别补：它的等待时长在 config 里，
+    // 补上一个 node.timeout_s 等于凭空加了第二道时限。
+    const mirrorTimeout = step.kind !== 'approval' || !step.raw || 'timeout_s' in raw;
+    if (step.timeoutS != null && mirrorTimeout) node.timeout_s = step.timeoutS;
+    else if (step.timeoutS == null) delete node.timeout_s;
 
     if (step.kind === 'approval') {
       const config: Record<string, unknown> = {
         ...keep,
         kind: 'approval',
         title: step.title || '需要确认',
-        timeout_s: step.timeoutS
+        timeout_s: step.timeoutS ?? DEFAULT_APPROVAL_TIMEOUT_S
       };
       config.on_timeout ??= 'deny';
       node.config = config;
     } else if (step.kind === 'shell') {
       node.config = { ...keep, kind: 'shell', command: step.body };
-      node.limits ??= DEFAULT_SHELL_LIMITS;
+      // 默认上限只给**新出现**的 shell 步骤。原来没设上限的节点（接口建的）保持不设：
+      // 打开再保存就凭空多出 1 GiB 内存上限，是在改它的行为。
+      if (!sameKind) node.limits ??= DEFAULT_SHELL_LIMITS;
     } else {
       const config: Record<string, unknown> = {
         ...keep,
@@ -202,7 +231,8 @@ export function toSpec(comp: Composition): DagSpec {
         prompt: step.body,
         executor: step.runner.kind === 'host_cli' ? 'host_cli' : 'claude_code'
       };
-      config.max_turns ??= 30;
+      // 同上：只给新的 AI 步骤一个轮数上限，老节点没设就保持没设
+      if (!sameKind) config.max_turns ??= 30;
       // 关掉某个开关时必须真的删掉那个键，留着旧值就是"界面上关了、实际还开着"
       if (step.runner.kind === 'host_cli') config.cli = step.runner.cli;
       else delete config.cli;
@@ -221,8 +251,8 @@ export function toSpec(comp: Composition): DagSpec {
     // 把选中的那几步的结果喂给这一步。**不串起来的话，"按顺序"就没有意义**
     // ——几个步骤会变成几个互不相干的任务。
     //
-    // 指向节点的输入整个由编辑器接管（先清空再按 `sees` 重建），免得步骤被
-    // 挪动之后还指着原来的上游；literal / run_input 那些编辑器管不到的原样留着。
+    // 指向节点的输入由编辑器接管（按 `sees` 重建），免得步骤被挪动之后还指着
+    // 已经排到后面的上游；literal / run_input 那些编辑器管不到的原样留着。
     const rawInputs = (raw.inputs as Record<string, RawRef> | undefined) ?? {};
     const inputs: Record<string, unknown> = Object.fromEntries(
       Object.entries(rawInputs).filter(([, ref]) => ref?.from !== 'node')
@@ -231,14 +261,18 @@ export function toSpec(comp: Composition): DagSpec {
       const at = comp.steps.findIndex((s) => s.uid === uid);
       // 只能看更早的步骤。看后面的在一条直线上就是循环依赖
       if (at < 0 || at >= i) continue;
-      const key = keyOf(at);
-      // 名字会成为提示词里的小标题。原来就指着同一个节点的输入沿用原名，
-      // 免得只改个标题就把模型看到的措辞换掉了
-      const existing = Object.entries(rawInputs).find(
-        ([, ref]) => ref?.from === 'node' && ref.node === key
-      );
-      const name = existing ? existing[0] : `第${at + 1}步：${comp.steps[at].title || key}`;
-      inputs[name] = { from: 'node', node: key, path: '$' };
+      const target = comp.steps[at];
+      // 原来就指着这一步的输入**整条沿用**：path 可能只取了上游输出的一部分
+      // （`$.summary`），改成 `$` 等于让这一步突然看见全部输出；名字是提示词里的
+      // 小标题，改了模型看到的措辞就变了。同一个上游可能被取了好几段，一条都不能丢。
+      const kept = target.key
+        ? Object.entries(rawInputs).filter(([, ref]) => ref?.from === 'node' && ref.node === target.key)
+        : [];
+      if (kept.length) {
+        for (const [name, ref] of kept) inputs[name] = ref;
+      } else {
+        inputs[`第${at + 1}步：${target.title || keys[at]}`] = { from: 'node', node: keys[at], path: '$' };
+      }
     }
     if (Object.keys(inputs).length) node.inputs = inputs;
     else delete node.inputs;
@@ -247,13 +281,14 @@ export function toSpec(comp: Composition): DagSpec {
   });
 
   const edges = comp.steps.slice(1).map((_, i) => ({
-    from: keyOf(i),
-    to: keyOf(i + 1),
+    from: keys[i],
+    to: keys[i + 1],
     when: { op: 'on_success' }
   }));
 
-  const spec: Record<string, unknown> = { nodes, edges };
+  const spec: Record<string, unknown> = { ...(comp.rawSpec ?? {}), nodes, edges };
   if (comp.budgetUsd) spec.budget_usd = comp.budgetUsd;
+  else delete spec.budget_usd;
   return spec as unknown as DagSpec;
 }
 
@@ -282,6 +317,8 @@ export function fromSpec(spec: DagSpec): Composition | null {
   }
 
   const steps: Step[] = [];
+  /** 节点 key → 步骤 uid。输入按 key 指向上游，`sees` 按 uid 记。 */
+  const uidOfKey = new Map<string, string>();
   for (const node of nodes) {
     const config = node.config as Record<string, unknown> | undefined;
     if (!config) return null;
@@ -295,8 +332,10 @@ export function fromSpec(spec: DagSpec): Composition | null {
     if (kind === 'ai' && config.executor === 'api') return null;
 
     counter += 1;
+    const uid = `s${counter}-${node.key as string}`;
     steps.push({
-      uid: `s${counter}-${node.key as string}`,
+      uid,
+      key: node.key as string,
       kind,
       // 审批节点有两个标题：node.name 是画布标签，config.title 是**审批卡片上
       // 给人看的那句话**。编辑器只有一个标题框，所以以后者为准——被覆盖掉
@@ -314,20 +353,31 @@ export function fromSpec(spec: DagSpec): Composition | null {
           : { kind: 'center' },
       model: (config.model as string) ?? null,
       tools: (config.tools as string[]) ?? [],
-      timeoutS: (node.timeout_s as number) ?? 600,
+      // 审批步骤的超时是"等人多久"，在 config 里；节点上那一项可能根本没写
+      timeoutS:
+        kind === 'approval'
+          ? ((config.timeout_s as number) ?? (node.timeout_s as number) ?? DEFAULT_APPROVAL_TIMEOUT_S)
+          : ((node.timeout_s as number | undefined) ?? null),
       skills: (config.skills as string[]) ?? [],
       // 指向节点的输入 → 看得见哪几步。steps 是按顺序建的，被引用的更早的
-      // 步骤此时已经在数组里了
-      sees: Object.values((node.inputs as Record<string, RawRef> | undefined) ?? {})
-        .filter((ref) => ref?.from === 'node')
-        .map((ref) => steps[indexOfKey(ref.node)]?.uid)
-        .filter((uid): uid is string => uid !== undefined),
+      // 步骤此时已经在表里了；同一个上游被取了几段也只算看见一次
+      sees: [
+        ...new Set(
+          Object.values((node.inputs as Record<string, RawRef> | undefined) ?? {})
+            .filter((ref) => ref?.from === 'node')
+            .map((ref) => uidOfKey.get(ref.node ?? ''))
+            .filter((u): u is string => u !== undefined)
+        )
+      ],
       raw: node
     });
+    uidOfKey.set(node.key as string, uid);
   }
 
+  const raw = spec as unknown as Record<string, unknown>;
   return {
     steps,
-    budgetUsd: ((spec as unknown as Record<string, unknown>).budget_usd as string) ?? null
+    budgetUsd: (raw.budget_usd as string) ?? null,
+    rawSpec: raw
   };
 }

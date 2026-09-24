@@ -2,13 +2,14 @@
 
 use ai_task_proto::{Page, RunId, RunSummary};
 use ai_task_store::RunRecord;
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
-use axum::{Json, response::IntoResponse};
+use axum::response::IntoResponse;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::error::AppError;
+use crate::extract::{Json, Path, Query};
 use crate::state::AppState;
 
 /// `GET /api/v1/runs` 的查询参数。
