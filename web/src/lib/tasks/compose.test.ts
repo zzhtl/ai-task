@@ -291,3 +291,45 @@ describe('编辑器管不到的东西，打开再保存也不能变', () => {
     expect(toSpec(comp) as unknown as Record<string, unknown>).not.toHaveProperty('budget_usd');
   });
 });
+
+describe('高级设置：重试、轮数、单步花费上限', () => {
+  type Node = Record<string, unknown> & {
+    retry: Record<string, unknown>;
+    config: Record<string, unknown>;
+  };
+  const nodesOf = (comp: Composition) => (toSpec(comp) as unknown as { nodes: Node[] }).nodes;
+
+  test('打开时读出来，改了写回去，清掉就删键', () => {
+    const comp = fromSpec(RICH) as Composition;
+    expect(comp.steps[0]).toMatchObject({ maxAttempts: 3, maxTurns: 6, budgetUsd: null });
+
+    comp.steps[0].maxAttempts = 2;
+    comp.steps[0].maxTurns = null;
+    comp.steps[0].budgetUsd = '0.2';
+    const [first] = nodesOf(comp);
+    // 只动次数，退避和回喂这些编辑器不管的照旧
+    expect(first.retry).toEqual({ max_attempts: 2, backoff_ms: 5000, backoff_factor: 3, feed_error_to_model: false });
+    expect(first.config).not.toHaveProperty('max_turns');
+    expect(first.config.budget_usd).toBe('0.2');
+
+    const again = fromSpec(toSpec(comp)) as Composition;
+    expect(again.steps[0]).toMatchObject({ maxAttempts: 2, maxTurns: null, budgetUsd: '0.2' });
+  });
+
+  test('轮数和单步上限只写进 AI 步骤', () => {
+    // shell 节点带着 max_turns 会被后端 deny_unknown_fields 拒掉
+    const shell = { ...newStep('shell'), body: 'df -h', budgetUsd: '0.1' };
+    const [node] = nodesOf({ steps: [shell], budgetUsd: null });
+    expect(node.config).toEqual({ kind: 'shell', command: 'df -h' });
+  });
+
+  test('新 AI 步骤默认 30 轮；从 shell 换成 AI 的也一样', () => {
+    const [fresh] = nodesOf({ steps: [{ ...newStep('ai'), body: '看看' }], budgetUsd: null });
+    expect(fresh.config.max_turns).toBe(30);
+
+    const comp = fromSpec(RICH) as Composition;
+    comp.steps[1].kind = 'ai';
+    comp.steps[1].body = '看看';
+    expect(nodesOf(comp)[1].config.max_turns).toBe(30);
+  });
+});

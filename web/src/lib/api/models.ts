@@ -6,6 +6,7 @@
 
 import { api } from './client';
 import type { Page } from './types/Page';
+import type { SchedulePreview } from './types/SchedulePreview';
 
 export interface AiCli {
   name: string;
@@ -114,6 +115,29 @@ const items = <T>(p: Promise<Page<T>>) => p.then((page) => page.items);
 export const listHosts = () => items(api<Page<Host>>('/api/v1/hosts'));
 export const listSchedules = (taskId?: string) =>
   items(api<Page<Schedule>>(taskId ? `/api/v1/schedules?task_id=${taskId}` : '/api/v1/schedules'));
+
+/** 编辑定时时的实时预览：接下来几次触发。表达式或时区不对是 422，字段是 cron / timezone。 */
+export const previewSchedule = (cron: string, timezone: string, count: number, signal?: AbortSignal) =>
+  api<SchedulePreview>(
+    `/api/v1/schedules/preview?${new URLSearchParams({ cron, timezone, count: String(count) })}`,
+    { signal }
+  );
+
+/** 新增和修改用同一份字段；修改是整体替换。 */
+export interface ScheduleInput {
+  task_id: string;
+  cron: string;
+  timezone: string;
+  misfire: string;
+  overlap: string;
+  jitter_s: number;
+  enabled: boolean;
+}
+
+export const saveSchedule = (input: ScheduleInput, id?: string) =>
+  id
+    ? api(`/api/v1/schedules/${id}`, { method: 'PUT', body: input })
+    : api('/api/v1/schedules', { method: 'POST', body: input });
 export const listApprovals = () => items(api<Page<Approval>>('/api/v1/approvals'));
 export const listRules = () => items(api<Page<Rule>>('/api/v1/rules'));
 export const listSkills = () => items(api<Page<Skill>>('/api/v1/skills'));

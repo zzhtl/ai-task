@@ -7,9 +7,11 @@
 
 export function scrollToNode(key: string): void {
   if (typeof document === 'undefined') return;
-  const target = document.querySelector(`[data-node="${CSS.escape(key)}"]`);
-  if (!target) return;
+  scrollToElement(document.querySelector(`[data-node="${CSS.escape(key)}"]`));
+}
 
+export function scrollToElement(target: Element | null): void {
+  if (!target) return;
   const reduce =
     typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
   target.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'center' });

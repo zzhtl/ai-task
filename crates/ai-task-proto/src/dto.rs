@@ -134,6 +134,22 @@ pub struct TaskSummary {
     /// 最近一次 run 的状态，列表页直接展示，省一次查询。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run: Option<RunSummary>,
+    /// 最近几次 run（最多 10 次），新的在前。列表页画成色块，一眼看出这个任务稳不稳。
+    ///
+    /// 和 `last_run` 一样**只有列表接口填**；详情、创建、更新的响应里没有。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_runs: Vec<RecentRun>,
+}
+
+/// 一次 run 最少的那点信息：够画一个色块，点进去能跳到它。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RecentRun {
+    pub id: RunId,
+    pub status: RunStatus,
+    /// 影子执行单独标出来：它是用来试提示词的，失败了不代表任务本身不稳。
+    pub dry_run: bool,
+    pub created_at: DateTime<Utc>,
 }
 
 /// `GET /api/v1/tasks/{id}` —— 带上当前版本的完整编排定义。
@@ -207,6 +223,37 @@ pub struct Schedule {
     /// 下一次触发时刻。调度器就是按这个字段领取的。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_fire_at: Option<DateTime<Utc>>,
+}
+
+/// `GET /api/v1/schedules/preview` 的查询参数。
+///
+/// 编辑定时时边敲边看：表达式写没写对，看接下来几次在什么时候最直接。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(deny_unknown_fields)]
+pub struct SchedulePreviewQuery {
+    /// 5 段（分 时 日 月 周）或 6 段（秒 分 时 日 月 周）。
+    pub cron: String,
+    /// IANA 时区名，如 `Asia/Shanghai`。
+    pub timezone: String,
+    /// 要看接下来几次，1–10，默认 5。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+}
+
+/// 接下来几次触发。表达式或时区不合法时接口返回 422，字段是 `cron` / `timezone`。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SchedulePreview {
+    pub fires: Vec<ScheduleFire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ScheduleFire {
+    pub at: DateTime<Utc>,
+    /// 按该时区的本地时间，形如 `2026-09-25 02:00:00 CST`。
+    pub local: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

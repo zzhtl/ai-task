@@ -1136,3 +1136,120 @@ db_test!(finishing_a_run_closes_its_pending_approvals, |f| {
     assert!(closed.decided_by.is_none(), "不是谁决定的，不能记在人头上");
     assert!(closed.reason.is_some_and(|r| r.contains("run 已结束")));
 });
+
+// 列表页的"最近几次"：每个任务最多取 N 条、新的在前、不带 inputs/output
+// （那两列常常是几 KB 的 TOAST 值，列表页用不上）。
+db_test!(
+    recent_runs_are_newest_first_capped_per_task_and_light,
+    |f| {
+        let (a, va) = f.seed_task().await;
+        let (b, vb) = f.seed_task().await;
+        let mut a_runs = Vec::new();
+        for minutes_ago in [40, 30, 20, 10] {
+            let run = run_with(&f, a, va, TriggerKind::Manual, None).await;
+            sqlx::query(
+                "UPDATE runs SET created_at = now() - make_interval(mins => $2) WHERE id = $1",
+            )
+            .bind(uuid::Uuid::from(run.id))
+            .bind(minutes_ago)
+            .execute(f.store.pool())
+            .await
+            .expect("改时间");
+            a_runs.push(run.id);
+        }
+        let b_run = run_with(&f, b, vb, TriggerKind::Schedule, None).await;
+
+        let recent = f
+            .store
+            .recent_runs_for(f.workspace, &[a, b], 3)
+            .await
+            .expect("取最近几次");
+        assert_eq!(
+            recent[&a].iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![a_runs[3], a_runs[2], a_runs[1]],
+            "新的在前，每个任务最多 3 条"
+        );
+        assert_eq!(
+            recent[&b].iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![b_run.id]
+        );
+        assert!(
+            recent
+                .values()
+                .flatten()
+                .all(|r| r.inputs.is_none() && r.output.is_none()),
+            "列表用不上 inputs / output，不该把它们拉回来"
+        );
+
+        let other = f.new_workspace().await;
+        assert!(
+            f.store
+                .recent_runs_for(other, &[a, b], 3)
+                .await
+                .expect("别的租户")
+                .is_empty()
+        );
+    }
+);
+
+// updated_at 曾经永远停在创建那一刻：改表达式、停用启用都不动它。
+db_test!(changing_a_schedule_moves_its_updated_at, |f| {
+    let (task, _) = f.seed_task().await;
+    let at = chrono::Utc::now() + chrono::Duration::hours(1);
+    let new = ai_task_store::NewSchedule {
+        workspace_id: f.workspace,
+        task_id: task,
+        cron: "0 2 * * *".into(),
+        timezone: "UTC".into(),
+        misfire: ai_task_proto::MisfirePolicy::FireOnce,
+        overlap: ai_task_proto::OverlapPolicy::Skip,
+        jitter_s: 0,
+        enabled: true,
+        next_fire_at: at,
+        next_claim_at: at,
+    };
+    let id = f.store.create_schedule(new.clone()).await.expect("建定时");
+    let updated_at = || async {
+        sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>(
+            "SELECT updated_at FROM schedules WHERE id = $1",
+        )
+        .bind(uuid::Uuid::from(id))
+        .fetch_one(f.store.pool())
+        .await
+        .expect("读 updated_at")
+    };
+    // 把基线挪到过去，免得同一毫秒里比不出先后
+    sqlx::query("UPDATE schedules SET updated_at = now() - interval '1 hour' WHERE id = $1")
+        .bind(uuid::Uuid::from(id))
+        .execute(f.store.pool())
+        .await
+        .expect("挪基线");
+    let before = updated_at().await;
+
+    let edited = ai_task_store::NewSchedule {
+        cron: "0 3 * * *".into(),
+        ..new
+    };
+    assert!(
+        f.store
+            .update_schedule(f.workspace, id, &edited)
+            .await
+            .expect("改定时")
+    );
+    let after_edit = updated_at().await;
+    assert!(after_edit > before, "改了表达式，updated_at 得跟着走");
+
+    sqlx::query("UPDATE schedules SET updated_at = now() - interval '1 hour' WHERE id = $1")
+        .bind(uuid::Uuid::from(id))
+        .execute(f.store.pool())
+        .await
+        .expect("挪基线");
+    let before = updated_at().await;
+    assert!(
+        f.store
+            .set_schedule_enabled(f.workspace, id, false)
+            .await
+            .expect("停用")
+    );
+    assert!(updated_at().await > before, "停用也是一次修改");
+});

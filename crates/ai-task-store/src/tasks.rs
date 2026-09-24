@@ -341,46 +341,55 @@ impl Store {
         .collect()
     }
 
-    /// 每个任务最近一次执行。
+    /// 每个任务最近 `per_task` 次执行，新的在前。列表页拿第一条当"上次执行"，
+    /// 全部拿来画"最近几次"的色块。
     ///
     /// **用 LATERAL 而不是"列完任务再逐个查"。** 后者就是教科书上的 N+1：
     /// 一页 50 个任务就是 51 次往返。LATERAL 里的子查询正好命中
     /// `runs_task_recent_idx (workspace_id, task_id, created_at DESC, id DESC)`，
-    /// 每个任务只取第一行就停。
-    pub async fn last_runs_for(
+    /// 每个任务取够 `per_task` 行就停。
+    ///
+    /// 只选摘要列，`inputs` / `output` 换成 NULL：列表页用不上，而 `output` 常常是
+    /// 几 KB 的 TOAST 值。实测 200 个任务 × 每个 500 次 run（堆按时间交错、热缓存、
+    /// 连 detoast 和转文本一起算）：原来每个任务取 1 条全部列约 21ms，
+    /// 现在取 10 条摘要列约 11ms。
+    pub async fn recent_runs_for(
         &self,
         workspace_id: WorkspaceId,
         task_ids: &[TaskId],
-    ) -> Result<std::collections::HashMap<TaskId, crate::RunRecord>, StoreError> {
+        per_task: i64,
+    ) -> Result<std::collections::HashMap<TaskId, Vec<crate::RunRecord>>, StoreError> {
+        let mut out: std::collections::HashMap<TaskId, Vec<crate::RunRecord>> =
+            std::collections::HashMap::new();
         if task_ids.is_empty() {
-            return Ok(std::collections::HashMap::new());
+            return Ok(out);
         }
         let ids: Vec<uuid::Uuid> = task_ids.iter().copied().map(uuid::Uuid::from).collect();
 
-        let rows = sqlx::query(
+        let sql = format!(
             "SELECT lr.* FROM unnest($2::uuid[]) AS t(id)
              JOIN LATERAL (
-                 SELECT r.id, r.workspace_id, r.task_id, r.task_version_id, r.status, r.trigger,
-                        r.dry_run, r.inputs, r.output, r.error, r.cost_micros, r.max_seq,
-                        r.cli_version, r.fingerprint, r.output_digest, r.compare_to,
-                        r.created_at, r.started_at, r.finished_at
-                 FROM runs r
+                 SELECT {columns} FROM runs r
                  WHERE r.workspace_id = $1 AND r.task_id = t.id
                  ORDER BY r.created_at DESC, r.id DESC
-                 LIMIT 1
-             ) lr ON true",
-        )
-        .bind(uuid::Uuid::from(workspace_id))
-        .bind(&ids)
-        .fetch_all(self.pool())
-        .await?;
+                 LIMIT $3
+             ) lr ON true
+             ORDER BY lr.created_at DESC, lr.id DESC",
+            columns = crate::runs::RUN_LIST_COLUMNS
+        );
+        // 拼进去的只有编译期常量的列清单，值全部走绑定参数
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(uuid::Uuid::from(workspace_id))
+            .bind(&ids)
+            .bind(per_task)
+            .fetch_all(self.pool())
+            .await?;
 
-        rows.into_iter()
-            .map(|row| {
-                let record = crate::runs::run_from_row(row)?;
-                Ok((record.task_id, record))
-            })
-            .collect()
+        for row in rows {
+            let record = crate::runs::run_from_row(row)?;
+            out.entry(record.task_id).or_default().push(record);
+        }
+        Ok(out)
     }
 
     /// 取一个版本快照。

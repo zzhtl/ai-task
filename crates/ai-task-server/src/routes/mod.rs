@@ -63,6 +63,8 @@ fn build_router(state: AppState) -> Router {
         .route("/hosts", get(hosts::list).post(hosts::create))
         .route("/hosts/{id}", put(hosts::update).delete(hosts::delete))
         .route("/schedules", get(schedules::list).post(schedules::create))
+        // 静态段优先于 `{id}`：preview 不会被当成一个定时的 id
+        .route("/schedules/preview", get(schedules::preview))
         .route(
             "/schedules/{id}",
             axum::routing::put(schedules::update).delete(schedules::delete),
@@ -326,5 +328,111 @@ mod tests {
             .await
             .expect("body");
         assert!(String::from_utf8_lossy(&body).contains("<!doctype html>"));
+    }
+
+    /// 定时的几条路由按生产的写法挂：`preview` 是静态段，旁边就是 `{id}` 参数段。
+    /// 预览是纯计算、不要 state，所以不连库也能把整条链路测到。
+    fn schedules_router() -> Router {
+        async fn by_id() -> StatusCode {
+            StatusCode::NO_CONTENT
+        }
+        Router::new()
+            .nest(
+                "/api/v1",
+                Router::new()
+                    .route("/schedules/preview", get(schedules::preview))
+                    .route("/schedules/{id}", put(by_id).delete(by_id))
+                    .fallback(api_not_found),
+            )
+            .layer(axum::middleware::from_fn(middleware::request_id::layer))
+    }
+
+    async fn call(router: Router, method: &str, uri: &str) -> (StatusCode, Vec<u8>) {
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("请求"),
+            )
+            .await
+            .expect("响应");
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        (status, body.to_vec())
+    }
+
+    #[tokio::test]
+    async fn schedule_preview_is_not_mistaken_for_a_schedule_id() {
+        let (status, body) = call(
+            schedules_router(),
+            "GET",
+            "/api/v1/schedules/preview?cron=0%202%20*%20*%20*&timezone=Asia/Shanghai",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let preview: ai_task_proto::SchedulePreview = serde_json::from_slice(&body).expect("解析");
+        assert_eq!(preview.fires.len(), 5, "默认看 5 次");
+        assert!(
+            preview.fires.windows(2).all(|w| w[0].at < w[1].at),
+            "按时间先后"
+        );
+        assert!(
+            preview.fires.iter().all(|f| f.local.contains("02:00:00")),
+            "本地时间要按该时区给：{:?}",
+            preview.fires
+        );
+
+        // `{id}` 那一支照样能用
+        let (status, _) = call(
+            schedules_router(),
+            "PUT",
+            "/api/v1/schedules/0190c6d2-0000-7000-8000-000000000000",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn schedule_preview_puts_each_error_on_its_own_field() {
+        for (query, field) in [
+            ("cron=nope&timezone=Asia/Shanghai", "cron"),
+            // 2 月 30 日：语法合法，但永远不触发
+            ("cron=0%200%2030%202%20*&timezone=Asia/Shanghai", "cron"),
+            ("cron=0%202%20*%20*%20*&timezone=Mars/Olympus", "timezone"),
+            ("cron=0%202%20*%20*%20*&timezone=UTC&count=11", "count"),
+            ("cron=0%202%20*%20*%20*&timezone=UTC&count=0", "count"),
+        ] {
+            let (status, body) = call(
+                schedules_router(),
+                "GET",
+                &format!("/api/v1/schedules/preview?{query}"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{query}");
+            let err: ai_task_proto::ApiError = serde_json::from_slice(&body).expect("结构化错误");
+            assert_eq!(
+                err.details.first().map(|d| d.field.as_str()),
+                Some(field),
+                "{query}: {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn schedule_preview_rejects_unknown_query_parameters() {
+        // 拼错一个参数名不能被静默忽略
+        let (status, body) = call(
+            schedules_router(),
+            "GET",
+            "/api/v1/schedules/preview?cron=0%202%20*%20*%20*&timezone=UTC&cnt=3",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let err: ai_task_proto::ApiError = serde_json::from_slice(&body).expect("结构化错误");
+        assert!(err.message.contains("cnt"), "{}", err.message);
     }
 }

@@ -17,12 +17,30 @@ export function ago(iso: string | null | undefined): string {
   return iso.slice(0, 10);
 }
 
+/** 离将来某个时刻还有多久。定时的"下次触发"用，比一个绝对时间更好判断远近。 */
+export function until(iso: string | null | undefined, now = Date.now()): string {
+  if (!iso) return '—';
+  const ms = Date.parse(iso) - now;
+  if (Number.isNaN(ms)) return '—';
+  if (ms < 0) return '已过';
+  const m = Math.floor(ms / 60_000);
+  if (m < 1) return '1 分钟内';
+  if (m < 60) return `${m} 分钟后`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} 小时后`;
+  return `${Math.floor(h / 24)} 天后`;
+}
+
 /** 两个时刻之间的墙钟耗时。 */
 export function duration(from?: string | null, to?: string | null): string {
   if (!from) return '—';
-  const ms = (to ? Date.parse(to) : Date.now()) - Date.parse(from);
+  return humanDuration((to ? Date.parse(to) : Date.now()) - Date.parse(from));
+}
+
+/** 一段毫秒数的可读形式。平均耗时这类算出来的数也走它，和单次耗时写法一致。 */
+export function humanDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) return '—';
-  if (ms < 1000) return `${ms}ms`;
+  if (ms < 1000) return `${Math.round(ms)}ms`;
   const s = ms / 1000;
   if (s < 60) return `${s.toFixed(1)}s`;
   const m = Math.floor(s / 60);

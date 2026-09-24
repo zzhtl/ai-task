@@ -2,8 +2,8 @@
 
 use ai_task_core::ValidatedDag;
 use ai_task_proto::{
-    CreateTask, FieldError, Page, PageQuery, RunEventBody, RunSummary, TaskDetail, TaskId,
-    TaskSummary, TriggerKind, TriggerRun,
+    CreateTask, FieldError, Page, PageQuery, RecentRun, RunEventBody, RunSummary, TaskDetail,
+    TaskId, TaskSummary, TriggerKind, TriggerRun,
 };
 use ai_task_store::idempotency::{IdempotentCreate, IdempotentRun};
 use ai_task_store::{NewRun, NewTask, PendingEvent};
@@ -169,6 +169,9 @@ pub async fn delete(
     Ok(Json(serde_json::json!({ "deleted_runs": runs })))
 }
 
+/// 列表里每个任务带回最近几次 run。十个色块够看出"最近稳不稳"，再多一行放不下。
+const RECENT_RUNS: i64 = 10;
+
 /// `GET /api/v1/tasks`
 pub async fn list(
     State(state): State<AppState>,
@@ -193,14 +196,30 @@ pub async fn list(
 
     // `last_run` 以前恒为 None——DTO 里有这个字段、列表页也要显示"上次执行"，
     // 于是前端只好自己再拉 200 条 run 回去逐行 find。
-    // 一条 LATERAL 把它补上，不是 N+1。
+    // 一条 LATERAL 把它和"最近几次"一起补上，不是 N+1。
     let ids: Vec<_> = tasks.iter().map(|t| t.id).collect();
-    let mut last = state.store.last_runs_for(state.workspace_id, &ids).await?;
+    let mut recent = state
+        .store
+        .recent_runs_for(state.workspace_id, &ids, RECENT_RUNS)
+        .await?;
 
     Ok(Json(Page {
         items: tasks
             .iter()
-            .map(|t| task_summary(t, last.remove(&t.id).map(|r| to_summary(&r))))
+            .map(|t| {
+                let runs = recent.remove(&t.id).unwrap_or_default();
+                let mut summary = task_summary(t, runs.first().map(to_summary));
+                summary.recent_runs = runs
+                    .iter()
+                    .map(|r| RecentRun {
+                        id: r.id,
+                        status: r.status,
+                        dry_run: r.dry_run,
+                        created_at: r.created_at,
+                    })
+                    .collect();
+                summary
+            })
             .collect(),
         next_cursor,
     }))
@@ -372,6 +391,7 @@ fn task_summary(task: &ai_task_store::TaskRecord, last_run: Option<RunSummary>) 
         updated_at: task.updated_at,
         version: task.version,
         last_run,
+        recent_runs: Vec::new(),
     }
 }
 

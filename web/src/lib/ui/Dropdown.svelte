@@ -49,6 +49,10 @@
 
   $effect(() => {
     if (!open || !menu) return;
+    // 放进顶层（Popover API）：表格外面那层 overflow: auto 裁不到它。
+    // 以前最后几行的"更多"一打开，菜单就被卡片截掉一半，还多出一条滚动条
+    menu.showPopover();
+    place();
     const list = items();
     for (const item of list) {
       item.setAttribute('role', 'menuitem');
@@ -56,7 +60,33 @@
       item.tabIndex = -1;
     }
     list[0]?.focus();
+    // 顶层元素不跟着页面滚：开着的时候自己跟上触发按钮。捕获阶段才收得到卡片内部的滚动
+    const follow = () => place();
+    window.addEventListener('scroll', follow, true);
+    window.addEventListener('resize', follow);
+    return () => {
+      window.removeEventListener('scroll', follow, true);
+      window.removeEventListener('resize', follow);
+    };
   });
+
+  /** 贴着触发按钮放；想开的那一边放不下、另一边放得下，就翻过去。 */
+  function place() {
+    if (!triggerEl || !menu) return;
+    const t = triggerEl.getBoundingClientRect();
+    const m = menu.getBoundingClientRect();
+    const gap = 4;
+    const margin = 8;
+    const below = t.bottom + gap;
+    const above = t.top - m.height - gap;
+    let top = placement === 'up' ? above : below;
+    if (placement === 'down' && below + m.height > window.innerHeight - margin && above >= margin) top = above;
+    if (placement === 'up' && above < margin && below + m.height <= window.innerHeight - margin) top = below;
+    let left = align === 'right' ? t.right - m.width : t.left;
+    left = Math.max(margin, Math.min(left, window.innerWidth - m.width - margin));
+    menu.style.top = `${top}px`;
+    menu.style.left = `${left}px`;
+  }
 
   function close(returnFocus: boolean) {
     open = false;
@@ -118,7 +148,8 @@
     <!-- 菜单项自己是 button / a；点了任何一项都关菜单，键盘走 onMenuKey 的方向键漫游 -->
     <div
       bind:this={menu}
-      class="menu {align} {placement}"
+      class="menu"
+      popover="manual"
       role="menu"
       tabindex="-1"
       onclick={() => close(true)}
@@ -140,9 +171,14 @@
     opacity: 0.7;
   }
   .menu {
-    position: absolute;
-    top: calc(100% + 4px);
+    /* 顶层里的 popover 默认是居中的 fixed；位置由 place() 按触发按钮算 */
+    position: fixed;
+    inset: auto;
+    margin: 0;
     min-width: 12rem;
+    /* 长提示在这个宽度里折行；popover 自带 overflow: auto，内容比它宽就会冒出滚动条 */
+    max-width: min(24rem, calc(100vw - 16px));
+    max-height: calc(100vh - 16px);
     padding: 4px;
     background: var(--surface-2);
     border: 1px solid var(--line-strong);
@@ -153,16 +189,6 @@
     flex-direction: column;
     gap: 1px;
     animation: drop var(--dur-2) var(--ease-out);
-  }
-  .menu.right {
-    right: 0;
-  }
-  .menu.up {
-    top: auto;
-    bottom: calc(100% + 4px);
-  }
-  .menu.left {
-    left: 0;
   }
   @keyframes drop {
     from {
@@ -175,6 +201,10 @@
     display: flex;
     flex-direction: column;
     align-items: flex-start;
+    /* 全局按钮是定高、内容居中的：多一行提示就上下各溢出一截，压到相邻的项上 */
+    justify-content: flex-start;
+    height: auto;
+    min-height: var(--h-md);
     gap: 1px;
     width: 100%;
     border: none;
@@ -200,6 +230,13 @@
     font-size: var(--t-xs);
     color: var(--fg-faint);
     font-weight: 400;
+  }
+  .menu :global(:is(button, a) .hint.warn-text) {
+    color: var(--warn-fg);
+  }
+  /* 纵向 flex + flex-start 的子元素按内容最宽排开，不限宽就不折行 */
+  .menu :global(:is(button, a) > *) {
+    max-width: 100%;
   }
   .menu :global(hr) {
     border: none;

@@ -79,6 +79,9 @@
             {#if step.skills.length}<span>技能：{step.skills.join('、')}</span>{/if}
           {/if}
           <span>{step.timeoutS != null ? `${step.timeoutS}s 超时` : '默认超时'}</span>
+          {#if step.maxAttempts > 1}<span>失败重试 {step.maxAttempts - 1} 次</span>{/if}
+          {#if step.kind === 'ai' && step.maxTurns !== null}<span>最多 {step.maxTurns} 轮</span>{/if}
+          {#if step.kind === 'ai' && step.budgetUsd}<span>单步最多 ${step.budgetUsd}</span>{/if}
         </div>
       </div>
     </li>

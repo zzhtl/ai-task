@@ -1,0 +1,36 @@
+{
+  "nodes": [
+    {
+      "key": "step-1",
+      "name": "收集指标",
+      "config": {
+        "kind": "shell",
+        "command": "df -h && free -m && uptime"
+      },
+      "retry": { "max_attempts": 1, "backoff_ms": 2000, "backoff_factor": 2, "feed_error_to_model": true },
+      "on_failure": "fail_fast",
+      "timeout_s": 120,
+      "limits": { "memory_mib": 1024, "cpu_percent": 200, "pids_max": 128 }
+    },
+    {
+      "key": "step-2",
+      "name": "判断有没有异常",
+      "config": {
+        "kind": "ai",
+        "prompt": "根据上一步的输出判断这台机器是否健康：磁盘使用超过 85%、可用内存低于总量的 10%、1 分钟负载超过 CPU 核数，都算异常。逐条列出异常项和建议的处理方式；都正常就只回答“正常”。只读，不要修改任何文件。",
+        "executor": "claude_code",
+        "model": "claude-sonnet-5",
+        "tools": ["Read", "Glob", "Grep"],
+        "max_turns": 10
+      },
+      "inputs": {
+        "第1步：收集指标": { "from": "node", "node": "step-1", "path": "$" }
+      },
+      "retry": { "max_attempts": 1, "backoff_ms": 2000, "backoff_factor": 2, "feed_error_to_model": true },
+      "on_failure": "fail_fast",
+      "timeout_s": 600
+    }
+  ],
+  "edges": [{ "from": "step-1", "to": "step-2", "when": { "op": "on_success" } }],
+  "budget_usd": "0.500000"
+}

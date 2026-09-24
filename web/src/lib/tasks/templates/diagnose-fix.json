@@ -1,0 +1,58 @@
+{
+  "nodes": [
+    {
+      "key": "step-1",
+      "name": "诊断",
+      "config": {
+        "kind": "ai",
+        "prompt": "读 /var/log/nginx/error.log 最近 500 行，找出反复出现的错误，判断最可能的原因，给出一个具体的修复方案：要执行哪些命令、要改哪个配置的哪几行。只读，不要修改任何文件。",
+        "executor": "claude_code",
+        "model": "claude-sonnet-5",
+        "tools": ["Read", "Glob", "Grep"],
+        "max_turns": 20
+      },
+      "retry": { "max_attempts": 1, "backoff_ms": 2000, "backoff_factor": 2, "feed_error_to_model": true },
+      "on_failure": "fail_fast",
+      "timeout_s": 600
+    },
+    {
+      "key": "step-2",
+      "name": "确认修复方案",
+      "config": {
+        "kind": "approval",
+        "title": "确认修复方案",
+        "timeout_s": 900,
+        "on_timeout": "deny"
+      },
+      "inputs": {
+        "第1步：诊断": { "from": "node", "node": "step-1", "path": "$" }
+      },
+      "retry": { "max_attempts": 1, "backoff_ms": 2000, "backoff_factor": 2, "feed_error_to_model": true },
+      "on_failure": "fail_fast"
+    },
+    {
+      "key": "step-3",
+      "name": "执行修复",
+      "config": {
+        "kind": "ai",
+        "prompt": "按第 1 步给出的修复方案执行，只做方案里写了的改动；审批人留了话的，以审批人的话为准。改完验证服务已经恢复（比如 nginx -t，再 curl 一次本机），把做了什么、验证结果写清楚。",
+        "executor": "claude_code",
+        "model": "claude-sonnet-5",
+        "tools": ["Read", "Glob", "Grep", "Bash", "Write", "Edit"],
+        "max_turns": 30
+      },
+      "inputs": {
+        "第1步：诊断": { "from": "node", "node": "step-1", "path": "$" },
+        "第2步：确认修复方案": { "from": "node", "node": "step-2", "path": "$" }
+      },
+      "retry": { "max_attempts": 1, "backoff_ms": 2000, "backoff_factor": 2, "feed_error_to_model": true },
+      "on_failure": "fail_fast",
+      "timeout_s": 900
+    }
+  ],
+  "edges": [
+    { "from": "step-1", "to": "step-2", "when": { "op": "on_success" } },
+    { "from": "step-2", "to": "step-3", "when": { "op": "on_success" } }
+  ],
+  "budget_usd": "1.000000"
+}

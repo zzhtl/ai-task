@@ -80,6 +80,12 @@ export interface Step {
   tools: string[];
   /** 超时（秒）。`null` = 不设，交给引擎默认值。审批步骤是等人的时长。 */
   timeoutS: number | null;
+  /** 最多尝试几次（含第一次）。1 = 失败了不重试。 */
+  maxAttempts: number;
+  /** AI 步骤最多几轮。`null` = 不设，交给 CLI。 */
+  maxTurns: number | null;
+  /** AI 步骤自己的花费上限（美元，十进制字符串）。`null` = 不设，只受整个任务的上限约束。 */
+  budgetUsd: string | null;
   skills: string[];
   /**
    * 这一步能看到**哪几步**的结果，按步骤 uid 记（uid 在拖动排序时不变，序号会变）。
@@ -126,6 +132,9 @@ export function reachOf(tools: string[]): Reach {
  */
 export const DEFAULT_MODEL = 'claude-sonnet-5';
 
+/** 新 AI 步骤的轮数上限。没有上限的话，一个绕圈子的模型能一直烧钱烧到整体预算。 */
+const DEFAULT_MAX_TURNS = 30;
+
 let counter = 0;
 export function newStep(kind: StepKind = 'ai'): Step {
   counter += 1;
@@ -139,6 +148,10 @@ export function newStep(kind: StepKind = 'ai'): Step {
     model: DEFAULT_MODEL,
     tools: [...REACH_TOOLS.read_only],
     timeoutS: kind === 'approval' ? 900 : 600,
+    maxAttempts: 1,
+    // 非 AI 步骤也带着：之后换成 AI 时，新出现的 AI 配置照样有轮数上限
+    maxTurns: DEFAULT_MAX_TURNS,
+    budgetUsd: null,
     skills: [],
     sees: []
   };
@@ -195,7 +208,9 @@ export function toSpec(comp: Composition): DagSpec {
     const node: Record<string, unknown> = { ...raw };
     node.key = keys[i];
     node.name = step.title || keys[i];
-    node.retry ??= DEFAULT_RETRY;
+    // 只管次数；退避、回喂这些编辑器不管的照原样
+    const rawRetry = (raw.retry as Record<string, unknown> | undefined) ?? DEFAULT_RETRY;
+    node.retry = { ...rawRetry, max_attempts: step.maxAttempts };
     node.on_failure ??= 'fail_fast';
 
     // 换了步骤类型就不能再沿用旧 config：ai 的字段留在 shell 节点上是垃圾，
@@ -231,9 +246,11 @@ export function toSpec(comp: Composition): DagSpec {
         prompt: step.body,
         executor: step.runner.kind === 'host_cli' ? 'host_cli' : 'claude_code'
       };
-      // 同上：只给新的 AI 步骤一个轮数上限，老节点没设就保持没设
-      if (!sameKind) config.max_turns ??= 30;
       // 关掉某个开关时必须真的删掉那个键，留着旧值就是"界面上关了、实际还开着"
+      if (step.maxTurns != null) config.max_turns = step.maxTurns;
+      else delete config.max_turns;
+      if (step.budgetUsd) config.budget_usd = step.budgetUsd;
+      else delete config.budget_usd;
       if (step.runner.kind === 'host_cli') config.cli = step.runner.cli;
       else delete config.cli;
       if (step.model) config.model = step.model;
@@ -359,6 +376,10 @@ export function fromSpec(spec: DagSpec): Composition | null {
           ? ((config.timeout_s as number) ?? (node.timeout_s as number) ?? DEFAULT_APPROVAL_TIMEOUT_S)
           : ((node.timeout_s as number | undefined) ?? null),
       skills: (config.skills as string[]) ?? [],
+      maxAttempts: (node.retry as { max_attempts?: number } | undefined)?.max_attempts ?? 1,
+      // 老 AI 节点没设轮数就保持没设；别的类型先备好默认值，换成 AI 时用得上
+      maxTurns: kind === 'ai' ? ((config.max_turns as number | undefined) ?? null) : DEFAULT_MAX_TURNS,
+      budgetUsd: kind === 'ai' ? ((config.budget_usd as string | undefined) ?? null) : null,
       // 指向节点的输入 → 看得见哪几步。steps 是按顺序建的，被引用的更早的
       // 步骤此时已经在表里了；同一个上游被取了几段也只算看见一次
       sees: [

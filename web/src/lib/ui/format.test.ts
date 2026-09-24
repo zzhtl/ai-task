@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { clock, duration, money, stamp, toMicros, moneyMicros } from './format';
+import { clock, duration, humanDuration, money, stamp, toMicros, moneyMicros, until } from './format';
 
 describe('绝对时间按东八区显示', () => {
   // 这个测试在任何时区的机器上都必须过：显示时区是定死的，不跟机器走
@@ -58,5 +58,41 @@ describe('金额换成整数微美元', () => {
     for (let i = 0; i < 100; i++) sum += toMicros('0.010000');
     expect(sum).toBe(1_000_000);
     expect(moneyMicros(sum)).toBe('$1.00');
+  });
+});
+
+describe('多久之后', () => {
+  const now = Date.parse('2026-09-09T10:00:00Z');
+  test.each([
+    ['2026-09-09T10:00:30Z', '1 分钟内'],
+    ['2026-09-09T10:05:00Z', '5 分钟后'],
+    ['2026-09-09T13:10:00Z', '3 小时后'],
+    ['2026-09-12T10:00:00Z', '3 天后'],
+    ['2026-09-09T09:00:00Z', '已过']
+  ])('%s → %s', (iso, text) => {
+    expect(until(iso, now)).toBe(text);
+  });
+
+  test('读不出来的时间不瞎编', () => {
+    expect(until(null, now)).toBe('—');
+    expect(until('nope', now)).toBe('—');
+  });
+});
+
+describe('耗时', () => {
+  test.each([
+    [640.4, '640ms'],
+    [2500, '2.5s'],
+    [61_000, '1m 1s'],
+    [3_723_000, '1h 2m'],
+    [-1, '—'],
+    [Number.NaN, '—']
+  ])('%d → %s', (ms, text) => {
+    expect(humanDuration(ms)).toBe(text);
+  });
+
+  test('两个时刻之间的耗时和直接给毫秒数写法一样', () => {
+    expect(duration('2026-09-09T10:00:00Z', '2026-09-09T10:01:01Z')).toBe('1m 1s');
+    expect(duration(null, '2026-09-09T10:00:00Z')).toBe('—');
   });
 });

@@ -4,8 +4,11 @@
 //! 两点那个任务不响——而且没有任何东西会报错，因为调度器只是永远算不出下一个
 //! 触发点。保存时拒绝，是这个错误唯一有机会被人看见的时刻。
 
-use ai_task_proto::{FieldError, MisfirePolicy, OverlapPolicy, Page, ScheduleId, TaskId};
-use ai_task_runtime::CronSchedule;
+use ai_task_proto::{
+    FieldError, MisfirePolicy, OverlapPolicy, Page, ScheduleFire, ScheduleId, SchedulePreview,
+    SchedulePreviewQuery, TaskId,
+};
+use ai_task_runtime::{CronError, CronSchedule};
 use ai_task_store::schedules::NewSchedule;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -18,6 +21,10 @@ use crate::state::AppState;
 
 /// jitter 上限。比它更大的抖动会让「几点触发」失去意义。
 const MAX_JITTER_S: u32 = 3600;
+
+/// 预览默认看几次、最多看几次。
+const DEFAULT_PREVIEW: u32 = 5;
+const MAX_PREVIEW: u32 = 10;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -89,7 +96,7 @@ pub async fn list(
             .map(|(id, due, enabled)| ScheduleSummary {
                 id: id.to_string(),
                 task_id: due.task_id.to_string(),
-                next_three: preview(&due.cron, &due.timezone),
+                next_three: next_three(&due.cron, &due.timezone),
                 cron: due.cron,
                 timezone: due.timezone,
                 misfire: due.misfire,
@@ -102,6 +109,28 @@ pub async fn list(
             .collect(),
         next_cursor: None,
     }))
+}
+
+/// `GET /api/v1/schedules/preview` —— 编辑定时时的实时预览。
+///
+/// 纯计算，不碰库。和保存时的校验走同一个解析：这里算得出来，保存时就不会因为
+/// 表达式被拒。
+pub async fn preview(
+    Query(query): Query<SchedulePreviewQuery>,
+) -> Result<Json<SchedulePreview>, AppError> {
+    let count = query.count.unwrap_or(DEFAULT_PREVIEW);
+    if !(1..=MAX_PREVIEW).contains(&count) {
+        return Err(invalid("count", &format!("一次预览 1 到 {MAX_PREVIEW} 次")));
+    }
+    let schedule = CronSchedule::parse(&query.cron, &query.timezone).map_err(cron_error)?;
+    let fires = upcoming(&schedule, chrono::Utc::now(), count)
+        .into_iter()
+        .map(|at| ScheduleFire {
+            at,
+            local: schedule.format_local(at),
+        })
+        .collect();
+    Ok(Json(SchedulePreview { fires }))
 }
 
 /// `POST /api/v1/schedules`
@@ -225,8 +254,7 @@ async fn validate(state: &AppState, body: &CreateSchedule) -> Result<NewSchedule
 
     // 在这里编译一次。存进去一个跑不通的表达式，代价是那个任务永远不响，
     // 而且不会有任何报错。
-    let schedule = CronSchedule::parse(&body.cron, &body.timezone)
-        .map_err(|err| invalid("cron", &err.to_string()))?;
+    let schedule = CronSchedule::parse(&body.cron, &body.timezone).map_err(cron_error)?;
 
     let now = chrono::Utc::now();
     let next_fire_at = schedule.next_after(now).ok_or_else(|| {
@@ -256,20 +284,41 @@ async fn validate(state: &AppState, body: &CreateSchedule) -> Result<NewSchedule
 ///
 /// 让人一眼看出表达式写对没有——`0 0 * * *`（每天零点）和 `0 0 * * 0`
 /// （每周日零点）光看字符串是分不出来的，看时间就一目了然。
-fn preview(cron: &str, timezone: &str) -> Vec<String> {
+fn next_three(cron: &str, timezone: &str) -> Vec<String> {
     let Ok(schedule) = CronSchedule::parse(cron, timezone) else {
         return Vec::new();
     };
-    let mut out = Vec::with_capacity(3);
-    let mut cursor = chrono::Utc::now();
-    for _ in 0..3 {
+    upcoming(&schedule, chrono::Utc::now(), 3)
+        .into_iter()
+        .map(|at| schedule.format_local(at))
+        .collect()
+}
+
+/// `after` 之后的 `count` 个触发点。算不出更多时就少给几个。
+fn upcoming(
+    schedule: &CronSchedule,
+    after: chrono::DateTime<chrono::Utc>,
+    count: u32,
+) -> Vec<chrono::DateTime<chrono::Utc>> {
+    let mut out = Vec::with_capacity(count as usize);
+    let mut cursor = after;
+    for _ in 0..count {
         let Some(next) = schedule.next_after(cursor) else {
             break;
         };
-        out.push(schedule.format_local(next));
+        out.push(next);
         cursor = next;
     }
     out
+}
+
+/// 解析错误归到出错的那个字段上：时区写错就标在时区框底下，别都算在表达式头上。
+fn cron_error(err: CronError) -> AppError {
+    let field = match err {
+        CronError::BadTimezone(_) => "timezone",
+        CronError::BadExpression { .. } | CronError::NeverFires(_) => "cron",
+    };
+    invalid(field, &err.to_string())
 }
 
 fn invalid(field: &str, message: &str) -> AppError {

@@ -661,6 +661,19 @@ label.field > span.hint,
   font-weight: 400;
   color: var(--fg-faint);
 }
+/* 只给读屏的文字：aria-live 播报"移到了第几步"这类，屏幕上不占位置 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* 字段级错误。跟在出错的那个控件正下方，而不是汇总到页头 */
 .field-error {
   font-size: var(--t-xs);

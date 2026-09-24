@@ -7,6 +7,7 @@ import type { RunDetail } from './types/RunDetail';
 import type { RunListItem } from './types/RunListItem';
 import type { RunStatus } from './types/RunStatus';
 import type { RunSummary } from './types/RunSummary';
+import type { TaskDetail } from './types/TaskDetail';
 import type { TaskSummary } from './types/TaskSummary';
 import type { TaskVersion } from './types/TaskVersion';
 import type { TriggerKind } from './types/TriggerKind';
@@ -36,6 +37,30 @@ export async function listAllTasks(signal?: AbortSignal): Promise<TaskSummary[]>
     cursor = page.next_cursor ?? null;
   } while (cursor && out.length < ALL_TASKS_CAP);
   return out;
+}
+
+export const getTask = (id: string, signal?: AbortSignal) =>
+  api<TaskDetail>(`/api/v1/tasks/${id}`, { signal });
+
+/**
+ * 停用 / 启用。停用的任务：定时到点不触发，手动也触发不了。
+ *
+ * PUT 是整体替换，所以先取当前定义原样带回去，只翻 enabled 这一位；
+ * 带着取到的版本号做 If-Match，取和写之间被别人改过就是 412，不会把对方的改动冲掉。
+ */
+export async function setTaskEnabled(id: string, enabled: boolean): Promise<void> {
+  const task = await getTask(id);
+  await api(`/api/v1/tasks/${id}`, {
+    method: 'PUT',
+    body: {
+      name: task.name,
+      description: task.description ?? null,
+      spec: task.spec,
+      rules: task.rules ?? [],
+      enabled
+    },
+    ifMatch: String(task.version)
+  });
 }
 
 /**

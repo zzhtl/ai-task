@@ -487,7 +487,7 @@ const RUN_COLUMNS: &str = "id, workspace_id, task_id, task_version_id, status, t
      created_at, started_at, finished_at";
 
 /// 列表用的列：`inputs` / `output` 换成 NULL。行的形状不变，[`run_from_row`] 照用。
-const RUN_LIST_COLUMNS: &str =
+pub(crate) const RUN_LIST_COLUMNS: &str =
     "id, workspace_id, task_id, task_version_id, status, trigger, dry_run,
      NULL::jsonb AS inputs, NULL::jsonb AS output, error, cost_micros, max_seq, cli_version,
      fingerprint, output_digest, compare_to,
