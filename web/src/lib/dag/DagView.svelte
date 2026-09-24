@@ -284,7 +284,9 @@
   }
   .dot.skipped,
   .dot.pending,
-  .dot.ready {
+  .dot.ready,
+  .dot.cancelled,
+  .dot.interrupted {
     fill: var(--st-skipped);
   }
   .legend {

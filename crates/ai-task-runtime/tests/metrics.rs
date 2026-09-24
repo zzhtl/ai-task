@@ -116,6 +116,7 @@ async fn every_sample_the_agent_emits_reaches_the_database() {
                 dry_run: false,
                 inputs: None,
                 compare_to: None,
+                created_by: None,
             },
             PendingEvent::run(RunEventBody::RunQueued {
                 task_version_id: version.id,
@@ -246,6 +247,7 @@ async fn a_command_shorter_than_the_sampling_interval_still_gets_one_point() {
                 dry_run: false,
                 inputs: None,
                 compare_to: None,
+                created_by: None,
             },
             PendingEvent::run(RunEventBody::RunQueued {
                 task_version_id: version.id,

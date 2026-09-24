@@ -321,7 +321,7 @@
     <a href="/tasks/{editingId}">回任务详情</a>看步骤。
   </div>
 {:else}
-  <section class="card meta">
+  <section class="card basics">
     <div class="form-grid">
       <label class="field">
         任务名称
@@ -398,7 +398,7 @@
 {/if}
 
 <style>
-  .meta {
+  .basics {
     margin-bottom: var(--s4);
   }
   .two {

@@ -52,6 +52,7 @@ fn build_router(state: AppState) -> Router {
             get(tasks::get).put(tasks::update).delete(tasks::delete),
         )
         .route("/tasks/{id}/runs", post(tasks::trigger))
+        .route("/tasks/{id}/versions/{no}", get(tasks::get_version))
         .route("/overview", get(overview::get))
         .route("/runs", get(runs::list))
         .route("/runs/{id}", get(runs::get).delete(runs::delete))

@@ -27,7 +27,7 @@ pub use events::{EVENTS_CHANNEL, PendingEvent};
 pub use hosts::{Host, HostUpdate, MetricSample, NewHost};
 pub use pool::{Store, StoreConfig, StoreError};
 pub use rules::{NewRule, NewSkill, PromptRule, RuleKind, RuleRow, Skill};
-pub use runs::{NewRun, RunOutcome, RunRecord};
+pub use runs::{NewRun, RunListFilter, RunMeta, RunOutcome, RunRecord};
 pub use schedules::{DueSchedule, NewSchedule, SchedulePosition};
 pub use tasks::{NewTask, TaskRecord, TaskVersionRecord};
 

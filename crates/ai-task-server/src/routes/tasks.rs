@@ -281,6 +281,8 @@ pub async fn trigger(
         dry_run: body.dry_run,
         inputs: body.inputs.clone(),
         compare_to: body.compare_to,
+        // 详情页显示"谁触发的"。没开认证时拿不到人，留空
+        created_by: crate::middleware::rbac::current_user(),
     };
     let queued = PendingEvent::run(RunEventBody::RunQueued {
         task_version_id: task.current_version_id,
@@ -403,6 +405,28 @@ fn map_not_found(err: ai_task_store::StoreError, what: &str, id: &str) -> AppErr
         }
         other => AppError::Store(other),
     }
+}
+
+/// `GET /api/v1/tasks/{id}/versions/{no}` —— 某个版本的编排快照。
+///
+/// 执行详情要画**这次执行用的那一版**：任务改过之后，用当前定义去画老 run，
+/// 图和步骤名都是错的。版本不可变，客户端可以放心缓存。
+pub async fn get_version(
+    State(state): State<AppState>,
+    Path((id, version_no)): Path<(TaskId, i32)>,
+) -> Result<Json<ai_task_proto::TaskVersion>, AppError> {
+    let version = state
+        .store
+        .task_version_by_no(state.workspace_id, id, version_no)
+        .await
+        .map_err(|e| map_not_found(e, "task version", &format!("{id} v{version_no}")))?;
+    Ok(Json(ai_task_proto::TaskVersion {
+        task_id: version.task_id,
+        version_no: version.version_no,
+        spec: version.spec,
+        rules: version.rules,
+        created_at: version.created_at,
+    }))
 }
 
 #[cfg(test)]

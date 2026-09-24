@@ -3,9 +3,13 @@
 import { api } from './client';
 import type { CreateTask } from './types/CreateTask';
 import type { Page } from './types/Page';
+import type { RunDetail } from './types/RunDetail';
+import type { RunListItem } from './types/RunListItem';
 import type { RunStatus } from './types/RunStatus';
 import type { RunSummary } from './types/RunSummary';
 import type { TaskSummary } from './types/TaskSummary';
+import type { TaskVersion } from './types/TaskVersion';
+import type { TriggerKind } from './types/TriggerKind';
 import type { TriggerRun } from './types/TriggerRun';
 
 export function listTasks(signal?: AbortSignal): Promise<Page<TaskSummary>> {
@@ -56,6 +60,10 @@ export interface RunListQuery {
   taskId?: string | null;
   /** 只要这些状态。空数组会得到空结果——"筛选条件为空"不等于"不筛"。 */
   status?: RunStatus[] | null;
+  /** 只要这些触发方式。 */
+  trigger?: TriggerKind[] | null;
+  /** 只要这个时刻（含）之后创建的。 */
+  since?: Date | null;
   /** 上一页的 `next_cursor`。 */
   cursor?: string | null;
 }
@@ -63,18 +71,40 @@ export interface RunListQuery {
 export function listRuns(
   query: number | RunListQuery = 20,
   signal?: AbortSignal
-): Promise<Page<RunSummary>> {
+): Promise<Page<RunListItem>> {
   const q: RunListQuery = typeof query === 'number' ? { limit: query } : query;
   const params = new URLSearchParams();
   params.set('limit', String(q.limit ?? 50));
   if (q.taskId) params.set('task_id', q.taskId);
   if (q.status) params.set('status', q.status.join(','));
+  if (q.trigger) params.set('trigger', q.trigger.join(','));
+  if (q.since) params.set('since', q.since.toISOString());
   if (q.cursor) params.set('cursor', q.cursor);
   return api(`/api/v1/runs?${params}`, { signal });
 }
 
-export function getRun(id: string): Promise<RunSummary> {
+/** 一次执行的全部元信息：比列表多了任务名、版本号、输入输出、触发人。 */
+export function getRun(id: string): Promise<RunDetail> {
   return api(`/api/v1/runs/${id}`);
+}
+
+/** 版本不可变：取过一次就一直用，同一页里来回切不再发请求。 */
+const versions = new Map<string, Promise<TaskVersion>>();
+
+/**
+ * 任务某个版本的编排快照。执行详情用它画**这次执行用的那一版**——
+ * 任务改过之后，拿当前定义去画老 run，图和步骤名都是错的。
+ */
+export function getTaskVersion(taskId: string, versionNo: number): Promise<TaskVersion> {
+  const key = `${taskId}@${versionNo}`;
+  let hit = versions.get(key);
+  if (!hit) {
+    hit = api<TaskVersion>(`/api/v1/tasks/${taskId}/versions/${versionNo}`);
+    // 失败的不缓存：下次还要能重试
+    hit.catch(() => versions.delete(key));
+    versions.set(key, hit);
+  }
+  return hit;
 }
 
 export function triggerRun(

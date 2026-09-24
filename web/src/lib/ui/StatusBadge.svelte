@@ -39,7 +39,9 @@
     awaiting_approval: { text: '等待审批', tone: 'warn', icon: 'pause' },
     pending: { text: '等待', tone: 'neutral', icon: 'circle' },
     ready: { text: '就绪', tone: 'neutral', icon: 'circle' },
-    skipped: { text: '跳过', tone: 'neutral', icon: 'skip' }
+    skipped: { text: '跳过', tone: 'neutral', icon: 'skip' },
+    // 界面自己推出来的：run 结束了，这一步没等到结论
+    interrupted: { text: '中断', tone: 'neutral', icon: 'ban' }
   };
 
   // 认不出的状态（后端新加的）照原样显示，不能崩也不能吞掉

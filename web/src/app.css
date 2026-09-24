@@ -407,6 +407,8 @@ kbd,
   content: '·';
   margin-right: var(--s2);
   color: var(--fg-faint);
+  /* 等宽字体的子元素（id、节点 key）里，点会变成另一种字形 */
+  font-family: var(--font);
 }
 
 /* ---- 按钮。主 / 次 / 幽灵 / 危险，再加图标钮；两档高度 ---- */

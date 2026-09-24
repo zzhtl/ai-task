@@ -32,6 +32,7 @@
   let series = $state<NodeMetrics[]>([]);
   /** 采样读不出来。不是 admin 门禁的接口，所以这里失败就是真故障。 */
   let error = $state<string | null>(null);
+  let loaded = $state(false);
 
   $effect(() => {
     // revision 变了就重取：事件流告诉我们节点跑完了，这里不用自己轮询
@@ -41,6 +42,7 @@
       .then((s) => {
         series = s;
         error = null;
+        loaded = true;
       })
       // 之前这里是 `.catch(() => {})`：采样读失败时整块曲线连同标题一起消失，
       // 和"这个 run 本来就没有资源采样"长得一模一样。
@@ -108,8 +110,12 @@
     return max;
   }
 
+  /** 画得出曲线的至少要三个点；跑了不到几秒的步骤只给一行摘要，不画一整块空白。 */
+  const MIN_POINTS = 3;
+  const brief = $derived(series.filter((s) => s.points.length < MIN_POINTS));
+
   const charts = $derived.by(() =>
-    series.map((s) => {
+    series.filter((s) => s.points.length >= MIN_POINTS).map((s) => {
       const cpu = cpuPercent(s.points);
       const rss = s.points.map((p) => ({ t: Date.parse(p.at), v: p.rss_bytes }));
       // 上界向上取整到一个好看的刻度，否则每来一个点整条线都会跳
@@ -145,7 +151,9 @@
 
 {#if error}
   <div class="banner">读不到资源采样：{error}</div>
-{:else if charts.length > 0}
+{:else if loaded && series.length === 0}
+  <p class="none">这次执行没有资源采样。</p>
+{:else if charts.length > 0 || brief.length > 0}
   <section class="metrics">
     <h2>
       资源归因
@@ -185,12 +193,46 @@
         </footer>
       </article>
     {/each}
+    {#if brief.length}
+      <ul class="brief">
+        {#each brief as s (s.node_key)}
+          <li>
+            <span class="node mono">{s.node_key}</span>
+            <span class="muted">
+              采样太少，没画曲线 · 峰值 {(peak(s.points, (p) => p.rss_bytes) / 1048576).toFixed(1)} MiB ·
+              {peak(s.points, (p) => p.pids)} 进程
+            </span>
+            {#if degraded[s.node_key]}<span class="degraded">降级采样（{degraded[s.node_key].mode}）· 上限未强制</span>{/if}
+          </li>
+        {/each}
+      </ul>
+    {/if}
   </section>
 {/if}
 
 <style>
-  .metrics {
-    margin-top: var(--s4);
+  .none {
+    margin: 0;
+    color: var(--fg-faint);
+    font-size: var(--t-sm);
+  }
+  .brief {
+    list-style: none;
+    margin: var(--s2) 0 0;
+    padding: var(--s2) var(--s4);
+    border: 1px solid var(--line);
+    border-radius: var(--r3);
+    background: var(--surface-1);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s1);
+    font-size: var(--t-sm);
+  }
+  .brief li {
+    display: flex;
+    gap: var(--s3);
+    flex-wrap: wrap;
+    align-items: baseline;
   }
   h2 {
     margin: 0 0 var(--s3);

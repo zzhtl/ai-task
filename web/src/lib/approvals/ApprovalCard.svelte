@@ -85,10 +85,10 @@
     <div class="head-main">
       <h3>{approval.title}</h3>
       <p class="meta faint">
-        {#if taskName}<span>{taskName}</span> ·{/if}
+        {#if taskName}<span>{taskName}</span>{/if}
         <a href="/runs/{approval.run_id}">run {approval.run_id.slice(0, 8)}</a>
-        {#if approval.node_key}<span class="mono">· {approval.node_key}</span>{/if}
-        {#if approval.rule_id}<span>· 由策略 ask 触发</span>{:else}<span>· 审批节点</span>{/if}
+        {#if approval.node_key}<span class="mono">{approval.node_key}</span>{/if}
+        {#if approval.rule_id}<span>由策略 ask 触发</span>{:else}<span>审批节点</span>{/if}
       </p>
     </div>
     <span class="clock" title="超时后自动拒绝">
@@ -155,10 +155,6 @@
   }
   .meta {
     margin: 2px 0 0;
-    font-size: var(--t-sm);
-    display: flex;
-    gap: var(--s1);
-    flex-wrap: wrap;
   }
   .clock {
     font-size: var(--t-base);

@@ -17,8 +17,21 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::stream::Stream;
 
 use crate::error::AppError;
-use crate::extract::Path;
+use crate::extract::{Path, Query};
 use crate::state::AppState;
+
+/// `GET /api/v1/runs/{id}/events` 的查询参数。
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamQuery {
+    /// 从这个 seq 之后续传，和 `Last-Event-ID` 同义。
+    ///
+    /// 浏览器的 `EventSource` 只有在**它自己**重连时才会带 `Last-Event-ID`；
+    /// 客户端主动新建连接（连接数满了稍后重试、重新登录后重新订阅）带不了这个头，
+    /// 没有这个参数就只能从头重放整条事件流。
+    #[serde(default)]
+    pub after: Option<i64>,
+}
 
 /// 一次补读的上限。历史很长时分多轮补，避免一次查询把内存打满。
 const CATCHUP_BATCH: i64 = 500;
@@ -48,6 +61,7 @@ const KEEPALIVE: Duration = Duration::from_secs(15);
 pub async fn stream(
     State(state): State<AppState>,
     Path(run_id): Path<RunId>,
+    Query(query): Query<StreamQuery>,
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
     // 先确认 run 存在且属于当前 workspace，再开流。
@@ -63,7 +77,10 @@ pub async fn stream(
         return Err(AppError::Conflict("同时打开的事件流太多，稍后再试".into()));
     };
 
-    let after_seq = last_event_id(&headers).unwrap_or(0);
+    // 头优先：浏览器自己重连时带的是它真正收到的最后一条
+    let after_seq = last_event_id(&headers)
+        .or(query.after.filter(|seq| *seq >= 0))
+        .unwrap_or(0);
     // 这个 run 的事件不可能早于它自己被创建的时刻。给查询一个 ts 下界，
     // 就能让 Postgres 裁掉所有更早的月度分区——run 已经在手上了，不用额外查一次。
     // 留一分钟余量，免得被时钟回拨这类事情卡掉边界上的事件。

@@ -3,6 +3,8 @@
 //! 每次更新任务定义都产生一个**不可变版本**，run 引用的是版本而不是任务。
 //! 没有这层，改完定义后历史 run 就无法解释、无法回放，漂移检测也失去基线。
 
+use std::collections::HashMap;
+
 use ai_task_proto::{DagSpec, TaskId, TaskVersionId, WorkspaceId};
 use chrono::{DateTime, Utc};
 use sqlx::Row;
@@ -397,21 +399,74 @@ impl Store {
             what: "task_version",
             id: id.to_string(),
         })?;
-
-        let spec_json: serde_json::Value = row.try_get("dag_spec")?;
-        Ok(TaskVersionRecord {
-            id,
-            task_id: TaskId(row.try_get("task_id")?),
-            version_no: row.try_get("version_no")?,
-            spec: serde_json::from_value(spec_json).map_err(|err| StoreError::Corrupt {
-                what: "task_versions.dag_spec",
-                detail: err.to_string(),
-            })?,
-            rules: row.try_get("rules")?,
-            rules_hash: row.try_get("rules_hash")?,
-            created_at: row.try_get("created_at")?,
-        })
+        version_from_row(&row)
     }
+
+    /// 按版本号取一个任务的版本快照。
+    ///
+    /// **连 `tasks` 校验 workspace。**`task_versions` 自己没有 `workspace_id`，
+    /// 只按 `(task_id, version_no)` 查的话，拿到别的租户的任务 id 就能读到它的编排。
+    /// 走 `UNIQUE (task_id, version_no)` 那条索引，一次点查。
+    pub async fn task_version_by_no(
+        &self,
+        workspace_id: WorkspaceId,
+        task_id: TaskId,
+        version_no: i32,
+    ) -> Result<TaskVersionRecord, StoreError> {
+        let row = sqlx::query(
+            "SELECT v.id, v.task_id, v.version_no, v.dag_spec, v.rules, v.rules_hash, v.created_at
+             FROM task_versions v
+             JOIN tasks t ON t.id = v.task_id
+             WHERE v.task_id = $1 AND v.version_no = $2 AND t.workspace_id = $3",
+        )
+        .bind(uuid::Uuid::from(task_id))
+        .bind(version_no)
+        .bind(uuid::Uuid::from(workspace_id))
+        .fetch_optional(self.pool())
+        .await?
+        .ok_or(StoreError::NotFound {
+            what: "task_version",
+            id: format!("{task_id} v{version_no}"),
+        })?;
+        version_from_row(&row)
+    }
+
+    /// 一批任务的名字。列表页补任务名用：一页一次查询，不按行查。
+    pub async fn task_names(
+        &self,
+        workspace_id: WorkspaceId,
+        ids: &[TaskId],
+    ) -> Result<HashMap<TaskId, String>, StoreError> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let ids: Vec<uuid::Uuid> = ids.iter().map(|id| uuid::Uuid::from(*id)).collect();
+        let rows =
+            sqlx::query("SELECT id, name FROM tasks WHERE workspace_id = $1 AND id = ANY($2)")
+                .bind(uuid::Uuid::from(workspace_id))
+                .bind(&ids)
+                .fetch_all(self.pool())
+                .await?;
+        rows.into_iter()
+            .map(|row| Ok((TaskId(row.try_get("id")?), row.try_get("name")?)))
+            .collect()
+    }
+}
+
+fn version_from_row(row: &sqlx::postgres::PgRow) -> Result<TaskVersionRecord, StoreError> {
+    let spec_json: serde_json::Value = row.try_get("dag_spec")?;
+    Ok(TaskVersionRecord {
+        id: TaskVersionId(row.try_get("id")?),
+        task_id: TaskId(row.try_get("task_id")?),
+        version_no: row.try_get("version_no")?,
+        spec: serde_json::from_value(spec_json).map_err(|err| StoreError::Corrupt {
+            what: "task_versions.dag_spec",
+            detail: err.to_string(),
+        })?,
+        rules: row.try_get("rules")?,
+        rules_hash: row.try_get("rules_hash")?,
+        created_at: row.try_get("created_at")?,
+    })
 }
 
 fn task_from_row(row: sqlx::postgres::PgRow) -> Result<TaskRecord, StoreError> {

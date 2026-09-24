@@ -83,3 +83,56 @@ describe('subscribeRunEvents', () => {
     expect(states.at(-1)).toBe('closed');
   });
 });
+
+describe('连接被服务端拒绝之后', () => {
+  test('退避后自己新建连接，并从断点续传', () => {
+    const seen: number[] = [];
+    const states: string[] = [];
+    // 用假计时器太重；这里直接把 setTimeout 换成立即执行的版本
+    const realSetTimeout = globalThis.setTimeout;
+    (globalThis as Record<string, unknown>).setTimeout = ((fn: () => void) => {
+      fn();
+      return 0;
+    }) as unknown as typeof setTimeout;
+    try {
+      subscribeRunEvents('r1', { onEvent: (e) => seen.push(e.seq), onStatus: (s) => states.push(s) });
+      const first = FakeEventSource.last!;
+      first.emit(1);
+      first.emit(2);
+      // 服务端给了 409（同时打开的流太多）：EventSource 把连接判死
+      first.readyState = FakeEventSource.CLOSED;
+      first.onerror?.();
+
+      const second = FakeEventSource.last!;
+      expect(second).not.toBe(first);
+      // 不从头重放：带上已经收到的最后一条
+      expect(second.url).toBe('/api/v1/runs/r1/events?after=2');
+      second.emit(3);
+      expect(seen).toEqual([1, 2, 3]);
+      expect(states).toContain('retrying');
+    } finally {
+      (globalThis as Record<string, unknown>).setTimeout = realSetTimeout;
+    }
+  });
+
+  test('一直连不上时，重试有上限，最后标成已断开', () => {
+    const states: string[] = [];
+    const realSetTimeout = globalThis.setTimeout;
+    (globalThis as Record<string, unknown>).setTimeout = ((fn: () => void) => {
+      fn();
+      return 0;
+    }) as unknown as typeof setTimeout;
+    try {
+      subscribeRunEvents('r1', { onEvent: () => {}, onStatus: (s) => states.push(s) });
+      for (let i = 0; i < 10; i++) {
+        const src = FakeEventSource.last!;
+        if (src.readyState === FakeEventSource.CLOSED && states.at(-1) === 'closed') break;
+        src.readyState = FakeEventSource.CLOSED;
+        src.onerror?.();
+      }
+      expect(states.at(-1)).toBe('closed');
+    } finally {
+      (globalThis as Record<string, unknown>).setTimeout = realSetTimeout;
+    }
+  });
+});

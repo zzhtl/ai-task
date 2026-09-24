@@ -8,9 +8,8 @@
   import { describeError, ignoreForbidden } from '$api/client';
   import { resource, invalidate } from '$api/resource.svelte';
   import { listApprovals, type Approval } from '$api/models';
-  import { listRuns, listAllTasks } from '$api/runs';
-  import type { RunSummary } from '$api/types/RunSummary';
-  import type { TaskSummary } from '$api/types/TaskSummary';
+  import { listRuns } from '$api/runs';
+  import type { RunListItem } from '$api/types/RunListItem';
   import ApprovalCard from '$lib/approvals/ApprovalCard.svelte';
   import PageHeader from '$lib/ui/PageHeader.svelte';
   import Empty from '$lib/ui/Empty.svelte';
@@ -18,15 +17,15 @@
 
   // 和侧栏徽标、首页共享同一个 key
   const approvals = resource<Approval[]>('approvals', () => listApprovals(), { pollMs: 5000 });
-  // 卡片上要显示"这是哪个任务的"。在跑的 run 变化没那么快，10 秒够了。
-  const running = resource<RunSummary[]>(
+  // 卡片上要显示"这是哪个任务的"：在跑的 run 列表项里自带任务名。变化没那么快，10 秒够了。
+  const running = resource<RunListItem[]>(
     'runs:running',
     (signal) =>
       listRuns({ status: ['running'], limit: 100 }, signal)
         .then((page) => page.items)
         .catch((e) => {
           ignoreForbidden(e);
-          return [] as RunSummary[];
+          return [] as RunListItem[];
         }),
     { pollMs: 10_000 }
   );
@@ -35,20 +34,8 @@
   const loaded = $derived(!approvals.pending);
   const error = $derived(approvals.error ? describeError(approvals.error) : null);
 
-  // 任务列表和 /tasks、命令面板共享同一个 key，所以这里不额外产生请求
-  const tasks = resource<TaskSummary[]>(
-    'tasks',
-    (signal) => listAllTasks(signal),
-    { ttlMs: 30_000 }
-  );
-
-  /** run_id -> 任务名。原来是每张卡片各做两次 find，现在建一次 Map。 */
-  const taskNames = $derived.by(() => {
-    const byTask = new Map((tasks.data ?? []).map((t) => [t.id, t.name]));
-    return new Map(
-      (running.data ?? []).map((r) => [r.id, byTask.get(r.task_id) ?? null])
-    );
-  });
+  /** run_id → 任务名。 */
+  const taskNames = $derived(new Map((running.data ?? []).map((r) => [r.id, r.task_name])));
 </script>
 
 <PageHeader title="待审批" help="超时未决一律按拒绝处理：审批门的意义就在于「没人点头就不做」。">

@@ -1,56 +1,54 @@
 //! Run 的查询与取消。
 
-use ai_task_proto::{Page, RunId, RunSummary};
-use ai_task_store::RunRecord;
+use ai_task_proto::{
+    Page, RunDetail, RunFilter, RunId, RunListItem, RunStatus, RunSummary, TaskId, TriggerKind,
+};
+use ai_task_store::{RunListFilter, RunRecord};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
 
 use crate::error::AppError;
 use crate::extract::{Json, Path, Query};
 use crate::state::AppState;
 
-/// `GET /api/v1/runs` 的查询参数。
-///
-/// `deny_unknown_fields`：拼错的参数必须报错。静默忽略会把一个笔误变成
-/// 「返回全部」——最典型的例子是 `taskid` 拼错后看起来"查到了很多结果"。
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ListQuery {
-    #[serde(default)]
-    pub task_id: Option<ai_task_proto::TaskId>,
-    /// 逗号分隔的状态列表，如 `failed,timed_out`。
-    ///
-    /// 用逗号而不是重复的 `status=` 键：`serde_urlencoded` 不认重复键，
-    /// 而一个拼错的状态名必须是 422，不能悄悄变成「不过滤」。
-    #[serde(default)]
-    pub status: Option<String>,
-    #[serde(default)]
-    pub cursor: Option<String>,
-    #[serde(default)]
-    pub limit: Option<u32>,
-}
-
 /// `GET /api/v1/runs`
+///
+/// 查询参数就是 [`RunFilter`]：服务端按它解析，生成给前端的类型和实现不会再对不上。
 pub async fn list(
     State(state): State<AppState>,
-    Query(query): Query<ListQuery>,
-) -> Result<Json<Page<RunSummary>>, AppError> {
+    Query(query): Query<RunFilter>,
+) -> Result<Json<Page<RunListItem>>, AppError> {
     let limit = i64::from(query.limit.unwrap_or(50).clamp(1, 200));
     let cursor = query.cursor.as_deref().map(decode_cursor).transpose()?;
-    let status = query.status.as_deref().map(parse_statuses).transpose()?;
+    let filter = RunListFilter {
+        task_id: query.task_id,
+        statuses: query
+            .status
+            .as_deref()
+            .map(|raw| parse_list::<RunStatus>(raw, "status", "状态"))
+            .transpose()?,
+        triggers: query
+            .trigger
+            .as_deref()
+            .map(|raw| parse_list::<TriggerKind>(raw, "trigger", "触发方式"))
+            .transpose()?,
+        since: query.since,
+    };
 
     let runs = state
         .store
-        .list_runs(
-            state.workspace_id,
-            query.task_id,
-            status.as_deref(),
-            cursor,
-            limit,
-        )
+        .list_runs(state.workspace_id, &filter, cursor, limit)
+        .await?;
+
+    // 任务名一页一次补齐，不按行查
+    let mut task_ids: Vec<TaskId> = runs.iter().map(|r| r.task_id).collect();
+    task_ids.sort_unstable_by_key(|id| id.0);
+    task_ids.dedup();
+    let names = state
+        .store
+        .task_names(state.workspace_id, &task_ids)
         .await?;
 
     // 取满一页才给游标；不满说明到底了，给 next_cursor 会让客户端白跑一次
@@ -59,22 +57,50 @@ pub async fn list(
         .flatten();
 
     Ok(Json(Page {
-        items: runs.iter().map(to_summary).collect(),
+        items: runs
+            .iter()
+            .map(|run| RunListItem {
+                summary: to_summary(run),
+                // run 还在而任务没了只可能是删除的中间态；给 id 的前 8 位，不给空串
+                task_name: names
+                    .get(&run.task_id)
+                    .cloned()
+                    .unwrap_or_else(|| run.task_id.to_string()[..8].to_owned()),
+            })
+            .collect(),
         next_cursor,
     }))
 }
 
 /// `GET /api/v1/runs/{id}`
+///
+/// 是 [`RunSummary`] 的超集（[`RunDetail`]）：老的客户端照样能读。
 pub async fn get(
     State(state): State<AppState>,
     Path(id): Path<RunId>,
-) -> Result<Json<RunSummary>, AppError> {
+) -> Result<Json<RunDetail>, AppError> {
     let run = state
         .store
         .get_run(state.workspace_id, id)
         .await
         .map_err(|e| map_not_found(e, id))?;
-    Ok(Json(to_summary(&run)))
+    let meta = state
+        .store
+        .run_meta(state.workspace_id, id)
+        .await
+        .map_err(|e| map_not_found(e, id))?;
+    Ok(Json(RunDetail {
+        summary: to_summary(&run),
+        task_name: meta.task_name,
+        version_no: meta.version_no,
+        current_version_no: meta.current_version_no,
+        inputs: run.inputs,
+        output: run.output,
+        compare_to: run.compare_to,
+        cli_version: run.cli_version,
+        triggered_by: meta.triggered_by,
+        schedule_id: meta.schedule_id,
+    }))
 }
 
 /// `POST /api/v1/runs/{id}/cancel`
@@ -187,17 +213,22 @@ fn encode_cursor(created_at: DateTime<Utc>, id: RunId) -> String {
     format!("{}|{id}", created_at.timestamp_micros())
 }
 
-/// `failed,timed_out` → 状态列表。任何一段认不出来整个请求就 422。
-fn parse_statuses(raw: &str) -> Result<Vec<ai_task_proto::RunStatus>, AppError> {
+/// `failed,timed_out` → 枚举列表。任何一段认不出来整个请求就 422：
+/// 拼错一个值不能悄悄变成「少过滤一项」。
+fn parse_list<T: serde::de::DeserializeOwned>(
+    raw: &str,
+    field: &str,
+    what: &str,
+) -> Result<Vec<T>, AppError> {
     raw.split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| {
             serde_json::from_value(serde_json::Value::String(s.to_owned())).map_err(|_| {
                 AppError::Validation(vec![ai_task_proto::FieldError {
-                    field: "status".into(),
+                    field: field.into(),
                     code: "invalid".into(),
-                    message: format!("不认识的状态：{s}"),
+                    message: format!("不认识的{what}：{s}"),
                 }])
             })
         })

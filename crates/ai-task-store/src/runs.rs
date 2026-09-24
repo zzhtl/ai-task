@@ -4,11 +4,14 @@
 //! 真值是 `run_events`。保留这几列只为让列表查询和调度器扫描不必回放事件。
 //! 因此它们的更新永远和对应的事件写在同一个事务里。
 
-use ai_task_proto::{RunId, RunStatus, TaskId, TaskVersionId, TriggerKind, UsdMicros, WorkspaceId};
+use ai_task_proto::{
+    RunId, RunStatus, ScheduleId, TaskId, TaskVersionId, TriggerKind, UsdMicros, UserId,
+    WorkspaceId,
+};
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgArguments;
 use sqlx::query::Query;
-use sqlx::{AssertSqlSafe, Postgres, Row};
+use sqlx::{AssertSqlSafe, Postgres, QueryBuilder, Row};
 
 use crate::events::{PendingEvent, append_in_tx};
 use crate::{Store, StoreError};
@@ -86,6 +89,33 @@ pub struct NewRun {
     pub inputs: Option<serde_json::Value>,
     /// 拿哪个 run 当基线做结构化 diff。影子执行时指向被替换的那次。
     pub compare_to: Option<RunId>,
+    /// 谁触发的。定时触发、没开认证时为 `None`。
+    pub created_by: Option<UserId>,
+}
+
+/// [`Store::list_runs`] 的过滤条件。
+///
+/// `None` 表示不按这一项过滤；`Some(vec![])` 是"一个都不要"，结果为空——
+/// "筛选条件为空"不等于"不筛"。
+#[derive(Debug, Clone, Default)]
+pub struct RunListFilter {
+    pub task_id: Option<TaskId>,
+    pub statuses: Option<Vec<RunStatus>>,
+    pub triggers: Option<Vec<TriggerKind>>,
+    pub since: Option<DateTime<Utc>>,
+}
+
+/// 详情页比列表多要的那几样。
+#[derive(Debug, Clone)]
+pub struct RunMeta {
+    pub task_name: String,
+    /// 这次执行绑定的版本号。
+    pub version_no: i32,
+    /// 任务现在的版本号。
+    pub current_version_no: i32,
+    /// 触发人的显示名。
+    pub triggered_by: Option<String>,
+    pub schedule_id: Option<ScheduleId>,
 }
 
 impl Store {
@@ -121,8 +151,8 @@ impl Store {
 
         let row = sqlx::query(
             "INSERT INTO runs (id, workspace_id, task_id, task_version_id, trigger, status,
-                               dry_run, inputs, compare_to)
-             VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7, $8)
+                               dry_run, inputs, compare_to, created_by)
+             VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7, $8, $9)
              RETURNING created_at",
         )
         .bind(uuid::Uuid::from(run_id))
@@ -133,6 +163,7 @@ impl Store {
         .bind(new.dry_run)
         .bind(&new.inputs)
         .bind(new.compare_to.map(uuid::Uuid::from))
+        .bind(new.created_by.map(uuid::Uuid::from))
         .fetch_one(&mut **tx)
         .await?;
 
@@ -220,6 +251,17 @@ impl Store {
         .bind(&error)
         .bind(cli_version)
         .bind(&output_digest)
+        .execute(&mut *tx)
+        .await?;
+        // 结束的 run 不能还有待决的审批。正常路径上等待方已经收过尾；
+        // 剩下的是重启回收、以及 run 先于策略审批结束的情况——
+        // 不在这里关掉，队列里就挂着一张点了也没用的卡片，直到自然过期。
+        sqlx::query(
+            "UPDATE approvals
+             SET decided_at = now(), approved = false, reason = 'run 已结束，审批作废'
+             WHERE run_id = $1 AND decided_at IS NULL",
+        )
+        .bind(uuid::Uuid::from(run_id))
         .execute(&mut *tx)
         .await?;
         let seq = append_in_tx(&mut tx, run_id, std::slice::from_ref(&event)).await?;
@@ -319,57 +361,89 @@ impl Store {
     ///
     /// 实测（100k 行）游标 6 buffers / 0.16ms，`OFFSET 50000` 是
     /// 1732 buffers / 15.3ms，而且随深度线性变差。
-    /// `status` 为 `None` 表示不按状态过滤；给了空切片会一条都不返回——
-    /// 「筛选条件为空」和「没有筛选」是两回事，不该把前者悄悄当成后者。
+    ///
+    /// **谓词按实际传了哪些条件拼出来，不用 `($n IS NULL OR ...)`。**
+    /// 那种写法让 planner 在计划期看不出某个条件会不会被用上，于是选不了
+    /// 对应的索引——加了索引也照样全扫再过滤。拼进 SQL 文本的只有下面这些
+    /// 字面量片段，数据一律 `push_bind`。
+    ///
+    /// 列表不取 `inputs` / `output`：一行几十 KB 的 JSON 乘以一页 50 行，
+    /// 列表页一个字都用不上。要看的时候走 [`Store::get_run`]。
     pub async fn list_runs(
         &self,
         workspace_id: WorkspaceId,
-        task_id: Option<TaskId>,
-        status: Option<&[RunStatus]>,
+        filter: &RunListFilter,
         cursor: Option<(DateTime<Utc>, RunId)>,
         limit: i64,
     ) -> Result<Vec<RunRecord>, StoreError> {
-        let statuses = status.map(|s| s.iter().copied().map(status_str).collect::<Vec<_>>());
+        let mut qb = QueryBuilder::<Postgres>::new(format!(
+            "SELECT {RUN_LIST_COLUMNS} FROM runs WHERE workspace_id = "
+        ));
+        qb.push_bind(uuid::Uuid::from(workspace_id));
+        if let Some(task) = filter.task_id {
+            qb.push(" AND task_id = ").push_bind(uuid::Uuid::from(task));
+        }
+        if let Some(statuses) = &filter.statuses {
+            let statuses: Vec<String> = statuses.iter().copied().map(status_str).collect();
+            qb.push(" AND status = ANY(").push_bind(statuses).push(")");
+        }
+        if let Some(triggers) = &filter.triggers {
+            let triggers: Vec<String> = triggers.iter().copied().map(trigger_str).collect();
+            qb.push(" AND trigger = ANY(").push_bind(triggers).push(")");
+        }
+        if let Some(since) = filter.since {
+            qb.push(" AND created_at >= ").push_bind(since);
+        }
+        if let Some((ts, id)) = cursor {
+            qb.push(" AND (created_at, id) < (")
+                .push_bind(ts)
+                .push(", ")
+                .push_bind(uuid::Uuid::from(id))
+                .push(")");
+        }
+        qb.push(" ORDER BY created_at DESC, id DESC LIMIT ")
+            .push_bind(limit);
 
-        // **谓词按实际传参拼出来，不用 `($n IS NULL OR ...)`。**
-        //
-        // 原来三个可选条件全挤在一条 SQL 里，planner 在计划期看不出
-        // `status` 到底会不会被用上，于是选不了 runs_status_recent_idx——
-        // 加了索引也照样全扫再过滤。**这是"改了但其实没改好"最容易发生的地方。**
-        // 谓词片段都是代码里的字面量，动态数据一律还是走 bind。
-        let predicate: &'static str = match (task_id.is_some(), statuses.is_some()) {
-            (false, false) => {
-                "workspace_id = $1
-                 AND ($3::timestamptz IS NULL OR (created_at, id) < ($3, $4))
-                 ORDER BY created_at DESC, id DESC LIMIT $5"
-            }
-            (true, false) => {
-                "workspace_id = $1 AND task_id = $2
-                 AND ($3::timestamptz IS NULL OR (created_at, id) < ($3, $4))
-                 ORDER BY created_at DESC, id DESC LIMIT $5"
-            }
-            (false, true) => {
-                "workspace_id = $1 AND status = ANY($6)
-                 AND ($3::timestamptz IS NULL OR (created_at, id) < ($3, $4))
-                 ORDER BY created_at DESC, id DESC LIMIT $5"
-            }
-            (true, true) => {
-                "workspace_id = $1 AND task_id = $2 AND status = ANY($6)
-                 AND ($3::timestamptz IS NULL OR (created_at, id) < ($3, $4))
-                 ORDER BY created_at DESC, id DESC LIMIT $5"
-            }
-        };
-
-        let rows = run_query(predicate)
-            .bind(uuid::Uuid::from(workspace_id))
-            .bind(task_id.map(uuid::Uuid::from))
-            .bind(cursor.map(|(ts, _)| ts))
-            .bind(cursor.map(|(_, id)| uuid::Uuid::from(id)))
-            .bind(limit)
-            .bind(statuses)
-            .fetch_all(self.pool())
-            .await?;
+        let rows = qb.build().fetch_all(self.pool()).await?;
         rows.into_iter().map(run_from_row).collect()
+    }
+
+    /// 详情页要的额外信息：任务名、两个版本号、触发人、定时。
+    ///
+    /// 一条 JOIN 查完。`workspace_id` 在谓词里：拿到别的租户的 run id 也查不到。
+    pub async fn run_meta(
+        &self,
+        workspace_id: WorkspaceId,
+        id: RunId,
+    ) -> Result<RunMeta, StoreError> {
+        let row = sqlx::query(
+            "SELECT t.name AS task_name, v.version_no,
+                    COALESCE(cv.version_no, v.version_no) AS current_version_no,
+                    u.display_name AS triggered_by, r.schedule_id
+             FROM runs r
+             JOIN tasks t ON t.id = r.task_id
+             JOIN task_versions v ON v.id = r.task_version_id
+             LEFT JOIN task_versions cv ON cv.id = t.current_version_id
+             LEFT JOIN users u ON u.id = r.created_by
+             WHERE r.id = $1 AND r.workspace_id = $2",
+        )
+        .bind(uuid::Uuid::from(id))
+        .bind(uuid::Uuid::from(workspace_id))
+        .fetch_optional(self.pool())
+        .await?
+        .ok_or(StoreError::NotFound {
+            what: "run",
+            id: id.to_string(),
+        })?;
+        Ok(RunMeta {
+            task_name: row.try_get("task_name")?,
+            version_no: row.try_get("version_no")?,
+            current_version_no: row.try_get("current_version_no")?,
+            triggered_by: row.try_get("triggered_by")?,
+            schedule_id: row
+                .try_get::<Option<uuid::Uuid>, _>("schedule_id")?
+                .map(ScheduleId),
+        })
     }
 
     /// 还没跑完的 run。引擎重启后据此决定要恢复哪些。
@@ -402,13 +476,22 @@ impl Store {
 /// 所有动态数据一律走 bind 参数。
 fn run_query(predicate: &'static str) -> Query<'static, Postgres, PgArguments> {
     sqlx::query(AssertSqlSafe(format!(
-        "SELECT id, workspace_id, task_id, task_version_id, status, trigger, dry_run,
-                inputs, output, error, cost_micros, max_seq, cli_version,
-                fingerprint, output_digest, compare_to,
-                created_at, started_at, finished_at
-         FROM runs WHERE {predicate}"
+        "SELECT {RUN_COLUMNS} FROM runs WHERE {predicate}"
     )))
 }
+
+/// 一个 run 的全部列，和 [`run_from_row`] 一一对应。
+const RUN_COLUMNS: &str = "id, workspace_id, task_id, task_version_id, status, trigger, dry_run,
+     inputs, output, error, cost_micros, max_seq, cli_version,
+     fingerprint, output_digest, compare_to,
+     created_at, started_at, finished_at";
+
+/// 列表用的列：`inputs` / `output` 换成 NULL。行的形状不变，[`run_from_row`] 照用。
+const RUN_LIST_COLUMNS: &str =
+    "id, workspace_id, task_id, task_version_id, status, trigger, dry_run,
+     NULL::jsonb AS inputs, NULL::jsonb AS output, error, cost_micros, max_seq, cli_version,
+     fingerprint, output_digest, compare_to,
+     created_at, started_at, finished_at";
 
 pub(crate) fn run_from_row(row: sqlx::postgres::PgRow) -> Result<RunRecord, StoreError> {
     Ok(RunRecord {

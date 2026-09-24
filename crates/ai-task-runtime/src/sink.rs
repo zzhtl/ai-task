@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use ai_task_proto::{NodeKey, RunEventBody, RunId};
 use ai_task_store::{PendingEvent, Store, StoreError};
+use tokio_util::sync::CancellationToken;
 
 /// 攒批上限。再多就该落库了，免得进程崩了丢一大段。
 const MAX_BATCH: usize = 32;
@@ -135,7 +136,7 @@ impl EventSink {
         Ok(())
     }
 
-    /// 距离下次强制刷新还有多久。执行循环用它设 select 的定时器。
+    /// 距离下次强制刷新还有多久。[`flush_on_interval`] 用它定下一次醒来的时间。
     #[must_use]
     pub fn until_next_flush(&self) -> Duration {
         FLUSH_INTERVAL.saturating_sub(self.last_flush.elapsed())
@@ -145,6 +146,30 @@ impl EventSink {
     #[must_use]
     pub fn pending(&self) -> usize {
         self.buffer.len()
+    }
+}
+
+/// 执行期间按间隔刷新，直到 `stop` 被取消。
+///
+/// [`EventSink::push`] 只在下一条事件进来时才看间隔。审批门在等人、shell 在跑
+/// 长命令的时候没有下一条，已经缓冲的事件（上一步的 `NodeFinished`、这一步的
+/// `NodeStarted`）会一直压着，界面上上一步就卡在"执行中"。
+///
+/// 停止信号只在两次等待之间检查，**不会在 `flush` 半途被打断**：`flush` 先把
+/// 整批从缓冲里取走再写库，中途丢掉这个 future 就是丢事件。
+pub async fn flush_on_interval(sink: &tokio::sync::Mutex<EventSink>, stop: &CancellationToken) {
+    loop {
+        let wait = sink.lock().await.until_next_flush();
+        tokio::select! {
+            () = stop.cancelled() => return,
+            () = tokio::time::sleep(wait) => {}
+        }
+        let mut sink = sink.lock().await;
+        // 等待期间事件自己触发过刷新的话，时间还没到，接着等
+        if sink.until_next_flush().is_zero() {
+            // 失败时这批留在缓冲里、sink 已经记了日志，下一轮或下一条事件会再试
+            let _ = sink.flush().await;
+        }
     }
 }
 

@@ -143,6 +143,7 @@ impl Harness {
                     dry_run: false,
                     inputs: None,
                     compare_to: None,
+                    created_by: None,
                 },
                 PendingEvent::run(RunEventBody::RunQueued {
                     task_version_id: version,

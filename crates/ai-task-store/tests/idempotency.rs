@@ -8,7 +8,7 @@ mod common;
 
 use ai_task_proto::{RunEventBody, TaskId, TaskVersionId, TriggerKind, WorkspaceId};
 use ai_task_store::idempotency::{IdempotentCreate, IdempotentRun};
-use ai_task_store::{NewRun, PendingEvent};
+use ai_task_store::{NewRun, PendingEvent, RunListFilter};
 
 fn new_run(ws: WorkspaceId, task: TaskId, version: TaskVersionId, dry_run: bool) -> NewRun {
     NewRun {
@@ -19,6 +19,7 @@ fn new_run(ws: WorkspaceId, task: TaskId, version: TaskVersionId, dry_run: bool)
         dry_run,
         inputs: None,
         compare_to: None,
+        created_by: None,
     }
 }
 
@@ -90,7 +91,7 @@ db_test!(
         // 库里只有一个 run
         let runs = f
             .store
-            .list_runs(f.workspace, None, None, None, 100)
+            .list_runs(f.workspace, &RunListFilter::default(), None, 100)
             .await
             .expect("列 run");
         assert_eq!(runs.len(), 1, "同一个键不该建出第二个 run");
@@ -134,7 +135,7 @@ db_test!(the_same_key_with_a_different_body_is_a_conflict, |f| {
 
     let runs = f
         .store
-        .list_runs(f.workspace, None, None, None, 100)
+        .list_runs(f.workspace, &RunListFilter::default(), None, 100)
         .await
         .expect("列 run");
     assert_eq!(runs.len(), 1, "冲突不该建出 run");
@@ -160,7 +161,7 @@ db_test!(different_keys_create_different_runs, |f| {
     }
     let runs = f
         .store
-        .list_runs(f.workspace, None, None, None, 100)
+        .list_runs(f.workspace, &RunListFilter::default(), None, 100)
         .await
         .expect("列 run");
     assert_eq!(runs.len(), 3);
@@ -188,7 +189,7 @@ db_test!(no_key_means_no_deduplication, |f| {
     }
     let runs = f
         .store
-        .list_runs(f.workspace, None, None, None, 100)
+        .list_runs(f.workspace, &RunListFilter::default(), None, 100)
         .await
         .expect("列 run");
     assert_eq!(runs.len(), 2);

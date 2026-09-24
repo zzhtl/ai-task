@@ -257,6 +257,64 @@ pub struct RunSummary {
     pub max_seq: i64,
 }
 
+/// `GET /api/v1/runs` 的一行：摘要加任务名。
+///
+/// 列表每一行都要显示任务名。以前客户端为此再拉一遍任务表逐行去找，
+/// 任务表又只取了第一页——第 51 个任务的执行记录显示成一串 id。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RunListItem {
+    #[serde(flatten)]
+    pub summary: RunSummary,
+    pub task_name: String,
+}
+
+/// `GET /api/v1/runs/{id}` —— 一次执行的全部元信息。
+///
+/// 比列表多出来的都是详情页才用得上的：输入（重跑要原样带上）、输出（结论）、
+/// 版本号（编排图要画**这次执行用的那一版**，不是任务现在的样子）、谁触发的。
+/// 是 `RunSummary` 的超集，只多不少。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RunDetail {
+    #[serde(flatten)]
+    pub summary: RunSummary,
+    pub task_name: String,
+    /// 这次执行绑定的版本号。
+    pub version_no: i32,
+    /// 任务**现在**的版本号。和 `version_no` 不同，说明任务在这次执行之后被改过。
+    pub current_version_no: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inputs: Option<serde_json::Value>,
+    /// run 的最终输出：拓扑序里最后一个成功节点的输出。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compare_to: Option<RunId>,
+    /// 驱动这次执行的 claude CLI 版本。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_version: Option<String>,
+    /// 手动触发的人（显示名）。定时触发、没开认证时没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triggered_by: Option<String>,
+    /// 定时触发时是哪条定时。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_id: Option<ScheduleId>,
+}
+
+/// `GET /api/v1/tasks/{id}/versions/{no}` —— 一个版本的编排快照。版本不可变。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TaskVersion {
+    pub task_id: TaskId,
+    pub version_no: i32,
+    pub spec: DagSpec,
+    /// 这个版本额外挂的规则名。全局规则不在这里。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<String>,
+    pub created_at: DateTime<Utc>,
+}
+
 /// `POST /api/v1/tasks/{id}/runs` —— 需要 `Idempotency-Key` 头，返回 202。
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -369,21 +427,32 @@ pub struct UpcomingFire {
     pub next_fire_at: DateTime<Utc>,
 }
 
-/// `GET /api/v1/runs` 的过滤条件。
+/// `GET /api/v1/runs` 的查询参数。服务端直接按这个类型解析，所以它就是契约本身。
 ///
-/// 未声明的查询参数会被拒绝而不是忽略——静默忽略会把一个拼写错误变成「返回全部」。
+/// 多选用**逗号分隔**（`status=failed,timed_out`），不用重复的键：查询串的解析
+/// 不认重复键。认不出的值整个请求 422——拼错一个状态名不能悄悄变成「不过滤」。
+/// 未声明的参数会被拒绝而不是忽略，理由同上。
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(deny_unknown_fields)]
 pub struct RunFilter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<TaskId>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub status: Vec<RunStatus>,
+    /// 逗号分隔的 [`RunStatus`]。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trigger: Option<TriggerKind>,
+    pub status: Option<String>,
+    /// 逗号分隔的 [`TriggerKind`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
+    /// 只要这个时刻（含）之后创建的，RFC 3339。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<DateTime<Utc>>,
+    /// 上一页的 `next_cursor`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// 每页条数，1–200，默认 50。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
 }
 
 /// `POST /api/v1/runs/{id}/nodes/{key}/approve`

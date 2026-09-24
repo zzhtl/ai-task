@@ -279,8 +279,17 @@ impl RunEngine {
             },
         };
 
-        let outcome =
-            crate::dag::run_dag(&dag, &runner, writer, run.inputs.as_ref(), cancel).await?;
+        let dag_done = CancellationToken::new();
+        let (outcome, ()) = tokio::join!(
+            async {
+                let outcome =
+                    crate::dag::run_dag(&dag, &runner, writer, run.inputs.as_ref(), cancel).await;
+                dag_done.cancel();
+                outcome
+            },
+            crate::sink::flush_on_interval(&sink, &dag_done),
+        );
+        let outcome = outcome?;
         sink.lock().await.flush().await?;
 
         let terminal = if outcome.cancelled || cancel.is_cancelled() {

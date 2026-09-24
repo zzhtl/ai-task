@@ -42,6 +42,24 @@ export function money(usd: string | number): string {
   return n < 0.01 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`;
 }
 
+/**
+ * 十进制金额字符串 → 整数微美元（`"0.012345"` → 12345）。
+ *
+ * 后端给的是十进制字符串；要累加就在整数上加——浮点加几十次就开始对不上账。
+ * 超过 6 位的小数截断；解析不了的按 0 算（显示层不该因为一条坏数据崩掉）。
+ */
+export function toMicros(usd: string): number {
+  const m = /^(-?)(\d*)(?:\.(\d*))?$/.exec(usd.trim());
+  if (!m || (m[2] === '' && (m[3] ?? '') === '')) return 0;
+  const micros = Number(m[2] || '0') * 1_000_000 + Number(`${m[3] ?? ''}000000`.slice(0, 6));
+  return m[1] ? -micros : micros;
+}
+
+/** 整数微美元 → 显示用的金额。 */
+export function moneyMicros(micros: number): string {
+  return money(micros / 1_000_000);
+}
+
 /** 字节。 */
 export function bytes(n: number): string {
   if (n < 1024) return `${n} B`;

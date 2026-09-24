@@ -11,7 +11,7 @@ use ai_task_proto::{
 };
 use ai_task_store::{
     HostUpdate, NewHost, NewRule, NewRun, NewTask, NewUser, PendingEvent, Role, RuleKind,
-    RunOutcome, StoreError, UserUpdate,
+    RunListFilter, RunOutcome, StoreError, UserUpdate,
 };
 
 fn spec(prompt: &str) -> DagSpec {
@@ -128,6 +128,7 @@ db_test!(creating_a_run_writes_its_first_event_atomically, |f| {
                 dry_run: false,
                 inputs: None,
                 compare_to: None,
+                created_by: None,
             },
             PendingEvent::run(RunEventBody::RunQueued {
                 task_version_id: version.id,
@@ -396,7 +397,7 @@ db_test!(run_listing_uses_a_keyset_cursor, |f| {
     }
     let page1 = f
         .store
-        .list_runs(f.workspace, None, None, None, 10)
+        .list_runs(f.workspace, &RunListFilter::default(), None, 10)
         .await
         .expect("第一页");
     assert_eq!(page1.len(), 10);
@@ -406,8 +407,7 @@ db_test!(run_listing_uses_a_keyset_cursor, |f| {
         .store
         .list_runs(
             f.workspace,
-            None,
-            None,
+            &RunListFilter::default(),
             Some((last.created_at, last.id)),
             10,
         )
@@ -447,7 +447,15 @@ db_test!(run_listing_filters_by_status, |f| {
 
     let only_done = f
         .store
-        .list_runs(f.workspace, None, Some(&[RunStatus::Succeeded]), None, 10)
+        .list_runs(
+            f.workspace,
+            &RunListFilter {
+                statuses: Some(vec![RunStatus::Succeeded]),
+                ..Default::default()
+            },
+            None,
+            10,
+        )
         .await
         .expect("按状态筛");
     assert!(only_done.iter().any(|r| r.id == done.id));
@@ -457,8 +465,10 @@ db_test!(run_listing_filters_by_status, |f| {
         .store
         .list_runs(
             f.workspace,
-            None,
-            Some(&[RunStatus::Queued, RunStatus::Succeeded]),
+            &RunListFilter {
+                statuses: Some(vec![RunStatus::Queued, RunStatus::Succeeded]),
+                ..Default::default()
+            },
             None,
             10,
         )
@@ -470,7 +480,15 @@ db_test!(run_listing_filters_by_status, |f| {
     // 空列表是"什么都不要"，不是"不过滤"
     let none = f
         .store
-        .list_runs(f.workspace, None, Some(&[]), None, 10)
+        .list_runs(
+            f.workspace,
+            &RunListFilter {
+                statuses: Some(vec![]),
+                ..Default::default()
+            },
+            None,
+            10,
+        )
         .await
         .expect("空筛选");
     assert!(none.is_empty());
@@ -847,4 +865,274 @@ db_test!(the_task_cursor_walks_every_task_exactly_once, |f| {
     assert_eq!(seen.len(), 12, "每个任务都要出现一次");
     let unique: std::collections::HashSet<_> = seen.iter().copied().collect();
     assert_eq!(unique.len(), 12, "游标不该让某个任务重复出现");
+});
+
+// ---------------------------------------------------------------- 执行记录的筛选与详情
+
+/// 用给定的触发方式和触发人建一个 run。
+async fn run_with(
+    f: &common::Fixture,
+    task: ai_task_proto::TaskId,
+    version: ai_task_proto::TaskVersionId,
+    trigger: TriggerKind,
+    created_by: Option<ai_task_proto::UserId>,
+) -> ai_task_store::RunRecord {
+    f.store
+        .create_run(
+            NewRun {
+                workspace_id: f.workspace,
+                task_id: task,
+                task_version_id: version,
+                trigger,
+                dry_run: false,
+                inputs: Some(serde_json::json!({ "env": "staging" })),
+                compare_to: None,
+                created_by,
+            },
+            PendingEvent::run(RunEventBody::RunQueued {
+                task_version_id: version,
+                trigger,
+                inputs: None,
+                dry_run: false,
+            }),
+        )
+        .await
+        .expect("建 run")
+}
+
+db_test!(runs_filter_by_trigger_and_since, |f| {
+    let (task, version) = f.seed_task().await;
+    let manual = run_with(&f, task, version, TriggerKind::Manual, None).await;
+    let scheduled = run_with(&f, task, version, TriggerKind::Schedule, None).await;
+    // 把手动那次挪到一小时前，好让 since 能把两者分开
+    sqlx::query("UPDATE runs SET created_at = now() - interval '1 hour' WHERE id = $1")
+        .bind(uuid::Uuid::from(manual.id))
+        .execute(f.store.pool())
+        .await
+        .expect("改时间");
+
+    let only_schedule = f
+        .store
+        .list_runs(
+            f.workspace,
+            &RunListFilter {
+                triggers: Some(vec![TriggerKind::Schedule]),
+                ..Default::default()
+            },
+            None,
+            10,
+        )
+        .await
+        .expect("按触发方式筛");
+    assert_eq!(
+        only_schedule.iter().map(|r| r.id).collect::<Vec<_>>(),
+        vec![scheduled.id]
+    );
+
+    let recent = f
+        .store
+        .list_runs(
+            f.workspace,
+            &RunListFilter {
+                since: Some(chrono::Utc::now() - chrono::Duration::minutes(10)),
+                ..Default::default()
+            },
+            None,
+            10,
+        )
+        .await
+        .expect("按时间筛");
+    assert_eq!(
+        recent.iter().map(|r| r.id).collect::<Vec<_>>(),
+        vec![scheduled.id]
+    );
+
+    // 条件叠加是"且"：定时触发 + 一小时之前的 → 没有
+    let both = f
+        .store
+        .list_runs(
+            f.workspace,
+            &RunListFilter {
+                task_id: Some(task),
+                triggers: Some(vec![TriggerKind::Schedule]),
+                since: Some(chrono::Utc::now() + chrono::Duration::minutes(1)),
+                ..Default::default()
+            },
+            None,
+            10,
+        )
+        .await
+        .expect("叠加筛选");
+    assert!(both.is_empty());
+
+    // 列表不带 inputs：一页几十行的 JSON，列表页一个字都用不上
+    assert!(only_schedule[0].inputs.is_none());
+});
+
+db_test!(
+    run_meta_names_the_version_it_ran_and_who_triggered_it,
+    |f| {
+        let (task, v1) = f.seed_task().await;
+        let user = f
+            .store
+            .create_user(NewUser {
+                workspace_id: f.workspace,
+                email: "zhang@example.com".into(),
+                display_name: "张三".into(),
+                password: "correct horse battery staple".into(),
+                role: Role::Operator,
+            })
+            .await
+            .expect("建用户");
+        let run = run_with(&f, task, v1, TriggerKind::Manual, Some(user)).await;
+
+        // 执行之后任务又改了一版：详情要能看出"这次跑的是老版本"
+        let current = f.store.get_task(f.workspace, task).await.expect("取任务");
+        f.store
+            .update_task(
+                f.workspace,
+                task,
+                None,
+                NewTask {
+                    workspace_id: f.workspace,
+                    name: current.name.clone(),
+                    description: None,
+                    spec: spec("第二版"),
+                    rules: vec![],
+                    rules_hash: "h1".into(),
+                    enabled: true,
+                },
+            )
+            .await
+            .expect("改任务");
+
+        let meta = f.store.run_meta(f.workspace, run.id).await.expect("详情");
+        assert_eq!(meta.task_name, current.name);
+        assert_eq!(meta.version_no, 1);
+        assert_eq!(meta.current_version_no, 2);
+        assert_eq!(meta.triggered_by.as_deref(), Some("张三"));
+
+        // 详情整行带着 inputs（重跑要原样带上）
+        let full = f.store.get_run(f.workspace, run.id).await.expect("取 run");
+        assert_eq!(full.inputs, Some(serde_json::json!({ "env": "staging" })));
+
+        // 别的租户拿同一个 id 查不到
+        let other = f.new_workspace().await;
+        assert!(matches!(
+            f.store.run_meta(other, run.id).await,
+            Err(StoreError::NotFound { .. })
+        ));
+    }
+);
+
+db_test!(a_task_version_is_only_readable_inside_its_workspace, |f| {
+    let (task, _) = f.seed_task().await;
+    let v1 = f
+        .store
+        .task_version_by_no(f.workspace, task, 1)
+        .await
+        .expect("本租户读得到");
+    assert_eq!(v1.version_no, 1);
+    assert_eq!(v1.task_id, task);
+
+    // task_versions 自己没有 workspace_id：不连 tasks 校验的话，这里会读到别人的编排
+    let other = f.new_workspace().await;
+    assert!(matches!(
+        f.store.task_version_by_no(other, task, 1).await,
+        Err(StoreError::NotFound { .. })
+    ));
+    assert!(matches!(
+        f.store.task_version_by_no(f.workspace, task, 99).await,
+        Err(StoreError::NotFound { .. })
+    ));
+});
+
+db_test!(
+    task_names_come_back_in_one_batch_and_stay_in_their_workspace,
+    |f| {
+        let (a, _) = f.seed_task().await;
+        let (b, _) = f.seed_task().await;
+        let names = f
+            .store
+            .task_names(f.workspace, &[a, b])
+            .await
+            .expect("批量取名");
+        assert_eq!(names.len(), 2);
+        assert!(names[&a].starts_with("task-"));
+
+        let other = f.new_workspace().await;
+        assert!(
+            f.store
+                .task_names(other, &[a, b])
+                .await
+                .expect("别的租户")
+                .is_empty()
+        );
+        assert!(
+            f.store
+                .task_names(f.workspace, &[])
+                .await
+                .expect("空")
+                .is_empty()
+        );
+    }
+);
+
+// 重启回收的 run 曾经把审批留在"待决"：审批队列里一直挂着一张
+// 点了也没用的卡片，直到十几分钟后自然过期。
+db_test!(finishing_a_run_closes_its_pending_approvals, |f| {
+    let (task, version) = f.seed_task().await;
+    let run = run_with(&f, task, version, TriggerKind::Manual, None).await;
+    let approval = f
+        .store
+        .create_approval(ai_task_store::NewApproval {
+            run_id: run.id,
+            node_key: Some(NodeKey("gate".into())),
+            title: "确认上线".into(),
+            intent: serde_json::json!({ "node": "gate" }),
+            rule_id: None,
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(15),
+        })
+        .await
+        .expect("建审批");
+    assert_eq!(
+        f.store
+            .pending_approvals(f.workspace)
+            .await
+            .expect("待决")
+            .len(),
+        1
+    );
+
+    f.store
+        .finish_run(
+            run.id,
+            RunOutcome::new(RunStatus::Failed, UsdMicros::ZERO).with_error("进程已消失"),
+            PendingEvent::run(RunEventBody::RunFinished {
+                status: RunStatus::Failed,
+                error: Some("进程已消失".into()),
+                cost_usd: UsdMicros::ZERO,
+            }),
+        )
+        .await
+        .expect("收尾");
+
+    assert!(
+        f.store
+            .pending_approvals(f.workspace)
+            .await
+            .expect("待决")
+            .is_empty(),
+        "run 结束了，它的审批不该还在队列里"
+    );
+    let closed = f
+        .store
+        .get_approval(f.workspace, approval)
+        .await
+        .expect("取审批")
+        .expect("审批还在");
+    assert!(closed.decided_at.is_some());
+    assert_eq!(closed.approved, Some(false), "没人点头就不是批准");
+    assert!(closed.decided_by.is_none(), "不是谁决定的，不能记在人头上");
+    assert!(closed.reason.is_some_and(|r| r.contains("run 已结束")));
 });

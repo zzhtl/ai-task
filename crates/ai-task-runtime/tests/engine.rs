@@ -32,6 +32,8 @@ struct ScriptedExecutor {
     delay: std::time::Duration,
     /// spawn 直接失败，模拟"目标上根本没有这个 CLI"。
     unstartable: bool,
+    /// 最后一条事件之前停这么久：一步跑得很安静的样子。
+    pause_before_last: std::time::Duration,
 }
 
 impl ScriptedExecutor {
@@ -40,6 +42,7 @@ impl ScriptedExecutor {
             script,
             delay: std::time::Duration::ZERO,
             unstartable: false,
+            pause_before_last: std::time::Duration::ZERO,
         }
     }
 
@@ -48,6 +51,17 @@ impl ScriptedExecutor {
             script,
             delay: std::time::Duration::from_millis(200),
             unstartable: false,
+            pause_before_last: std::time::Duration::ZERO,
+        }
+    }
+
+    /// 前面的事件一口气吐完，然后安静一段时间再结束。
+    fn quiet_before_finish(script: Vec<ExecEvent>, pause: std::time::Duration) -> Self {
+        Self {
+            script,
+            delay: std::time::Duration::ZERO,
+            unstartable: false,
+            pause_before_last: pause,
         }
     }
 
@@ -57,6 +71,7 @@ impl ScriptedExecutor {
             script: Vec::new(),
             delay: std::time::Duration::ZERO,
             unstartable: true,
+            pause_before_last: std::time::Duration::ZERO,
         }
     }
 }
@@ -79,14 +94,21 @@ impl Executor for ScriptedExecutor {
         let cancel = CancellationToken::new();
         let script = self.script.clone();
         let delay = self.delay;
+        let pause_before_last = self.pause_before_last;
         let child_cancel = cancel.clone();
 
         tokio::spawn(async move {
-            for event in script {
+            let last = script.len().saturating_sub(1);
+            for (index, event) in script.into_iter().enumerate() {
                 if child_cancel.is_cancelled() {
                     let _ = tx.send(ExecEvent::Finished(ExecOutcome::Cancelled)).await;
                     return;
                 }
+                let delay = if index == last && !pause_before_last.is_zero() {
+                    pause_before_last
+                } else {
+                    delay
+                };
                 if !delay.is_zero() {
                     tokio::select! {
                         () = tokio::time::sleep(delay) => {}
@@ -214,6 +236,7 @@ impl Harness {
                     dry_run: false,
                     inputs: None,
                     compare_to: None,
+                    created_by: None,
                 },
                 PendingEvent::run(RunEventBody::RunQueued {
                     task_version_id: version.id,
@@ -343,6 +366,47 @@ engine_test!(a_successful_run_is_fully_reconstructible_from_events, |h| {
     assert_eq!(stored.cost, state.cost);
     assert_eq!(stored.cli_version.as_deref(), Some("2.1.263"));
     assert_eq!(stored.output, Some(serde_json::json!(4)));
+});
+
+// 攒批曾经只在下一条事件进来时才看间隔。一步跑得很安静（审批门在等人、
+// shell 在跑长命令）时没有下一条，已经缓冲的事件就一直不落库：
+// 界面上上一步卡在"执行中"，这一步看着像还没开始。
+engine_test!(buffered_events_reach_the_log_while_a_step_is_quiet, |h| {
+    let run = h.seed_run().await;
+    let engine = h.engine(ScriptedExecutor::quiet_before_finish(
+        vec![
+            started(),
+            ExecEvent::Text {
+                text: "先看一眼".into(),
+            },
+            usage(1_000),
+            ExecEvent::Finished(ExecOutcome::Success {
+                result: "ok".into(),
+                turns: 1,
+            }),
+        ],
+        std::time::Duration::from_secs(2),
+    ));
+
+    // 安静期中间读一次：离最后一条事件已经过了好几个刷新间隔
+    let peek = async {
+        tokio::time::sleep(std::time::Duration::from_millis(1_000)).await;
+        h.store
+            .read_events_after(run.id, 0, 1_000, None)
+            .await
+            .expect("读事件")
+    };
+    let ((), during_quiet) = tokio::join!(
+        engine.execute(h.workspace, run.id, CancellationToken::new()),
+        peek
+    );
+
+    let kinds: Vec<&str> = during_quiet.iter().map(|e| e.kind()).collect();
+    assert!(
+        kinds.contains(&"node_started") && kinds.contains(&"agent_text"),
+        "执行器安静下来之前吐出的事件，一个刷新间隔之后就该能读到，实际只有 {kinds:?}"
+    );
+    assert_eq!(h.replay(run.id).await.status, RunStatus::Succeeded);
 });
 
 // `started_at` 曾经被终态前那次"顺手写 cli_version"的 start_run 调用覆盖成

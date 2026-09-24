@@ -10,7 +10,7 @@
   import { api } from '$api/client';
   import { listAllTasks } from '$api/runs';
   import type { Page } from '$api/types/Page';
-  import type { RunSummary } from '$api/types/RunSummary';
+  import type { RunListItem } from '$api/types/RunListItem';
   import { theme } from './theme.svelte';
 
   let { onclose, onnavigate }: { onclose: () => void; onnavigate: (href: string) => void } =
@@ -68,11 +68,10 @@
     Promise.all([
       listAllTasks().catch(() => []),
       // 用 ts-rs 生成的类型，不是内联的匿名结构：后端改了字段这里才会编译报错
-      api<Page<RunSummary>>('/api/v1/runs?limit=20').catch(() => ({ items: [] as RunSummary[] }))
+      api<Page<RunListItem>>('/api/v1/runs?limit=20').catch(() => ({ items: [] as RunListItem[] }))
     ]).then(([tasks, runs]) => {
       if (cancelled) return;
       taskIds = new Set(tasks.map((t) => t.id));
-      const names = new Map(tasks.map((t) => [t.id, t.name]));
       dynamic = [
         ...tasks.map((t) => ({
           href: `/tasks/${t.id}`,
@@ -82,7 +81,7 @@
         })),
         ...runs.items.map((r) => ({
           href: `/runs/${r.id}`,
-          label: `${names.get(r.task_id) ?? 'run'} · ${r.id.slice(0, 8)}`,
+          label: `${r.task_name} · ${r.id.slice(0, 8)}`,
           hint: r.status,
           kind: '执行'
         }))

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { clock, duration, money, stamp } from './format';
+import { clock, duration, money, stamp, toMicros, moneyMicros } from './format';
 
 describe('绝对时间按东八区显示', () => {
   // 这个测试在任何时区的机器上都必须过：显示时区是定死的，不跟机器走
@@ -37,5 +37,26 @@ describe('其它格式化', () => {
     expect(money('0.012345')).toBe('$0.01');
     expect(money('0.001234')).toBe('$0.0012');
     expect(money('0')).toBe('$0');
+  });
+});
+
+describe('金额换成整数微美元', () => {
+  test.each([
+    ['0.012345', 12345],
+    ['1', 1_000_000],
+    ['0.5', 500_000],
+    ['12.3456789', 12_345_678],
+    ['-0.000001', -1],
+    ['', 0],
+    ['abc', 0]
+  ])('%s → %d', (text, micros) => {
+    expect(toMicros(text)).toBe(micros);
+  });
+
+  test('加一百次 0.01 还是 1 美元（浮点加会漂到 1.0000000000000007）', () => {
+    let sum = 0;
+    for (let i = 0; i < 100; i++) sum += toMicros('0.010000');
+    expect(sum).toBe(1_000_000);
+    expect(moneyMicros(sum)).toBe('$1.00');
   });
 });
