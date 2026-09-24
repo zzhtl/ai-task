@@ -20,6 +20,10 @@ async function sources(): Promise<string[]> {
 
 const ALL = (await sources()).join('\n');
 const used = new Set([...ALL.matchAll(/<Icon\s+name="([^"]+)"/g)].map((m) => m[1]));
+// 按状态切换的图标写成表达式：`name={copied ? 'check' : 'copy'}`，里面的字面量也算用到了
+for (const m of ALL.matchAll(/<Icon\s+name=\{([^}]*)\}/g)) {
+  for (const lit of m[1].matchAll(/'([a-z-]+)'/g)) used.add(lit[1]);
+}
 // Shell 的导航图标是数据驱动的：`icon: 'activity'`，不是模板里的字面量
 for (const m of ALL.matchAll(/icon: '([a-z-]+)'/g)) used.add(m[1]);
 

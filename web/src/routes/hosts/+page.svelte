@@ -148,9 +148,12 @@
   <p>历史执行记录里的资源采样保留，只是不再关联到这台机器。</p>
 </Confirm>
 
-<PageHeader title="主机">
+<PageHeader
+  title="主机"
+  help="任务要下发到别的机器，先在这里加一台。私钥加密落库，任何读接口都不返回，编辑时留空表示不换。"
+>
   {#snippet sub()}
-    <span>任务要下发到别的机器，先在这里加一台。私钥加密落库，任何读接口都不返回。</span>
+    {#if loaded}<span>{hosts.length} 台</span>{/if}
   {/snippet}
   {#snippet actions()}
     {#if session.can('admin')}
@@ -213,9 +216,8 @@
         {/snippet}
       </Field>
     </div>
-    <p class="faint small">
-      首次连接会记下对方的主机密钥（TOFU）；<strong>密钥变了永远是拒绝</strong>——那是中间人攻击的信号。
-      连上之后会探测目标机上有没有 systemd cgroup、装了哪些 AI CLI。
+    <p class="faint small note">
+      首次连接会记下对方的主机密钥；之后<strong>密钥变了一律拒绝</strong>（中间人攻击的信号）。
     </p>
     {#snippet footer()}
       <button class="btn-ghost" onclick={() => (form = 'closed')} disabled={busy}>取消</button>
@@ -312,6 +314,9 @@
 <style>
   .name {
     font-weight: 500;
+  }
+  .note {
+    margin-top: var(--s4);
   }
   td .tag + .tag {
     margin-left: 4px;

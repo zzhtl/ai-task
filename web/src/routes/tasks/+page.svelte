@@ -14,7 +14,7 @@
   import type { TaskSummary } from '$api/types/TaskSummary';
   import type { RunSummary } from '$api/types/RunSummary';
   import PageHeader from '$lib/ui/PageHeader.svelte';
-  import StatusPill from '$lib/ui/StatusPill.svelte';
+  import StatusBadge from '$lib/ui/StatusBadge.svelte';
   import Empty from '$lib/ui/Empty.svelte';
   import Loading from '$lib/ui/Loading.svelte';
   import Confirm from '$lib/ui/Confirm.svelte';
@@ -225,7 +225,7 @@
             <td>
               {#if last}
                 <div class="last">
-                  <StatusPill status={last.status} />
+                  <StatusBadge status={last.status} />
                   <span class="faint" title={stamp(last.finished_at ?? last.created_at)}>
                     {ago(last.finished_at ?? last.created_at)}
                   </span>
@@ -235,10 +235,7 @@
                 <span class="faint">还没跑过</span>
               {/if}
             </td>
-            <td class="faint">
-              v{task.version}
-              <span class="mono" title={task.id}>· {task.id.slice(0, 8)}</span>
-            </td>
+            <td class="faint nowrap">v{task.version}</td>
             <td class="act">
               <div class="row">
                 <button
@@ -295,7 +292,7 @@
 
 <style>
   .name-cell {
-    max-width: 34ch;
+    max-width: 40ch;
   }
   .name {
     font-weight: 500;

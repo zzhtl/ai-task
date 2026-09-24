@@ -51,11 +51,8 @@
   });
 </script>
 
-<PageHeader title="待审批">
+<PageHeader title="待审批" help="超时未决一律按拒绝处理：审批门的意义就在于「没人点头就不做」。">
   {#if items.length}<span class="tag warn">{items.length} 个等待中</span>{/if}
-  {#snippet sub()}
-    <span>超时未决一律按<b>拒绝</b>处理——审批门的意义就在于「没人点头就不做」。</span>
-  {/snippet}
 </PageHeader>
 
 {#if error}<div class="banner">{error}</div>{/if}

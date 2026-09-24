@@ -112,7 +112,7 @@
   }
   /* 画布上点了哪个节点，这里就亮哪一步 */
   .step.on .body {
-    border-color: var(--accent-dim);
+    border-color: var(--accent-border);
   }
   header {
     display: flex;

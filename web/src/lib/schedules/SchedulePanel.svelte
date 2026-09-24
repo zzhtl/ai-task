@@ -304,7 +304,7 @@
     flex-wrap: wrap;
   }
   .presets button.on {
-    border-color: var(--accent-dim);
+    border-color: var(--accent-border);
     color: var(--accent-fg);
     background: var(--accent-soft);
   }

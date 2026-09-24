@@ -1,61 +1,83 @@
 /*
  * 设计系统。整个界面**只有这一个**颜色/间距/字号的来源。
  *
- * 这不是后台管理页，是一个执行控制平面：屏幕上大部分东西是机器产生的、
- * 会自己变化的、需要被盯着的。所以：
+ * 这是一个执行控制平面：屏幕上大部分东西是机器产生的、会自己变化的、需要被盯着的。
  *
- * - **暗色优先。** 长时间盯着状态流的界面，亮底会累。浅色是可选项，侧栏底部能切。
- * - **靠层次而不是边框划分区域。** 满屏细灰线会让密集信息更难读。
- * - **状态是一套语义色，不是"绿的和红的"。** 每种 RunStatus 各有固定的
- *   颜色、点、动效，在列表、过程、时间轴上必须完全一致——一个状态在两个
- *   地方长得不一样，人就会停下来确认，那正是要消除的东西。
- * - **数字一律等宽。** 成本、耗时、CPU 在滚动时不能跳。
+ * - **层次靠明度和字重，不靠满屏的线和说明文字。**背景 → 侧栏/卡片 → 输入/嵌套 → 悬停，
+ *   四级明度递进；浅色主题的卡片再加一层极淡的阴影。说明性的长段落不放在页面上，
+ *   收进 HelpTip 或折叠的"说明"。
+ * - **状态是一套语义色 + 形状，不只靠颜色。**每种状态有固定的色调、图标和文字，
+ *   在列表、过程、编排图上必须完全一致（WCAG 1.4.1：不能只靠颜色传达信息）。
+ * - **每个色调三档**：`-fg` 当文字（在所有表面和自己的淡底上都 ≥4.5:1），
+ *   `-bg` 是徽标/提示的淡底，`-border` 是描边。全部是显式 hex，对比度测试才测得到——
+ *   `color-mix()` 算出来的颜色没法在单测里校验。
+ * - **数字一律等宽。**成本、耗时、CPU 在刷新时不能左右跳。
  */
 
 :root {
-  /* ---- 表面。层次靠明度递进；阴影只在浮层上用 ---- */
-  --bg: #0a0c11;
-  --surface-1: #10131a;
-  --surface-2: #161a23;
-  --surface-3: #1e232e;
-  --surface-hover: #1a1f29;
-  --line: #222834;
-  --line-strong: #2f3644;
+  /* ---- 表面。明度递进；阴影只在浮层和浅色卡片上用 ---- */
+  --bg: #0b0d12;
+  --surface-1: #11141b;
+  --surface-2: #171b24;
+  --surface-3: #1e2330;
+  --surface-hover: #161a22;
+  --line: #222836;
+  --line-strong: #2d3444;
 
   /* ---- 文字 ---- */
-  --fg: #e8ebf1;
-  --fg-dim: #9aa4b5;
-  /* 对最亮的表面（--surface-3）也要 ≥4.5:1。原来的 #6b7487 只有 3.2，
-     而它偏偏用在 0.68–0.78rem 的字上——最小的字配最低的对比度。 */
-  --fg-faint: #818a9b;
+  --fg: #e7eaf0;
+  --fg-dim: #a3abba;
+  /* 对最亮的表面（--surface-3）也 ≥4.5:1。最小的字不能配最低的对比度。 */
+  --fg-faint: #8c95a7;
 
   /* ---- 强调色。克制使用：满屏都是重点等于没有重点 ---- */
-  --accent: #5b8cff;
-  --accent-strong: #79a2ff;
-  --accent-dim: #2a3f6b;
-  --accent-fg: #b9ccff;
-  --accent-soft: rgba(91, 140, 255, 0.12);
+  --accent: #6d8dff;
+  --accent-strong: #86a0ff;
+  /* 主按钮上的字。暗色下强调色偏亮，白字只有 3:1，用深色字 */
+  --accent-on: #0b1020;
+  --accent-fg: #a9bbff;
+  --accent-bg: #1a2242;
+  --accent-border: #2e3f78;
+  --accent-soft: rgba(109, 141, 255, 0.14);
 
-  /* ---- 状态语义色。和 RunStatus / NodeStatus 一一对应 ---- */
+  /* ---- 语义色调：-fg 文字 / -bg 淡底 / -border 描边 ---- */
+  --ok-fg: #5bd39b;
+  --ok-bg: #0f2a1f;
+  --ok-border: #1d4a36;
+  --bad-fg: #ff8085;
+  --bad-bg: #351518;
+  --bad-border: #5c2427;
+  --warn-fg: #f0b54e;
+  --warn-bg: #2e2310;
+  --warn-border: #56421b;
+  --info-fg: #72b2ff;
+  --info-bg: #0f2238;
+  --info-border: #1d3e65;
+  --violet-fg: #d892f3;
+  --violet-bg: #2a1733;
+  --violet-border: #4b2b5b;
+  --neutral-fg: #a3abba;
+  --neutral-bg: #1b2029;
+  --neutral-border: #2d3444;
+
+  /* ---- 状态色。和 RunStatus / NodeStatus 一一对应，取自上面的色调 ---- */
   --st-queued: #7c8798;
-  --st-running: #4a9eff;
-  --st-succeeded: #35c07f;
-  --st-failed: #f2555a;
-  --st-cancelled: #6b7280;
-  --st-timeout: #e0a33e;
-  --st-budget: #e0a33e;
-  --st-resource: #d97cf0;
-  /* 圆点是非文字元素，3:1 就够；但 #4a5261 对 --surface-3 只有 2.0，
-     等于画了个看不见的点——"跳过"和"这里什么都没有"就分不出来了。 */
-  --st-skipped: #626d80;
+  --st-running: var(--info-fg);
+  --st-succeeded: var(--ok-fg);
+  --st-failed: var(--bad-fg);
+  --st-cancelled: #7c8798;
+  --st-timeout: var(--warn-fg);
+  --st-budget: var(--warn-fg);
+  --st-resource: var(--violet-fg);
+  --st-skipped: #6b7587;
+  --st-awaiting: var(--warn-fg);
   /* AI 步骤的序号色、编排图里 AI 节点的描边。曾经写成 `var(--st-ai)` 自己引用自己——
      那是个无效值，暗色下序号没颜色、AI 节点连边框都没有，而且没有任何报错。 */
   --st-ai: #56b6e8;
-  --st-awaiting: #e0a33e;
 
-  --ok: var(--st-succeeded);
-  --bad: var(--st-failed);
-  --warn: var(--st-timeout);
+  --ok: var(--ok-fg);
+  --bad: var(--bad-fg);
+  --warn: var(--warn-fg);
 
   /* ---- 间距。4px 基准，只用这几档 ---- */
   --s1: 0.25rem;
@@ -68,30 +90,35 @@
 
   /* ---- 圆角 ---- */
   --r1: 4px;
-  --r2: 8px;
-  --r3: 12px;
-  --r4: 16px;
+  --r2: 6px;
+  --r3: 10px;
+  --r4: 14px;
 
-  /* ---- 阴影。层次靠明度，阴影只用来表示"浮起来了" ---- */
-  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.25);
+  /* ---- 阴影。暗色下层次靠明度，阴影只表示"浮起来了" ---- */
+  --shadow-card: none;
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.3);
   --shadow-2: 0 6px 20px rgb(0 0 0 / 0.35), 0 0 0 1px rgb(255 255 255 / 0.03);
-  --shadow-pop: 0 12px 40px rgb(0 0 0 / 0.5), 0 0 0 1px rgb(255 255 255 / 0.04);
+  --shadow-pop: 0 16px 48px rgb(0 0 0 / 0.5), 0 0 0 1px rgb(255 255 255 / 0.05);
 
-  /* ---- 字号。9 档，从实际用量归并而来：原来有 23 个散落的字面量。
-         根字号 16px，所以括号里是最终像素。
+  /* ---- 字号。根字号 16px，括号里是最终像素。
          **硬规矩：`--fg-faint` 不得用在 `--t-xs` 以下**——最小的字配最低的对比度
          是这个界面之前最容易读不清的组合。 ---- */
-  --t-2xs: 0.6875rem; /* 11px：kbd、seq、徽标 */
+  --t-2xs: 0.6875rem; /* 11px：kbd、角标 */
   --t-xs: 0.75rem; /* 12px：表头、hint、次要说明 */
-  --t-sm: 0.8125rem; /* 13px：卡片里的次要正文 */
+  --t-sm: 0.8125rem; /* 13px：卡片里的次要正文、元信息 */
   --t-base: 0.875rem; /* 14px：正文、按钮、输入框、表格 */
-  --t-md: 0.9375rem; /* 15px：需要强调的输入 */
-  --t-lg: 1.0625rem; /* 17px：h2/h3、弹窗标题 */
-  --t-xl: 1.25rem; /* 20px：指标数字 */
-  --t-2xl: 1.5rem; /* 24px：h1 */
+  --t-md: 0.9375rem; /* 15px：区块标题 */
+  --t-lg: 1.0625rem; /* 17px：弹窗标题 */
+  --t-xl: 1.25rem; /* 20px：页标题 */
+  --t-2xl: 1.5rem; /* 24px：指标数字 */
   --t-3xl: 1.75rem; /* 28px：首页大指标 */
 
-  /* ---- 动效。原来 `var(--dur-2) var(--ease)` 硬编码在十二处，改一次节奏要翻十二个文件 ---- */
+  /* ---- 控件高度。按钮、输入框、分段控件同一排时必须对齐 ---- */
+  --h-sm: 1.75rem; /* 28px */
+  --h-md: 2rem; /* 32px */
+  --h-input: 2.125rem; /* 34px */
+
+  /* ---- 动效 ---- */
   --dur-1: 0.1s; /* 悬停变色这种微交互 */
   --dur-2: 0.14s; /* 默认：过渡、浮层出现 */
   --dur-3: 0.2s; /* 位移较大的 */
@@ -99,8 +126,7 @@
   --ease-out: cubic-bezier(0.2, 0.8, 0.3, 1);
 
   /* ---- 断点。只有三档，写在这里是为了让人抄得对——
-         CSS 的 @media 用不了 var()，所以下面各处只能写字面量，但必须是这三个。
-         原来散着 700 / 820 / 900 / 1000 / 1100 五个随手值。
+         CSS 的 @media 用不了 var()，所以各处只能写字面量，但必须是这三个。
          --bp-sm: 640px   手机：单列、导航收进抽屉
          --bp-md: 960px   平板：侧栏收成图标条、双列塌成单列
          --bp-lg: 1280px  宽屏：侧边面板才出现
@@ -109,11 +135,12 @@
   /* ---- 字体 ---- */
   --font:
     -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
-    'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+    'Microsoft YaHei', 'Noto Sans SC', 'Noto Sans CJK SC', sans-serif;
   --mono:
     ui-monospace, 'SF Mono', 'JetBrains Mono', 'Cascadia Code', Menlo, Consolas, monospace;
 
   --z-nav: 20;
+  --z-sticky: 30;
   --z-pop: 40;
   --z-overlay: 60;
   --z-toast: 80;
@@ -121,42 +148,64 @@
   color-scheme: dark;
 }
 
-/* 浅色是可选项，不是默认。
-   状态的**含义**不该随主题变——含义由色相和圆点的形状承载，这两样都不动。
-   但明度必须跟着背景走：同一个 #35c07f 在白底上只有 2.3:1，那不是"含义不变"，
-   是根本读不出来。所以下面按背景重新定明度，色相保持原样。 */
+/* 浅色主题。含义由色调和图标承载，不随主题变；但明度必须跟着背景走：
+   同一个绿在白底上只有 2.3:1，那不是"含义不变"，是根本读不出来。 */
 :root[data-theme='light'] {
-  --bg: #f4f6f9;
+  --bg: #f5f6f8;
   --surface-1: #ffffff;
-  --surface-2: #f2f4f8;
-  --surface-3: #e8ecf2;
-  --surface-hover: #f6f8fb;
-  --line: #e2e6ed;
-  --line-strong: #c9d0db;
-  --fg: #10131a;
-  --fg-dim: #55607a;
-  --fg-faint: #626b7f;
-  --accent: #3b6ee8;
-  --accent-strong: #2f5fd2;
-  --accent-dim: #c9d9ff;
-  --accent-fg: #2b56b5;
-  --accent-soft: rgba(59, 110, 232, 0.1);
-  --shadow-1: 0 1px 2px rgb(16 19 26 / 0.06);
-  --shadow-2: 0 6px 20px rgb(16 19 26 / 0.1), 0 0 0 1px rgb(16 19 26 / 0.04);
-  --shadow-pop: 0 12px 40px rgb(16 19 26 / 0.18), 0 0 0 1px rgb(16 19 26 / 0.06);
+  --surface-2: #f7f8fa;
+  --surface-3: #eef0f4;
+  --surface-hover: #f3f5f8;
+  --line: #e5e8ee;
+  --line-strong: #d3d8e0;
 
-  /* 状态色：同色相压暗到能读。StatusPill 把这五个当**文字**色用，要 4.5:1；
-     queued / cancelled / skipped 只作圆点，非文字 3:1 即可，在浅底上本来就够。
-     基准取最难的那个表面 --surface-3 (#e8ecf2)，其它表面只会更宽裕。 */
-  --st-running: #0d68d2;
-  --st-succeeded: #287853;
-  --st-failed: #d11d23;
-  --st-timeout: #8c631f;
-  --st-budget: #8c631f;
-  --st-awaiting: #8c631f;
-  --st-resource: #ad25ce;
-  --st-skipped: #4a5261;
+  --fg: #111827;
+  --fg-dim: #4b5563;
+  --fg-faint: #636b78;
+
+  --accent: #3b63e0;
+  --accent-strong: #2f54cc;
+  --accent-on: #ffffff;
+  --accent-fg: #2b4fc2;
+  --accent-bg: #eef2ff;
+  --accent-border: #c7d3fb;
+  --accent-soft: rgba(59, 99, 224, 0.1);
+
+  --ok-fg: #146c41;
+  --ok-bg: #e7f6ee;
+  --ok-border: #bfe5cf;
+  --bad-fg: #bd2228;
+  --bad-bg: #fdecec;
+  --bad-border: #f5c2c4;
+  --warn-fg: #7f5200;
+  --warn-bg: #fdf3e0;
+  --warn-border: #f0d7a3;
+  --info-fg: #1757a8;
+  --info-bg: #e8f1fd;
+  --info-border: #bcd6f7;
+  --violet-fg: #83279f;
+  --violet-bg: #f6eafb;
+  --violet-border: #e2c3ef;
+  --neutral-fg: #4b5563;
+  --neutral-bg: #f0f2f5;
+  --neutral-border: #dde1e8;
+
+  --st-queued: #7a8391;
+  --st-running: #1757a8;
+  --st-succeeded: #146c41;
+  --st-failed: #bd2228;
+  --st-cancelled: #7a8391;
+  --st-timeout: #7f5200;
+  --st-budget: #7f5200;
+  --st-resource: #83279f;
+  --st-skipped: #737c8a;
+  --st-awaiting: #7f5200;
   --st-ai: #176d9f;
+
+  --shadow-card: 0 1px 2px rgb(16 24 40 / 0.04), 0 1px 3px rgb(16 24 40 / 0.04);
+  --shadow-1: 0 1px 2px rgb(16 24 40 / 0.06);
+  --shadow-2: 0 6px 20px rgb(16 24 40 / 0.1), 0 0 0 1px rgb(16 24 40 / 0.04);
+  --shadow-pop: 0 16px 48px rgb(16 24 40 / 0.16), 0 0 0 1px rgb(16 24 40 / 0.06);
 
   color-scheme: light;
 }
@@ -189,10 +238,11 @@ h3 {
   margin: 0;
   font-weight: 600;
   letter-spacing: -0.01em;
+  color: var(--fg);
 }
 h1 {
-  font-size: var(--t-2xl);
-  letter-spacing: -0.02em;
+  font-size: var(--t-xl);
+  line-height: 1.3;
 }
 h2 {
   font-size: var(--t-md);
@@ -214,12 +264,26 @@ a {
 a:hover {
   color: var(--accent-fg);
 }
+/* 正文里的链接要看得出是链接 */
+.link,
+p a,
+.callout a,
+.hint a {
+  color: var(--accent-fg);
+}
+.link:hover,
+p a:hover,
+.callout a:hover,
+.hint a:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
 
 code,
 .mono,
 pre {
   font-family: var(--mono);
-  font-size: 0.82em;
+  font-size: 0.86em;
   font-variant-ligatures: none;
 }
 kbd,
@@ -234,6 +298,10 @@ kbd,
   background: var(--surface-2);
 }
 
+::selection {
+  background: var(--accent-soft);
+}
+
 /* ---------------------------------------------------------------- 通用件 */
 
 .muted {
@@ -243,13 +311,13 @@ kbd,
   color: var(--fg-faint);
 }
 .bad {
-  color: var(--bad);
+  color: var(--bad-fg);
 }
 .ok {
-  color: var(--ok);
+  color: var(--ok-fg);
 }
 .warn-text {
-  color: var(--warn);
+  color: var(--warn-fg);
 }
 .small {
   font-size: var(--t-sm);
@@ -262,16 +330,25 @@ kbd,
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 
 .card {
   background: var(--surface-1);
   border: 1px solid var(--line);
   border-radius: var(--r3);
+  box-shadow: var(--shadow-card);
   padding: var(--s4);
 }
 .card.flush {
   padding: 0;
-  overflow: hidden;
+  /* 窄屏上表格要能横向滚，不能被卡片截掉列。（顺带一提：overflow 不是 visible 的
+     容器本身就是滚动容器，表头的 sticky 相对它而不是相对页面——所以长表格的表头
+     靠的是页面级的滚动，不指望它吸顶。） */
+  overflow: auto;
 }
 .card > header.card-head,
 .card-head {
@@ -280,9 +357,16 @@ kbd,
   gap: var(--s2);
   flex-wrap: wrap;
   margin-bottom: var(--s3);
+  min-height: var(--h-sm);
+}
+.card.flush > .card-head {
+  margin: 0;
+  padding: var(--s3) var(--s4);
+  border-bottom: 1px solid var(--line);
 }
 .card-head h2 {
   margin: 0;
+  font-size: var(--t-base);
 }
 .card-head .sub {
   font-size: var(--t-sm);
@@ -310,21 +394,38 @@ kbd,
   margin-bottom: var(--s4);
 }
 
-/* ---- 按钮。三档：主/次/幽灵，再加图标钮 ---- */
+/* 元信息行：一串用圆点隔开的短信息（触发方式 · 开始时间 · 耗时） */
+.meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0 var(--s2);
+  font-size: var(--t-sm);
+  color: var(--fg-dim);
+}
+.meta > * + *::before {
+  content: '·';
+  margin-right: var(--s2);
+  color: var(--fg-faint);
+}
+
+/* ---- 按钮。主 / 次 / 幽灵 / 危险，再加图标钮；两档高度 ---- */
 button,
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 0.4rem;
-  padding: 0.42rem 0.85rem;
+  height: var(--h-md);
+  padding: 0 0.8rem;
   border: 1px solid var(--line-strong);
   border-radius: var(--r2);
-  background: var(--surface-2);
+  background: var(--surface-1);
   color: var(--fg);
   font: inherit;
   font-size: var(--t-base);
-  line-height: 1.2;
+  font-weight: 500;
+  line-height: 1;
   cursor: pointer;
   transition:
     background var(--dur-2) var(--ease),
@@ -333,6 +434,10 @@ button,
     box-shadow var(--dur-2) var(--ease);
   white-space: nowrap;
   user-select: none;
+}
+:root[data-theme='light'] button,
+:root[data-theme='light'] .btn {
+  box-shadow: 0 1px 1px rgb(16 24 40 / 0.04);
 }
 button:hover:not(:disabled),
 .btn:hover {
@@ -347,7 +452,9 @@ button:active:not(:disabled),
 button:disabled,
 .btn[aria-disabled='true'] {
   opacity: 0.45;
-  cursor: default;
+  cursor: not-allowed;
+}
+.btn[aria-disabled='true'] {
   pointer-events: none;
 }
 button:focus-visible,
@@ -356,58 +463,56 @@ input:focus-visible,
 select:focus-visible,
 textarea:focus-visible,
 a:focus-visible,
-summary:focus-visible {
+summary:focus-visible,
+[tabindex]:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
 
-.btn-primary {
+.btn-primary,
+:root[data-theme='light'] .btn-primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #06080f;
-  font-weight: 500;
+  color: var(--accent-on);
 }
-.btn-primary:hover:not(:disabled) {
+.btn-primary:hover:not(:disabled),
+:root[data-theme='light'] .btn-primary:hover:not(:disabled) {
   background: var(--accent-strong);
   border-color: var(--accent-strong);
-  color: #06080f;
-}
-:root[data-theme='light'] .btn-primary,
-:root[data-theme='light'] .btn-primary:hover:not(:disabled) {
-  color: #fff;
+  color: var(--accent-on);
 }
 .btn-danger {
-  border-color: color-mix(in srgb, var(--bad) 40%, var(--line-strong));
-  color: var(--bad);
+  border-color: var(--bad-border);
+  color: var(--bad-fg);
 }
 .btn-danger:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--bad) 12%, var(--surface-2));
-  border-color: color-mix(in srgb, var(--bad) 60%, var(--line-strong));
-  color: var(--bad);
+  background: var(--bad-bg);
+  border-color: var(--bad-border);
+  color: var(--bad-fg);
 }
-.btn-ghost {
+.btn-ghost,
+:root[data-theme='light'] .btn-ghost {
   background: transparent;
   border-color: transparent;
+  box-shadow: none;
   color: var(--fg-dim);
 }
 .btn-ghost:hover:not(:disabled) {
-  background: var(--surface-2);
+  background: var(--surface-3);
   border-color: transparent;
   color: var(--fg);
 }
 .btn-sm {
-  padding: 0.24rem 0.55rem;
+  height: var(--h-sm);
+  padding: 0 0.6rem;
   font-size: var(--t-sm);
 }
 .btn-icon {
-  padding: 0.3rem;
-  width: 1.9rem;
-  height: 1.9rem;
+  padding: 0;
+  width: var(--h-md);
 }
 .btn-icon.btn-sm {
-  width: 1.6rem;
-  height: 1.6rem;
-  padding: 0.2rem;
+  width: var(--h-sm);
 }
 .btn-icon svg,
 .btn svg,
@@ -421,36 +526,50 @@ button svg {
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.btn-icon.danger:hover:not(:disabled) {
-  color: var(--bad);
-  background: color-mix(in srgb, var(--bad) 10%, transparent);
+.btn-sm svg {
+  width: 14px;
+  height: 14px;
+}
+.btn-icon.danger:hover:not(:disabled),
+.btn-ghost.danger:hover:not(:disabled) {
+  color: var(--bad-fg);
+  background: var(--bad-bg);
 }
 
 /* ---- 分段选择。筛选、页签、步骤类型都用它 ---- */
 .seg {
   display: inline-flex;
+  align-items: center;
   gap: 2px;
-  background: var(--surface-1);
+  height: var(--h-md);
+  background: var(--surface-2);
   border: 1px solid var(--line);
   border-radius: var(--r2);
   padding: 2px;
 }
-.seg > button {
+.seg > button,
+:root[data-theme='light'] .seg > button {
+  height: 100%;
   border: none;
   background: transparent;
+  box-shadow: none;
   color: var(--fg-dim);
-  padding: 0.28rem 0.7rem;
+  padding: 0 0.7rem;
   font-size: var(--t-sm);
-  border-radius: 6px;
+  font-weight: 500;
+  border-radius: 4px;
 }
 .seg > button:hover:not(:disabled) {
-  background: var(--surface-2);
+  background: transparent;
   color: var(--fg);
 }
-.seg > button.on {
-  background: var(--surface-3);
+.seg > button.on,
+.seg > button.on:hover:not(:disabled) {
+  background: var(--surface-1);
   color: var(--fg);
-  box-shadow: inset 0 0 0 1px var(--line-strong);
+  box-shadow:
+    0 0 0 1px var(--line-strong),
+    var(--shadow-1);
 }
 .seg > button .count {
   margin-left: 0.35rem;
@@ -462,10 +581,11 @@ button svg {
 input,
 select,
 textarea {
-  padding: 0.44rem 0.7rem;
+  height: var(--h-input);
+  padding: 0 0.7rem;
   border: 1px solid var(--line-strong);
   border-radius: var(--r2);
-  background: var(--surface-2);
+  background: var(--surface-1);
   color: var(--fg);
   font: inherit;
   font-size: var(--t-base);
@@ -474,14 +594,19 @@ textarea {
     box-shadow var(--dur-2) var(--ease);
   min-width: 0;
 }
+:root:not([data-theme='light']) input,
+:root:not([data-theme='light']) select,
+:root:not([data-theme='light']) textarea {
+  background: var(--surface-2);
+}
 input::placeholder,
 textarea::placeholder {
   color: var(--fg-faint);
 }
-input:hover,
-select:hover,
-textarea:hover {
-  border-color: color-mix(in srgb, var(--fg-faint) 50%, var(--line-strong));
+input:hover:not(:disabled),
+select:hover:not(:disabled),
+textarea:hover:not(:disabled) {
+  border-color: var(--fg-faint);
 }
 input:focus-visible,
 select:focus-visible,
@@ -493,9 +618,11 @@ textarea:focus-visible {
 input:disabled,
 select:disabled,
 textarea:disabled {
-  opacity: 0.5;
+  opacity: 0.55;
+  cursor: not-allowed;
 }
-input[type='checkbox'] {
+input[type='checkbox'],
+input[type='radio'] {
   width: 15px;
   height: 15px;
   padding: 0;
@@ -504,12 +631,14 @@ input[type='checkbox'] {
 }
 select {
   appearance: none;
-  padding-right: 1.8rem;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239aa4b5' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M6 9l6 6 6-6'/></svg>");
+  padding-right: 1.9rem;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238c95a7' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M6 9l6 6 6-6'/></svg>");
   background-repeat: no-repeat;
-  background-position: right 0.6rem center;
+  background-position: right 0.65rem center;
 }
 textarea {
+  height: auto;
+  padding: 0.55rem 0.7rem;
   font-family: var(--mono);
   font-size: var(--t-sm);
   line-height: 1.6;
@@ -518,35 +647,38 @@ textarea {
 label.field {
   display: flex;
   flex-direction: column;
-  gap: 0.3rem;
-  font-size: var(--t-xs);
+  gap: 0.35rem;
+  font-size: var(--t-sm);
+  font-weight: 500;
   color: var(--fg-dim);
   min-width: 0;
 }
-label.field > span.hint {
+label.field > span.hint,
+.hint {
   font-size: var(--t-xs);
+  font-weight: 400;
   color: var(--fg-faint);
 }
 /* 字段级错误。跟在出错的那个控件正下方，而不是汇总到页头 */
 .field-error {
   font-size: var(--t-xs);
-  color: var(--bad);
+  font-weight: 400;
+  color: var(--bad-fg);
   overflow-wrap: anywhere;
 }
 
-/* 列表里那一行「为什么失败」。原来在五个页面里各写了一遍，
-   宽度上限还各不相同（40ch / 46ch / 36ch / 34ch / 32ch）。 */
+/* 列表里那一行「为什么失败」 */
 .err {
   font-size: var(--t-xs);
-  color: var(--bad);
-  max-width: 44ch;
+  color: var(--bad-fg);
+  max-width: 48ch;
   margin-top: 2px;
 }
 
 .form-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: var(--s3);
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--s4) var(--s3);
 }
 .form-grid .wide {
   grid-column: 1 / -1;
@@ -575,15 +707,16 @@ thead th {
   text-align: left;
   font-weight: 500;
   font-size: var(--t-xs);
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
   color: var(--fg-faint);
-  padding: 0 var(--s3) var(--s2) 0;
+  padding: var(--s2) var(--s3) var(--s2) 0;
   border-bottom: 1px solid var(--line);
   white-space: nowrap;
 }
+thead th.num {
+  text-align: right;
+}
 tbody td {
-  padding: 0.55rem var(--s3) 0.55rem 0;
+  padding: 0.6rem var(--s3) 0.6rem 0;
   border-bottom: 1px solid var(--line);
   vertical-align: middle;
 }
@@ -597,8 +730,7 @@ tbody tr:hover {
   background: var(--surface-hover);
 }
 /* 键盘走到行内链接时，整行要跟着亮——鼠标有 hover，键盘不该只有一个小焦点框。
-   行本身**不该**加 tabindex：每一行里已经有一个指向同一个地方的 <a>，
-   再加一个焦点点位只会让 Tab 走两遍同一个目标。 */
+   行本身**不该**加 tabindex：每一行里已经有一个指向同一个地方的 <a>。 */
 tbody tr:focus-within {
   background: var(--surface-hover);
 }
@@ -615,17 +747,30 @@ td.act .row {
   justify-content: flex-end;
   gap: 2px;
 }
-/* 正在编辑 / 正在确认的那一行。三个管理页各写过一遍 */
+/* 行内操作平时收起，悬停或键盘聚焦到这一行才出现：一屏几十行的图标会把表格淹掉。
+   只在能悬停的设备上这么做——触屏上没有悬停，收起来就再也点不到了。 */
+@media (hover: hover) {
+  tbody tr td.act .row {
+    opacity: 0;
+    transition: opacity var(--dur-1) var(--ease);
+  }
+  tbody tr:hover td.act .row,
+  tbody tr:focus-within td.act .row,
+  tbody tr.on td.act .row {
+    opacity: 1;
+  }
+}
+/* 正在编辑 / 正在确认的那一行 */
 tbody tr.on td {
   background: var(--accent-soft);
 }
 
 /* 列表页顶部的筛选框。宽度统一，不然并排放的时候会参差不齐 */
 .search {
-  width: 14rem;
+  width: 15rem;
 }
 
-/* 表格放进 card.flush 时，两侧留白与卡片对齐 */
+/* 表格放进 card.flush 时，两侧留白与卡片对齐，表头有底色 */
 .card.flush table thead th:first-child,
 .card.flush table tbody td:first-child {
   padding-left: var(--s4);
@@ -635,18 +780,13 @@ tbody tr.on td {
   padding-right: var(--s4);
 }
 .card.flush table thead th {
-  padding-top: var(--s3);
   background: var(--surface-2);
-  /* 滚过几十行之后还得知道这一列是什么。表头本来就有底色，吸顶不需要额外的视觉处理 */
-  position: sticky;
-  top: 0;
-  z-index: 1;
 }
 tr.off td {
-  opacity: 0.5;
+  opacity: 0.55;
 }
 
-/* ---- 状态点。列表、过程、时间轴共用同一套 ---- */
+/* ---- 状态点。列表、过程、编排图共用同一套 ---- */
 .dot {
   display: inline-block;
   width: 7px;
@@ -694,68 +834,88 @@ tr.off td {
   0%,
   100% {
     opacity: 1;
-    box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 55%, transparent);
   }
   50% {
-    opacity: 0.65;
-    box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 0%, transparent);
+    opacity: 0.45;
+  }
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
   }
 }
 
-/* ---- 徽标 ---- */
+/* ---- 徽标。淡底 + 同色调文字 ---- */
 .tag {
   display: inline-flex;
   align-items: center;
   gap: 0.3rem;
-  padding: 0.08rem 0.5rem;
+  height: 1.375rem;
+  padding: 0 0.5rem;
   border-radius: 999px;
-  border: 1px solid var(--line);
-  background: var(--surface-2);
+  border: 1px solid var(--neutral-border);
+  background: var(--neutral-bg);
   font-size: var(--t-xs);
-  line-height: 1.5;
-  color: var(--fg-dim);
+  font-weight: 500;
+  line-height: 1;
+  color: var(--neutral-fg);
   white-space: nowrap;
 }
 .tag.danger {
-  border-color: color-mix(in srgb, var(--bad) 35%, transparent);
-  color: var(--bad);
-  background: color-mix(in srgb, var(--bad) 8%, transparent);
+  border-color: var(--bad-border);
+  background: var(--bad-bg);
+  color: var(--bad-fg);
 }
 .tag.warn {
-  border-color: color-mix(in srgb, var(--warn) 35%, transparent);
-  color: var(--warn);
-  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+  color: var(--warn-fg);
 }
 .tag.ok {
-  border-color: color-mix(in srgb, var(--ok) 35%, transparent);
-  color: var(--ok);
-  background: color-mix(in srgb, var(--ok) 8%, transparent);
+  border-color: var(--ok-border);
+  background: var(--ok-bg);
+  color: var(--ok-fg);
+}
+.tag.info {
+  border-color: var(--info-border);
+  background: var(--info-bg);
+  color: var(--info-fg);
+}
+.tag.violet {
+  border-color: var(--violet-border);
+  background: var(--violet-bg);
+  color: var(--violet-fg);
 }
 .tag.accent {
-  border-color: var(--accent-dim);
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
   color: var(--accent-fg);
-  background: var(--accent-soft);
+}
+.tag + .tag {
+  margin-left: 4px;
 }
 
-/* ---- 提示框。说明性文字用它，不用整块卡片 ---- */
+/* ---- 提示框。只留真正的风险提示；说明性的长文字收进 HelpTip ---- */
 .callout {
+  display: block;
   padding: var(--s3) var(--s4);
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--accent);
-  border-radius: var(--r2);
-  background: var(--surface-1);
-  font-size: var(--t-base);
-  color: var(--fg-dim);
+  border: 1px solid var(--info-border);
+  border-radius: var(--r3);
+  background: var(--info-bg);
+  font-size: var(--t-sm);
+  color: var(--fg);
   line-height: 1.6;
 }
 .callout strong {
   color: var(--fg);
 }
 .callout.warn {
-  border-left-color: var(--warn);
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
 }
 .callout.danger {
-  border-left-color: var(--bad);
+  border-color: var(--bad-border);
+  background: var(--bad-bg);
 }
 
 /* ---- 错误横幅。页面级错误一律长这样 ---- */
@@ -764,11 +924,11 @@ tr.off td {
   align-items: flex-start;
   gap: var(--s2);
   padding: var(--s3) var(--s4);
-  border-radius: var(--r2);
-  font-size: var(--t-base);
+  border-radius: var(--r3);
+  font-size: var(--t-sm);
   margin-bottom: var(--s4);
-  border: 1px solid color-mix(in srgb, var(--bad) 35%, var(--line));
-  background: color-mix(in srgb, var(--bad) 7%, var(--surface-1));
+  border: 1px solid var(--bad-border);
+  background: var(--bad-bg);
   color: var(--fg);
   overflow-wrap: anywhere;
 }
@@ -778,8 +938,8 @@ tr.off td {
   width: 1.1rem;
   height: 1.1rem;
   border-radius: 50%;
-  background: var(--bad);
-  color: #fff;
+  background: var(--bad-fg);
+  color: var(--surface-1);
   font-size: var(--t-xs);
   font-weight: 700;
   display: grid;
@@ -802,12 +962,10 @@ tr.off td {
   color: var(--fg-dim);
   border: 1px dashed var(--line-strong);
   border-radius: var(--r3);
-  background: color-mix(in srgb, var(--surface-1) 60%, transparent);
+  background: var(--surface-1);
 }
 
-/* 浮层入场：从下方轻推。没有过渡的话弹层是"闪"出来的，容易误点。
-   Dropdown 是从上往下落、命令面板还要保住 translateX(-50%) 居中，
-   那两个动作不一样，各自留了自己的 keyframes。 */
+/* 浮层入场：从下方轻推。没有过渡的话弹层是"闪"出来的，容易误点 */
 @keyframes rise {
   from {
     opacity: 0;
@@ -869,8 +1027,6 @@ details > summary::-webkit-details-marker {
 
 /* 尊重系统的减弱动效设置。盯着状态流的人里有一部分对动效敏感 */
 @media (prefers-reduced-motion: reduce) {
-  /* 先把时长 token 归零，走 token 的过渡就自然没了；
-     下面那条 !important 留着兜底 keyframe 动画（它们不走 --dur-*）。 */
   :root {
     --dur-1: 0s;
     --dur-2: 0s;
@@ -883,4 +1039,16 @@ details > summary::-webkit-details-marker {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* 页签或列表上方的一行导语：只说最关键的一句，细节收进旁边的"?" */
+.lead {
+  margin: 0 0 var(--s3);
+  font-size: var(--t-sm);
+  color: var(--fg-dim);
+  line-height: 1.7;
+}
+.lead strong {
+  color: var(--fg);
+  font-weight: 600;
 }

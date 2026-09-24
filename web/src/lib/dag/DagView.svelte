@@ -10,7 +10,7 @@
    */
   import { layout, CyclicDag, NODE_H, NODE_W, type Layout } from './layout';
   import type { DagSpec } from '$api/types/DagSpec';
-  import StatusPill from '$lib/ui/StatusPill.svelte';
+  import StatusBadge from '$lib/ui/StatusBadge.svelte';
 
   let {
     spec,
@@ -196,7 +196,7 @@
   {#if Object.keys(status).length}
     <div class="legend">
       {#each [...new Set(Object.values(status))] as s (s)}
-        <StatusPill status={s} />
+        <StatusBadge status={s} variant="text" />
       {/each}
     </div>
   {/if}

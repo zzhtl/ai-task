@@ -13,6 +13,7 @@
   import Modal from '$lib/ui/Modal.svelte';
   import Field from '$lib/ui/Field.svelte';
   import Icon from '$lib/ui/Icon.svelte';
+  import HelpTip from '$lib/ui/HelpTip.svelte';
   import type { TabShared } from './types';
 
   let {
@@ -79,11 +80,10 @@
     );
 </script>
 
-<div class="callout">
-  <strong>软规则注入 system prompt，只影响模型的倾向。</strong>
-  模型<strong>可以不听</strong>。工具结果是不可信输入，能影响模型对 prompt 的遵守——所以
-  真正要拦住的事情必须同时配一条硬策略。软规则的价值在于让模型少走弯路，不在于阻止它。
-</div>
+<p class="lead">
+  写进提示词，只影响模型的倾向——<strong>模型可以不听</strong>。真正要拦住的事，同时配一条硬策略。
+  <HelpTip text="工具结果是不可信的输入，能影响模型对提示词的遵守。软规则的价值在于让模型少走弯路，不在于阻止它。" />
+</p>
 
 <Modal open={adding} title={editing ? `编辑软规则 ${editing.name}` : '新增软规则'} {onclose}>
   <div class="form-grid">

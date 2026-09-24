@@ -17,6 +17,7 @@
   import { listRules, listSkills, type Rule, type Skill } from '$api/models';
   import { session } from '$lib/auth/session.svelte';
   import PageHeader from '$lib/ui/PageHeader.svelte';
+  import Tabs from '$lib/ui/Tabs.svelte';
   import Confirm from '$lib/ui/Confirm.svelte';
   import { toast, toastError } from '$lib/ui/toast.svelte';
   import PolicyTab from '$lib/rules/PolicyTab.svelte';
@@ -144,13 +145,25 @@
   </p>
 </Confirm>
 
-<PageHeader title="规则与策略">
-  {#snippet sub()}
-    <span>约束 AI 行为的两层。它们的强度<b>不一样</b>。</span>
-  {/snippet}
+<PageHeader
+  title="规则与技能"
+  help="约束 AI 行为的两层强度不一样：软规则写进提示词，只影响模型的倾向；硬策略在工具调用边界强制拦截，模型绕不过去。技能是给 AI 的操作手册。"
+>
   {#snippet actions()}
     {#if session.can('admin') && !adding}
       <button class="btn-primary" onclick={openNew}>{NEW_LABEL[tab]}</button>
+    {/if}
+  {/snippet}
+  {#snippet tabs()}
+    {#if session.can('admin')}
+      <Tabs
+        bind:value={tab}
+        tabs={[
+          { id: 'policy', label: '硬策略', count: loaded ? policyCount : null },
+          { id: 'prompt', label: '软规则', count: loaded ? promptCount : null },
+          { id: 'skills', label: '技能', count: loaded ? skills.length : null }
+        ]}
+      />
     {/if}
   {/snippet}
 </PageHeader>
@@ -158,19 +171,6 @@
 {#if !session.can('admin')}
   <div class="callout danger">需要管理员权限：策略是这个系统的护栏本身。</div>
 {:else}
-  <div class="toolbar">
-    <div class="seg">
-      <button class:on={tab === 'policy'} onclick={() => (tab = 'policy')}>
-        硬策略 <span class="count">{policyCount}</span>
-      </button>
-      <button class:on={tab === 'prompt'} onclick={() => (tab = 'prompt')}>
-        软规则 <span class="count">{promptCount}</span>
-      </button>
-      <button class:on={tab === 'skills'} onclick={() => (tab = 'skills')}>
-        技能 <span class="count">{skills.length}</span>
-      </button>
-    </div>
-  </div>
 
   {#if error}<div class="banner">{error}</div>{/if}
 

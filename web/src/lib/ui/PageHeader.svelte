@@ -1,98 +1,116 @@
 <script lang="ts">
   /**
-   * 每页统一的头：面包屑 + 标题 + 一行摘要 + 右侧动作。
+   * 每页统一的头：面包屑 + 标题（旁边是状态和说明）+ 一行元信息 + 右侧动作 + 可选页签。
    * 顺手把浏览器标签页的标题也设了：十个 ai-task 标签页并排时得能认出哪个是哪个。
+   *
+   * 解释性的长段落不放在这里：`help` 收进标题旁的"?"，元信息行只放短事实。
    */
-  import Icon from './Icon.svelte';
+  import type { Snippet } from 'svelte';
+  import HelpTip from './HelpTip.svelte';
 
   let {
     title,
+    crumbs = [],
     crumb,
     crumbHref,
+    help,
     sub,
     actions,
+    tabs,
     children
   }: {
     title: string;
+    /** 上级页面，从远到近。当前页就是标题，不用再写进来。 */
+    crumbs?: Array<{ label: string; href: string }>;
+    /** 只有一级上级时的简写。 */
     crumb?: string;
     crumbHref?: string;
-    sub?: import('svelte').Snippet;
-    actions?: import('svelte').Snippet;
+    /** 标题旁"?"里的说明。 */
+    help?: string;
+    /** 元信息行：几段短事实，自动用圆点隔开。 */
+    sub?: Snippet;
+    actions?: Snippet;
+    /** 标题下方的页签。 */
+    tabs?: Snippet;
     /** 标题右侧的小件（状态、徽标）。 */
-    children?: import('svelte').Snippet;
+    children?: Snippet;
   } = $props();
+
+  const trail = $derived(crumb ? [{ label: crumb, href: crumbHref ?? '/' }, ...crumbs] : crumbs);
 </script>
 
 <svelte:head><title>{title} · ai-task</title></svelte:head>
 
-<header class="page-head">
-  <div class="left">
-    {#if crumb}
-      <a class="crumb" href={crumbHref ?? '/'}>
-        <Icon name="chevron-left" size={13} />
-        {crumb}
-      </a>
-    {/if}
-    <div class="title-row">
-      <h1>{title}</h1>
-      {#if children}{@render children()}{/if}
+<header class="page-head" class:has-tabs={!!tabs}>
+  {#if trail.length}
+    <nav class="crumbs" aria-label="位置">
+      {#each trail as c (c.href + c.label)}
+        <a href={c.href}>{c.label}</a>
+        <span class="sep" aria-hidden="true">/</span>
+      {/each}
+    </nav>
+  {/if}
+  <div class="main-row">
+    <div class="left">
+      <div class="title-row">
+        <h1>{title}</h1>
+        {#if help}<HelpTip text={help} />{/if}
+        {#if children}{@render children()}{/if}
+      </div>
+      {#if sub}<div class="sub meta">{@render sub()}</div>{/if}
     </div>
-    {#if sub}<div class="sub">{@render sub()}</div>{/if}
+    {#if actions}<div class="actions">{@render actions()}</div>{/if}
   </div>
-  {#if actions}<div class="actions">{@render actions()}</div>{/if}
+  {#if tabs}<div class="tabs-row">{@render tabs()}</div>{/if}
 </header>
 
 <style>
   .page-head {
     display: flex;
+    flex-direction: column;
+    gap: var(--s1);
+    margin-bottom: var(--s5);
+  }
+  .page-head.has-tabs {
+    margin-bottom: var(--s4);
+  }
+  .crumbs {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--s1);
+    font-size: var(--t-sm);
+    color: var(--fg-faint);
+  }
+  .crumbs a:hover {
+    color: var(--accent-fg);
+  }
+  .sep {
+    color: var(--line-strong);
+  }
+  .main-row {
+    display: flex;
     align-items: flex-start;
     justify-content: space-between;
     gap: var(--s4);
-    margin-bottom: var(--s5);
-    padding-bottom: var(--s4);
-    border-bottom: 1px solid var(--line);
   }
   .left {
     min-width: 0;
-  }
-  .crumb {
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-    font-size: var(--t-sm);
-    color: var(--fg-faint);
-    margin-bottom: 4px;
-    margin-left: -2px;
-  }
-  /* 图标现在在子组件里，scoped 选择器够不到，得显式打穿一层。
-     宽高走 Icon 的 size 属性，这里只管描边。 */
-  .crumb :global(svg) {
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 2;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-  }
-  .crumb:hover {
-    color: var(--accent-fg);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s1);
   }
   .title-row {
     display: flex;
     align-items: center;
-    gap: var(--s3);
+    gap: var(--s2);
     flex-wrap: wrap;
+    min-height: var(--h-md);
   }
   h1 {
     overflow-wrap: anywhere;
   }
   .sub {
-    margin-top: var(--s2);
-    font-size: var(--t-base);
-    color: var(--fg-dim);
-    display: flex;
-    align-items: center;
-    gap: var(--s3);
-    flex-wrap: wrap;
     line-height: 1.6;
   }
   .actions {
@@ -103,8 +121,11 @@
     flex-wrap: wrap;
     justify-content: flex-end;
   }
+  .tabs-row {
+    margin-top: var(--s3);
+  }
   @media (max-width: 640px) {
-    .page-head {
+    .main-row {
       flex-direction: column;
     }
     .actions {

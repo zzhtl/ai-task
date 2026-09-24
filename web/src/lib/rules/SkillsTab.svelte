@@ -11,6 +11,7 @@
   import Loading from '$lib/ui/Loading.svelte';
   import Modal from '$lib/ui/Modal.svelte';
   import Field from '$lib/ui/Field.svelte';
+  import HelpTip from '$lib/ui/HelpTip.svelte';
   import type { Act } from './types';
 
   let {
@@ -52,11 +53,13 @@
     }, '技能已导入').catch(() => {});
 </script>
 
-<div class="callout">
-  <strong>技能是开箱即用的上下文包。</strong>
-  勾选后会落到 run 工作目录的 <code>.claude/skills/</code>，渐进式披露由 CLI 自己完成
-  ——只有 name 和 description 进上下文，正文按需加载。在任务的 AI 步骤里勾选即可。
-</div>
+<p class="lead">
+  写给 AI 的操作手册。在任务的 AI 步骤里勾选后，模型按描述决定要不要读正文。
+  <HelpTip>
+    勾选后放进 run 工作目录的 <code>.claude/skills/</code>，只有名称和描述进上下文，正文按需加载——
+    所以描述要写清楚适用场景。
+  </HelpTip>
+</p>
 
 <Modal open={adding} title="导入技能" size="lg" {onclose}>
   <div class="form-grid">

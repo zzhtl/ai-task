@@ -287,11 +287,7 @@
   crumbHref={editingId ? `/tasks/${editingId}` : '/tasks'}
 >
   {#snippet sub()}
-    {#if editingId}
-      <span>保存会产生一个<b>新版本</b>，老版本保留——历史 run 绑的是版本快照。</span>
-    {:else}
-      <span>按顺序把步骤列出来。每一步说清楚做什么、在哪台机器上、谁来做。</span>
-    {/if}
+    {#if editingId}<span>保存会生成新版本，历史执行不受影响</span>{/if}
   {/snippet}
   {#snippet actions()}
     {#if missing && !notLinear}<span class="faint small">{missing}</span>{/if}

@@ -16,7 +16,7 @@
   import { listApprovals, type Approval } from '$api/models';
   import type { Overview } from '$api/types/Overview';
   import PageHeader from '$lib/ui/PageHeader.svelte';
-  import StatusPill from '$lib/ui/StatusPill.svelte';
+  import StatusBadge from '$lib/ui/StatusBadge.svelte';
   import Empty from '$lib/ui/Empty.svelte';
   import Loading from '$lib/ui/Loading.svelte';
   import { ago, money, mmss, stamp, triggerLabel } from '$lib/ui/format';
@@ -117,7 +117,7 @@
   <section class="card">
     <header class="card-head">
       <h2>正在执行</h2>
-      <span class="sub">{live.length} 个</span>
+      <span class="sub">{(stats?.running ?? 0) + (stats?.queued ?? 0)} 个</span>
       <span class="spacer"></span>
       <a class="btn btn-ghost btn-sm" href="/runs?status=live">全部</a>
     </header>
@@ -128,7 +128,7 @@
         {#each live as r (r.id)}
           <li>
             <a href="/runs/{r.id}">
-              <StatusPill status={r.status} />
+              <StatusBadge status={r.status} variant="text" />
               <span class="main ellipsis">{r.task_name}</span>
               {#if r.dry_run}<span class="tag">影子</span>{/if}
               <span class="spacer"></span>
@@ -158,7 +158,7 @@
         {#each recent as r (r.id)}
           <li>
             <a href="/runs/{r.id}">
-              <StatusPill status={r.status} />
+              <StatusBadge status={r.status} variant="text" />
               <span class="main">
                 <span class="ellipsis">{r.task_name}</span>
                 {#if r.error}<span class="err ellipsis" title={r.error}>{r.error}</span>{/if}
@@ -212,7 +212,7 @@
 <style>
   .metrics {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
     gap: var(--s3);
     margin-bottom: var(--s4);
   }
@@ -221,48 +221,37 @@
     background: var(--surface-1);
     border: 1px solid var(--line);
     border-radius: var(--r3);
-    padding: var(--s3) var(--s4);
+    box-shadow: var(--shadow-card);
+    padding: var(--s3) var(--s4) var(--s4);
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    overflow: hidden;
-    transition: border-color var(--dur-2) var(--ease);
+    gap: var(--s1);
     color: inherit;
+    transition:
+      border-color var(--dur-2) var(--ease),
+      background var(--dur-2) var(--ease);
   }
   a.metric:hover {
     border-color: var(--line-strong);
+    background: var(--surface-hover);
     color: inherit;
   }
-  .metric::before {
-    content: '';
-    position: absolute;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    width: 3px;
-    background: var(--line-strong);
-  }
-  .metric.live::before {
-    background: var(--st-running);
-  }
-  .metric.alert::before {
-    background: var(--bad);
-  }
   .k {
-    font-size: var(--t-xs);
-    color: var(--fg-faint);
+    font-size: var(--t-sm);
+    font-weight: 500;
+    color: var(--fg-dim);
   }
   .metric strong {
     font-size: var(--t-3xl);
     font-weight: 600;
     letter-spacing: -0.02em;
-    line-height: 1.2;
+    line-height: 1.15;
   }
   .metric.live strong {
-    color: var(--st-running);
+    color: var(--info-fg);
   }
   .metric.alert strong {
-    color: var(--bad);
+    color: var(--bad-fg);
   }
   .metric .hint {
     font-size: var(--t-xs);
@@ -270,9 +259,19 @@
   }
 
   .urgent {
-    border-color: color-mix(in srgb, var(--warn) 45%, var(--line));
-    background: color-mix(in srgb, var(--warn) 4%, var(--surface-1));
+    border-color: var(--warn-border);
     margin-bottom: var(--s4);
+  }
+  .urgent .card-head h2::before {
+    content: '';
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    margin-right: var(--s2);
+    border-radius: 50%;
+    background: var(--warn-fg);
+    vertical-align: middle;
+    animation: pulse 1.6s ease-in-out infinite;
   }
 
   .cols {
@@ -300,7 +299,7 @@
     display: flex;
     align-items: center;
     gap: var(--s3);
-    padding: 0.5rem var(--s2);
+    padding: 0.55rem var(--s2);
     border-radius: var(--r2);
     font-size: var(--t-base);
     transition: background var(--dur-1) var(--ease);
@@ -308,20 +307,29 @@
     color: inherit;
   }
   .list a:hover {
-    background: var(--surface-2);
+    background: var(--surface-hover);
+  }
+  .list li + li a {
+    border-top: 1px solid var(--line);
+    border-radius: 0;
+  }
+  .list li + li a:hover {
+    border-radius: 0;
   }
   .main {
     display: flex;
     flex-direction: column;
     min-width: 0;
     line-height: 1.35;
+    font-weight: 500;
   }
   .clock {
     font-size: var(--t-sm);
-    color: var(--warn);
+    color: var(--warn-fg);
+    font-variant-numeric: tabular-nums;
   }
   .clock.soon {
-    color: var(--bad);
+    color: var(--bad-fg);
   }
   .cron {
     color: var(--fg-dim);

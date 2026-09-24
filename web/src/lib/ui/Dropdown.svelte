@@ -10,19 +10,29 @@
     primary = false,
     disabled = false,
     align = 'right',
+    placement = 'down',
+    trigger,
+    triggerClass = '',
+    title,
     children
   }: {
     label: string;
     primary?: boolean;
     disabled?: boolean;
     align?: 'left' | 'right';
+    /** 贴着页面底部的触发器（侧栏底部的用户菜单）要往上展开。 */
+    placement?: 'down' | 'up';
+    /** 自定义触发按钮里的内容。不给就是"文字 ▾"，给了 `label` 仍然作读屏名字。 */
+    trigger?: import('svelte').Snippet;
+    triggerClass?: string;
+    title?: string;
     children: import('svelte').Snippet;
   } = $props();
 
   let open = $state(false);
   let root = $state<HTMLElement | null>(null);
   let menu = $state<HTMLElement | null>(null);
-  let trigger = $state<HTMLButtonElement | null>(null);
+  let triggerEl = $state<HTMLButtonElement | null>(null);
 
   function onDocClick(event: MouseEvent) {
     if (open && root && !root.contains(event.target as Node)) open = false;
@@ -50,7 +60,7 @@
 
   function close(returnFocus: boolean) {
     open = false;
-    if (returnFocus) trigger?.focus();
+    if (returnFocus) triggerEl?.focus();
   }
 
   /** 菜单内的方向键漫游。 */
@@ -86,22 +96,29 @@
 
 <div class="dd" bind:this={root}>
   <button
-    bind:this={trigger}
+    bind:this={triggerEl}
+    class="{triggerClass}"
     class:btn-primary={primary}
     {disabled}
+    {title}
+    aria-label={trigger ? label : undefined}
     aria-haspopup="menu"
     aria-expanded={open}
     onclick={() => (open = !open)}
     onkeydown={onTriggerKey}
   >
-    {label}
-    <Icon name="chevron-down" size={12} />
+    {#if trigger}
+      {@render trigger()}
+    {:else}
+      {label}
+      <Icon name="chevron-down" size={12} />
+    {/if}
   </button>
   {#if open}
     <!-- 菜单项自己是 button / a；点了任何一项都关菜单，键盘走 onMenuKey 的方向键漫游 -->
     <div
       bind:this={menu}
-      class="menu {align}"
+      class="menu {align} {placement}"
       role="menu"
       tabindex="-1"
       onclick={() => close(true)}
@@ -139,6 +156,10 @@
   }
   .menu.right {
     right: 0;
+  }
+  .menu.up {
+    top: auto;
+    bottom: calc(100% + 4px);
   }
   .menu.left {
     left: 0;

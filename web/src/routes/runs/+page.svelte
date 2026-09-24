@@ -20,7 +20,7 @@
   import type { RunStatus } from '$api/types/RunStatus';
   import type { TaskSummary } from '$api/types/TaskSummary';
   import PageHeader from '$lib/ui/PageHeader.svelte';
-  import StatusPill from '$lib/ui/StatusPill.svelte';
+  import StatusBadge from '$lib/ui/StatusBadge.svelte';
   import Empty from '$lib/ui/Empty.svelte';
   import Loading from '$lib/ui/Loading.svelte';
   import Confirm from '$lib/ui/Confirm.svelte';
@@ -216,7 +216,7 @@
       <tbody>
         {#each runs as r (r.id)}
           <tr class="clickable" onclick={() => goto(`/runs/${r.id}`)}>
-            <td class="nowrap"><StatusPill status={r.status} /></td>
+            <td class="nowrap"><StatusBadge status={r.status} /></td>
             <td class="task-cell">
               <a href="/runs/{r.id}" onclick={(e) => e.stopPropagation()}>{taskName(r.task_id)}</a>
               {#if r.dry_run}<span class="tag">影子</span>{/if}

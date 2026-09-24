@@ -122,20 +122,20 @@
 
 <style>
   article {
-    border: 1px solid color-mix(in srgb, var(--warn) 30%, var(--line));
-    border-left: 3px solid var(--warn);
+    border: 1px solid var(--warn-border);
+    border-left: 3px solid var(--warn-fg);
     border-radius: var(--r3);
     padding: var(--s4);
-    background: color-mix(in srgb, var(--warn) 4%, var(--surface-1));
+    background: var(--surface-1);
+    box-shadow: var(--shadow-card);
     display: flex;
     flex-direction: column;
     gap: var(--s3);
   }
   /* 最后一分钟变红。审批卡是会过期的，而过期等于拒绝 */
   article.expiring {
-    border-color: color-mix(in srgb, var(--bad) 45%, var(--line));
-    border-left-color: var(--bad);
-    background: color-mix(in srgb, var(--bad) 5%, var(--surface-1));
+    border-color: var(--bad-border);
+    border-left-color: var(--bad-fg);
   }
   article.expired {
     opacity: 0.55;
@@ -207,13 +207,17 @@
   .actions input {
     flex: 1;
   }
-  .approve {
-    border-color: color-mix(in srgb, var(--ok) 50%, var(--line-strong));
-    color: var(--ok);
+  .approve,
+  :global(:root[data-theme='light']) .approve {
+    background: var(--ok-fg);
+    border-color: var(--ok-fg);
+    color: var(--surface-1);
   }
   .approve:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--ok) 12%, var(--surface-2));
-    color: var(--ok);
+    background: var(--ok-fg);
+    border-color: var(--ok-fg);
+    color: var(--surface-1);
+    filter: brightness(1.08);
   }
   .banner {
     margin: 0;

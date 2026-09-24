@@ -55,7 +55,7 @@
     background: var(--bad);
   }
   .toast.bad {
-    border-color: color-mix(in srgb, var(--bad) 40%, var(--line-strong));
+    border-color: var(--bad-border);
   }
   .text {
     flex: 1;

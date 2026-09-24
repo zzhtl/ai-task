@@ -155,9 +155,9 @@
   const pretty = (v: unknown) => JSON.stringify(v, null, 2);
 </script>
 
-<PageHeader title="审计">
+<PageHeader title="审计" help="谁在什么时候对什么做了什么。每一条都带 request id，能和服务端的访问日志对上。">
   {#snippet sub()}
-    <span>最近 {items.length} 条。每一条都带 request id，能和访问日志对上。</span>
+    <span>已加载 {items.length} 条{cursor ? '，还有更早的' : ''}</span>
   {/snippet}
   {#snippet actions()}
     <select bind:value={kind}>

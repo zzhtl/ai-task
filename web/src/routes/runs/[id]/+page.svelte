@@ -23,7 +23,8 @@
   import DagView from '$lib/dag/DagView.svelte';
   import ApprovalCard from '$lib/approvals/ApprovalCard.svelte';
   import PageHeader from '$lib/ui/PageHeader.svelte';
-  import StatusPill from '$lib/ui/StatusPill.svelte';
+  import StatusBadge from '$lib/ui/StatusBadge.svelte';
+  import CopyButton from '$lib/ui/CopyButton.svelte';
   import Confirm from '$lib/ui/Confirm.svelte';
   import Dropdown from '$lib/ui/Dropdown.svelte';
   import { toast, toastError } from '$lib/ui/toast.svelte';
@@ -195,14 +196,6 @@
     }
   }
 
-  async function copyId() {
-    try {
-      await navigator.clipboard.writeText(runId);
-      toast('已复制 run id');
-    } catch {
-      toastError('复制失败');
-    }
-  }
 
   // 原始事件流是排查用的，**不过滤**：过滤掉的那类事件恰恰是出问题时想看的。
   // 这里的查找框只是"找"，不是"隐藏"——清空就全回来。
@@ -256,7 +249,7 @@
 
 <PageHeader title={task?.name ?? `Run ${runId.slice(0, 8)}`} crumb="执行记录" crumbHref="/runs">
   {#if run}
-    <StatusPill status={run.status} />
+    <StatusBadge status={run.status} size="lg" />
     {#if run.dry_run}<span class="tag">影子执行</span>{/if}
     <!-- 连接状态要一直可见：断开时看到的是一份不再更新的快照，
          不标出来的话人会以为"这个 run 卡住了" -->
@@ -273,7 +266,7 @@
       <span>耗时 {elapsed}</span>
       <span>花费 {money(cost)}</span>
       <span>{events.length} 条事件</span>
-      <button class="idbtn mono faint" title="复制完整 id" onclick={copyId}>{runId.slice(0, 8)}</button>
+      <span><CopyButton text={runId} display={runId.slice(0, 8)} label="复制 run id" /></span>
     {/if}
   {/snippet}
   {#snippet actions()}
@@ -333,7 +326,7 @@
       <span class="sub">点节点跳到下面对应的那一段</span>
     </header>
     <!-- README 一直写着"叠加实时执行状态"，在这之前界面上并没有这张图。
-         状态色和 StatusPill、状态点用的是同一套语义色——同一个状态在两个地方
+         状态色和 StatusBadge、状态点用的是同一套语义色——同一个状态在两个地方
          长得不一样，人就会停下来确认。 -->
     <DagView
       spec={task.spec}
@@ -385,16 +378,6 @@
 </details>
 
 <style>
-  .idbtn {
-    border: none;
-    background: none;
-    padding: 0;
-    font-size: var(--t-sm);
-  }
-  .idbtn:hover {
-    color: var(--accent-fg);
-    background: none;
-  }
   .callout {
     margin-bottom: var(--s4);
     overflow-wrap: anywhere;

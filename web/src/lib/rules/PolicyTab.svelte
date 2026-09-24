@@ -16,6 +16,7 @@
   import Modal from '$lib/ui/Modal.svelte';
   import Field from '$lib/ui/Field.svelte';
   import Icon from '$lib/ui/Icon.svelte';
+  import HelpTip from '$lib/ui/HelpTip.svelte';
   import type { TabShared } from './types';
   import {
     PATTERN_KINDS,
@@ -74,8 +75,11 @@
   // 表单字段跟着 editing 走，而不是靠一个全局 closeForm 把三组字段一起清
   $effect(() => {
     if (editing && editing.kind !== 'prompt') {
-      form = policyFormFromRule(editing);
-      tagsText = form.hostTags.join(', ');
+      // 从局部变量读，不从刚写进去的 `form` 读：effect 里读自己写的状态会自我触发，
+      // 死循环到 effect_update_depth_exceeded，后面关弹层的更新也跟着断掉
+      const next = policyFormFromRule(editing);
+      form = next;
+      tagsText = next.hostTags.join(', ');
     } else if (!adding) {
       form = emptyPolicyForm();
       tagsText = '';
@@ -107,12 +111,14 @@
   const EFFECT_TAG: Record<string, string> = { deny: 'danger', ask: 'warn', allow: 'ok' };
 </script>
 
-<div class="callout">
-  <strong>硬策略在工具调用边界强制执行，模型绕不过去。</strong>
-  实测教训：只配一条 <code>rm -r</code> 的正则，模型会改用 <code>find -delete</code> 绕过去。
-  <strong>要写成白名单形状</strong>——默认拒绝某个工具，再用更高优先级的规则放行具体的用法。
-  <code>ask</code> 会把那次工具调用挂起等人点头，超时按拒绝处理。
-</div>
+<p class="lead">
+  在工具调用边界强制执行，模型绕不过去。按优先级从高到低判，<strong>先命中的生效</strong>；要写成白名单：
+  先默认拒绝某个工具，再用更高优先级放行具体用法。
+  <HelpTip>
+    实测教训：只配一条 <code>rm -r</code> 的正则，模型会改用 <code>find -delete</code> 绕过去。
+    <code>ask</code> 会把那次调用挂起等人点头，超时按拒绝处理。按任务挂载的规则在该任务里优先级再加 1000。
+  </HelpTip>
+</p>
 
 <datalist id="policy-tools">
   {#each TOOLS as t (t)}<option value={t}></option>{/each}

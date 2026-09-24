@@ -10,7 +10,7 @@
    */
   import type { RunEvent } from '$api/types/RunEvent';
   import type { DagSpec } from '$api/types/DagSpec';
-  import StatusPill from '$lib/ui/StatusPill.svelte';
+  import StatusBadge from '$lib/ui/StatusBadge.svelte';
   import { duration, money } from '$lib/ui/format';
   import { groupProcess, nodeNames } from './process';
   import StepRail from '$lib/ui/StepRail.svelte';
@@ -63,7 +63,7 @@
           <header class="node-head">
             <span class="name">{node.name}</span>
             <span class="key mono">{node.key}</span>
-            {#if node.status}<StatusPill status={node.status} />{/if}
+            {#if node.status}<StatusBadge status={node.status} />{/if}
             {#if node.attempt > 1}<span class="tag">第 {node.attempt} 次尝试</span>{/if}
             <span class="spacer"></span>
             {#if node.startedAt}
@@ -261,7 +261,7 @@
     font-size: var(--t-sm);
   }
   .say {
-    border-left-color: var(--accent-dim);
+    border-left-color: var(--accent-border);
   }
   .say p {
     color: var(--fg);

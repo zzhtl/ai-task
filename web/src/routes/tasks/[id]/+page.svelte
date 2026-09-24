@@ -23,7 +23,9 @@
   import PageHeader from '$lib/ui/PageHeader.svelte';
   import Confirm from '$lib/ui/Confirm.svelte';
   import Dropdown from '$lib/ui/Dropdown.svelte';
-  import StatusPill from '$lib/ui/StatusPill.svelte';
+  import StatusBadge from '$lib/ui/StatusBadge.svelte';
+  import CopyButton from '$lib/ui/CopyButton.svelte';
+  import HelpTip from '$lib/ui/HelpTip.svelte';
   import Empty from '$lib/ui/Empty.svelte';
   import Loading from '$lib/ui/Loading.svelte';
   import { toast, toastError } from '$lib/ui/toast.svelte';
@@ -185,14 +187,6 @@
     }
   }
 
-  async function copyId() {
-    try {
-      await navigator.clipboard.writeText(taskId);
-      toast('已复制任务 id');
-    } catch {
-      toastError('复制失败');
-    }
-  }
 </script>
 
 <PageHeader title={task?.name ?? '任务'} crumb="任务" crumbHref="/tasks">
@@ -200,8 +194,9 @@
   {#snippet sub()}
     {#if task}
       {#if task.description}<span class="desc">{task.description}</span>{/if}
-      <span class="faint">v{task.version_no} · {task.spec.nodes.length} 个步骤</span>
-      <button class="idbtn mono faint" title="复制完整 id" onclick={copyId}>{taskId.slice(0, 8)}</button>
+      <span>v{task.version_no}</span>
+      <span>{task.spec.nodes.length} 个步骤</span>
+      <span><CopyButton text={taskId} display={taskId.slice(0, 8)} label="复制任务 id" /></span>
     {/if}
   {/snippet}
   {#snippet actions()}
@@ -276,7 +271,7 @@
     <section class="card">
       <header class="card-head">
         <h2>执行步骤</h2>
-        <span class="sub">从上到下依次执行，每一步都能看到它勾选的前几步的结果</span>
+        <HelpTip text="从上到下依次执行。每一步能看到它勾选的前几步的结果，那些结果会作为「上游输入」放进提示词。" />
       </header>
       {#if !task}
         <Loading rows={4} />
@@ -320,7 +315,7 @@
           {#each runs as r (r.id)}
             <li>
               <a href="/runs/{r.id}">
-                <StatusPill status={r.status} />
+                <StatusBadge status={r.status} variant="text" />
                 <span class="col">
                   <span class="faint">{triggerLabel(r.trigger)}{r.dry_run ? ' · 影子' : ''}</span>
                   {#if r.error}<span class="err ellipsis" title={r.error}>{r.error}</span>{/if}
@@ -388,16 +383,6 @@
 
   .desc {
     color: var(--fg);
-  }
-  .idbtn {
-    border: none;
-    background: none;
-    padding: 0;
-    font-size: var(--t-sm);
-  }
-  .idbtn:hover {
-    color: var(--accent-fg);
-    background: none;
   }
   .callout {
     margin-bottom: var(--s4);

@@ -46,11 +46,11 @@
     min-height: var(--s4);
   }
   .num.ai {
-    border-color: color-mix(in srgb, var(--st-ai) 55%, var(--line-strong));
+    border-color: var(--st-ai);
     color: var(--st-ai);
   }
   .num.approval {
-    border-color: color-mix(in srgb, var(--warn) 55%, var(--line-strong));
-    color: var(--warn);
+    border-color: var(--warn-border);
+    color: var(--warn-fg);
   }
 </style>

@@ -156,9 +156,9 @@
   <p>他建过的任务、做过的审批和审计记录保留，只是不再关联到这个人。</p>
 </Confirm>
 
-<PageHeader title="用户">
+<PageHeader title="用户" help="改角色立刻生效，不用重新登录；停用会连带吊销这个人的所有会话。口令泄漏时用「踢下线」让已发出的会话立刻失效。">
   {#snippet sub()}
-    <span>改角色立刻生效，不用重新登录；停用会连带吊销该用户所有会话。</span>
+    {#if loaded}<span>{users.length} 人</span>{/if}
   {/snippet}
   {#snippet actions()}
     {#if session.can('admin')}
@@ -328,9 +328,9 @@
     flex: 0 0 auto;
   }
   .avatar.admin {
-    border-color: var(--accent-dim);
+    border-color: var(--accent-border);
     color: var(--accent-fg);
-    background: color-mix(in srgb, var(--accent) 12%, var(--surface-3));
+    background: var(--accent-bg);
   }
   .col {
     display: flex;

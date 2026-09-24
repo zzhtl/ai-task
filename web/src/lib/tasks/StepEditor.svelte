@@ -401,7 +401,7 @@
     white-space: nowrap;
   }
   .chip.on {
-    border-color: var(--accent-dim);
+    border-color: var(--accent-border);
     color: var(--accent-fg);
     background: color-mix(in srgb, var(--accent) 10%, transparent);
   }

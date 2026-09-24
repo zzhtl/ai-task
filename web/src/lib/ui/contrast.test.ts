@@ -92,7 +92,7 @@ const AS_TEXT = [
   '--fg-dim',
   '--fg-faint',
   '--accent-fg',
-  // StatusPill 把这五个当文字色用
+  // StatusBadge 把这五个当文字色用
   '--st-running',
   '--st-succeeded',
   '--st-failed',
@@ -121,6 +121,28 @@ describe.each([
     expect(`${token} ${theme[token]} on ${on}: ${ratio.toFixed(2)}`).toBe(
       `${token} ${theme[token]} on ${on}: ${Math.max(ratio, 3).toFixed(2)}`
     );
+  });
+});
+
+const TONES = ['ok', 'bad', 'warn', 'info', 'violet', 'neutral', 'accent'];
+
+describe.each([
+  ['暗色', DARK],
+  ['浅色', LIGHT]
+])('%s主题的徽标与按钮', (_name, theme) => {
+  // 徽标是"淡底 + 同色调文字"：文字除了落在各种表面上，还落在自己的淡底上
+  test.each(TONES)('--%s-fg 在自己的淡底和所有表面上都 ≥4.5:1', (tone) => {
+    const fg = theme[`--${tone}-fg`];
+    const bg = theme[`--${tone}-bg`];
+    expect(fg).toBeDefined();
+    expect(bg).toBeDefined();
+    const onOwn = contrast(fg, bg);
+    const { ratio } = worst(theme, `--${tone}-fg`);
+    expect(Math.min(onOwn, ratio)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  test('主按钮上的字在强调色上 ≥4.5:1', () => {
+    expect(contrast(theme['--accent-on'], theme['--accent'])).toBeGreaterThanOrEqual(4.5);
   });
 });
 

@@ -57,6 +57,6 @@
   .field.invalid :global(select:focus-visible),
   .field.invalid :global(textarea:focus-visible) {
     border-color: var(--bad);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 18%, transparent);
+    box-shadow: 0 0 0 3px var(--bad-bg);
   }
 </style>

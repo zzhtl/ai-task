@@ -1,42 +1,75 @@
-// 主题。**显式选择优先，没选过就跟随系统**；选择记在 localStorage，
-// app.html 里在首帧前读回来——那段内联脚本和这里的 read() 必须是同一套判断。
+// 主题。三选一：浅色、深色、跟随系统（默认）。
+//
+// 显式选择记在 localStorage；没记就跟随系统。app.html 里有一段在首帧前执行的
+// 内联脚本读同一个键——两边的判断必须一致，否则浅色用户每次打开会先闪一下黑底。
 
 export type Theme = 'dark' | 'light';
+export type ThemePref = Theme | 'system';
 
 const KEY = 'ai-task.theme';
 
-function read(): Theme {
+function readPref(): ThemePref {
   try {
     const saved = localStorage.getItem(KEY);
     if (saved === 'light' || saved === 'dark') return saved;
   } catch {
-    /* 隐私模式下读不了，往下走系统偏好 */
+    /* 隐私模式下读不了，按跟随系统处理 */
   }
-  // 没选过：跟随系统。之前这里恒为 dark，浅色系统的人第一次打开会被强行塞一个暗色界面。
+  return 'system';
+}
+
+function systemIsLight(): boolean {
   try {
-    return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    return window.matchMedia('(prefers-color-scheme: light)').matches;
   } catch {
-    return 'dark';
+    return false;
   }
 }
 
-let current = $state<Theme>(read());
+let pref = $state<ThemePref>(typeof window === 'undefined' ? 'system' : readPref());
+let osLight = $state(typeof window === 'undefined' ? false : systemIsLight());
+
+function resolved(): Theme {
+  return pref === 'system' ? (osLight ? 'light' : 'dark') : pref;
+}
+
+function apply() {
+  if (resolved() === 'light') document.documentElement.dataset.theme = 'light';
+  else delete document.documentElement.dataset.theme;
+}
+
+// 跟随系统时，系统在白天/夜间自动切换，界面要跟着变，不用刷新
+if (typeof window !== 'undefined') {
+  try {
+    window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', (event) => {
+      osLight = event.matches;
+      if (pref === 'system') apply();
+    });
+  } catch {
+    /* 老浏览器没有 addEventListener，就不跟随了 */
+  }
+}
 
 export const theme = {
-  get current() {
-    return current;
+  /** 用户选的：可能是"跟随系统"。 */
+  get pref(): ThemePref {
+    return pref;
   },
-  set(next: Theme) {
-    current = next;
-    if (next === 'light') document.documentElement.dataset.theme = 'light';
-    else delete document.documentElement.dataset.theme;
+  /** 实际生效的那一个。 */
+  get current(): Theme {
+    return resolved();
+  },
+  set(next: ThemePref) {
+    pref = next;
+    apply();
     try {
-      localStorage.setItem(KEY, next);
+      if (next === 'system') localStorage.removeItem(KEY);
+      else localStorage.setItem(KEY, next);
     } catch {
       /* 隐私模式下存不了，就只对这一次会话生效 */
     }
   },
   toggle() {
-    theme.set(current === 'dark' ? 'light' : 'dark');
+    theme.set(resolved() === 'dark' ? 'light' : 'dark');
   }
 };
