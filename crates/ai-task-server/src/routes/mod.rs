@@ -64,6 +64,7 @@ fn build_router(state: AppState) -> Router {
         .route("/runs/{id}/drift", get(drift::compare))
         .route("/hosts", get(hosts::list).post(hosts::create))
         .route("/hosts/{id}", put(hosts::update).delete(hosts::delete))
+        .route("/hosts/{id}/probe", post(hosts::probe))
         .route("/schedules", get(schedules::list).post(schedules::create))
         // 静态段优先于 `{id}`：preview 不会被当成一个定时的 id
         .route("/schedules/preview", get(schedules::preview))
@@ -96,7 +97,14 @@ fn build_router(state: AppState) -> Router {
             put(rules::update_rule).delete(rules::delete_rule),
         )
         .route("/rules/{id}/enabled", put(rules::set_rule_enabled))
-        .route("/skills", get(rules::list_skills).post(rules::create_skill));
+        .route("/rules/evaluate", post(rules::evaluate))
+        .route("/skills", get(rules::list_skills).post(rules::create_skill))
+        .route(
+            "/skills/{name}",
+            get(rules::get_skill)
+                .put(rules::update_skill)
+                .delete(rules::delete_skill),
+        );
 
     // 内部接口：只有 run 工作目录里的 hook 配置知道令牌。
     // 刻意不挂在 /api/v1 下，免得被当成公开接口对待。
@@ -393,6 +401,38 @@ mod tests {
             schedules_router(),
             "PUT",
             "/api/v1/schedules/0190c6d2-0000-7000-8000-000000000000",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn rule_evaluate_is_not_mistaken_for_a_rule_id() {
+        // 和定时的 preview 一样：静态段 `evaluate` 旁边就是 `{id}` 参数段
+        async fn evaluate() -> &'static str {
+            "evaluate"
+        }
+        async fn by_id() -> StatusCode {
+            StatusCode::NO_CONTENT
+        }
+        let router = || {
+            Router::new().nest(
+                "/api/v1",
+                Router::new()
+                    .route("/rules/{id}", put(by_id).delete(by_id))
+                    .route("/rules/evaluate", post(evaluate))
+                    .fallback(api_not_found),
+            )
+        };
+        let (status, body) = call(router(), "POST", "/api/v1/rules/evaluate").await;
+        assert_eq!(
+            (status, body.as_slice()),
+            (StatusCode::OK, &b"evaluate"[..])
+        );
+        let (status, _) = call(
+            router(),
+            "PUT",
+            "/api/v1/rules/0190c6d2-0000-7000-8000-000000000000",
         )
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT);

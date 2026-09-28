@@ -6,7 +6,7 @@
 //! **超时的默认动作是拒绝。**审批门的全部意义就在于「没人点头就不做」；
 //! 超时放行等于把它变成一个会延迟 15 分钟的空操作。
 
-use ai_task_proto::{ApprovalId, NodeKey, RuleId, RunId, UserId, WorkspaceId};
+use ai_task_proto::{ApprovalId, NodeKey, RuleId, RunId, TaskId, UserId, WorkspaceId};
 use chrono::{DateTime, Utc};
 use sqlx::Row as _;
 
@@ -48,6 +48,14 @@ impl Approval {
     pub fn is_decided(&self) -> bool {
         self.decided_at.is_some()
     }
+}
+
+/// 一条待决审批，连同它所属的任务：卡片上要写清是哪个任务在等人。
+#[derive(Debug, Clone)]
+pub struct PendingApproval {
+    pub approval: Approval,
+    pub task_id: TaskId,
+    pub task_name: String,
 }
 
 /// 一次决策的结果。
@@ -113,10 +121,11 @@ impl Store {
     pub async fn pending_approvals(
         &self,
         workspace_id: WorkspaceId,
-    ) -> Result<Vec<Approval>, StoreError> {
+    ) -> Result<Vec<PendingApproval>, StoreError> {
         let rows = sqlx::query(
-            "SELECT a.* FROM approvals a
+            "SELECT a.*, r.task_id, t.name AS task_name FROM approvals a
              JOIN runs r ON r.id = a.run_id
+             JOIN tasks t ON t.id = r.task_id
              WHERE r.workspace_id = $1 AND a.decided_at IS NULL AND a.expires_at > now()
              ORDER BY a.expires_at
              LIMIT $2",
@@ -125,7 +134,15 @@ impl Store {
         .bind(crate::pool::CONFIG_LIST_CAP)
         .fetch_all(self.pool())
         .await?;
-        rows.iter().map(approval_from_row).collect()
+        rows.iter()
+            .map(|row| {
+                Ok(PendingApproval {
+                    approval: approval_from_row(row)?,
+                    task_id: TaskId(row.try_get("task_id")?),
+                    task_name: row.try_get("task_name")?,
+                })
+            })
+            .collect()
     }
 
     /// 人工决策。

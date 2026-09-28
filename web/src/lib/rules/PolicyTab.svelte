@@ -17,14 +17,18 @@
   import Field from '$lib/ui/Field.svelte';
   import Icon from '$lib/ui/Icon.svelte';
   import HelpTip from '$lib/ui/HelpTip.svelte';
+  import type { PolicyEvaluation } from '$api/types/PolicyEvaluation';
+  import PolicyEvaluate from './PolicyEvaluate.svelte';
   import type { TabShared } from './types';
   import {
     PATTERN_KINDS,
-    describeMatcher,
     emptyPolicyForm,
+    evaluationOrder,
+    patternRows,
     policyBody,
     policyFormFromRule,
     policyProblems,
+    type PatternKind,
     type PolicyForm
   } from './policyForm';
 
@@ -103,12 +107,31 @@
       // act 已经把错误落到了表单和横幅上，这里不必再抛成未处理的 rejection
     ).catch(() => {});
 
-  function hostTags(rule: Rule): string[] {
-    const scope = (rule.spec.scope ?? {}) as { host_tags?: string[] };
-    return scope.host_tags ?? [];
+  function scopeOf(rule: Rule): { hostTags: string[]; taskIds: string[] } {
+    const scope = (rule.spec.scope ?? {}) as { host_tags?: string[]; task_ids?: string[] };
+    return { hostTags: scope.host_tags ?? [], taskIds: scope.task_ids ?? [] };
+  }
+  function matcherOf(rule: Rule): { tool: string | null; arg: string | null } {
+    const m = (rule.spec.match ?? {}) as { tool?: string | null; arg?: string | null };
+    return { tool: m.tool ?? null, arg: m.arg ?? null };
   }
 
   const EFFECT_TAG: Record<string, string> = { deny: 'danger', ask: 'warn', allow: 'ok' };
+  const EFFECT_NAME: Record<string, string> = { deny: '拒绝', ask: '转人工', allow: '放行' };
+  const KIND_LABEL = Object.fromEntries(PATTERN_KINDS.map((k) => [k.id, k.label])) as Record<PatternKind, string>;
+
+  /** 按真实判决的顺序分组：照着从上往下读，就是一次工具调用被判的过程。 */
+  const order = $derived(evaluationOrder(items));
+
+  /** 试算的结果。命中的那条在列表里标出来。 */
+  let hit = $state<PolicyEvaluation | null>(null);
+
+  function positionOf(id: string): string | null {
+    const at = order.global.findIndex((r) => r.id === id);
+    if (at >= 0) return `第 ${at + 1} 条全局规则`;
+    if (order.mounted.some((r) => r.id === id)) return '任务挂载的规则';
+    return null;
+  }
 </script>
 
 <p class="lead">
@@ -233,57 +256,101 @@
   {/snippet}
 </Modal>
 
+<PolicyEvaluate onresult={(r) => (hit = r)} position={positionOf} />
+
+{#snippet row(rule: Rule, index: number | null)}
+  {@const m = matcherOf(rule)}
+  {@const scope = scopeOf(rule)}
+  {@const effect = String(rule.spec.effect)}
+  <tr class:off={!rule.enabled} class:on={editing?.id === rule.id} class:hit={hit?.rule_id === rule.id}>
+    <td class="num faint">{index ?? ''}</td>
+    <td class="num nowrap">
+      {rule.priority}{#if rule.scope === 'task'}<span class="faint small">+1000</span>{/if}
+    </td>
+    <td><span class="tag {EFFECT_TAG[effect] ?? ''}">{EFFECT_NAME[effect] ?? effect}</span></td>
+    <td class="rule">
+      <div class="title">
+        <span class="name">{rule.name}</span>
+        <span class="mono faint small">{m.tool ?? '任意工具'}{m.arg ? `.${m.arg}` : ''}</span>
+      </div>
+      {#if patternRows(rule.spec).length}
+        <div class="chips">
+          {#each patternRows(rule.spec) as p, i (i)}
+            <span class="chip"><span class="k">{KIND_LABEL[p.kind]}</span><code>{p.value}</code></span>
+          {/each}
+        </div>
+      {:else}
+        <div class="faint small">{m.tool ? `${m.tool} 的所有调用` : '所有工具调用'}</div>
+      {/if}
+      <div class="reason">{rule.spec.reason}</div>
+    </td>
+    <td>
+      <span class="scope">
+        <span class="tag" class:accent={rule.scope === 'global'}>{rule.scope === 'global' ? '全局' : '按任务挂载'}</span>
+        {#each scope.hostTags as t (t)}<span class="tag" title="只对带这个 tag 的主机生效">{t}</span>{/each}
+        {#if scope.taskIds.length}<span class="tag" title="只对这些任务生效（通过接口设置）">限 {scope.taskIds.length} 个任务</span>{/if}
+      </span>
+    </td>
+    <td class="act">
+      <div class="row">
+        <button class="btn-ghost btn-sm" disabled={busy} onclick={() => ontoggle(rule)}>
+          {rule.enabled ? '停用' : '启用'}
+        </button>
+        <button class="btn-ghost btn-sm btn-icon" title="编辑" aria-label="编辑 {rule.name}" disabled={busy} onclick={() => onedit(rule)}>
+          <Icon name="pencil" />
+        </button>
+        <!-- 只是暂时不生效的话用停用：删除会让历史 run 的规则指纹对不上 -->
+        <button
+          class="btn-ghost btn-sm btn-icon danger"
+          title="删除"
+          aria-label="删除 {rule.name}"
+          disabled={busy}
+          onclick={() => ondelete(rule)}
+        >
+          <Icon name="trash" />
+        </button>
+      </div>
+    </td>
+  </tr>
+{/snippet}
+
 {#if !loaded}
   <div class="card"><Loading rows={3} /></div>
 {:else if items.length}
   <div class="card flush">
-    <table>
+    <table class="policies">
       <thead>
-        <tr><th>名称</th><th>判决</th><th>匹配</th><th>原因</th><th>范围</th><th>优先级</th><th class="act"></th></tr>
+        <tr><th class="num">#</th><th class="num">优先级</th><th>判决</th><th>规则</th><th>范围</th><th class="act"></th></tr>
       </thead>
-      <tbody>
-        {#each items as rule (rule.id)}
-          <tr class:off={!rule.enabled} class:on={editing?.id === rule.id}>
-            <td class="mono name">{rule.name}</td>
-            <td><span class="tag {EFFECT_TAG[String(rule.spec.effect)] ?? ''}">{rule.spec.effect}</span></td>
-            <td class="mono small">{describeMatcher(rule.spec)}</td>
-            <td class="muted reason">{rule.spec.reason}</td>
-            <td>
-              <span class="scope">
-                <span class="tag" class:accent={rule.scope === 'global'}>
-                  {rule.scope === 'global' ? '全局' : '按任务挂载'}
-                </span>
-                {#each hostTags(rule) as t (t)}<span class="tag" title="只对带这个 tag 的主机生效">{t}</span>{/each}
-              </span>
-            </td>
-            <td class="faint">{rule.priority}</td>
-            <td class="act">
-              <div class="row">
-                <button class="btn-ghost btn-sm" disabled={busy} onclick={() => ontoggle(rule)}>
-                  {rule.enabled ? '停用' : '启用'}
-                </button>
-                <button class="btn-ghost btn-sm btn-icon" title="编辑" aria-label="编辑" disabled={busy} onclick={() => onedit(rule)}>
-                  <Icon name="pencil" />
-                </button>
-                <!-- 只是暂时不生效的话用停用：删除会让历史 run 的规则指纹对不上 -->
-                <button
-                  class="btn-ghost btn-sm btn-icon danger"
-                  title="删除"
-                  aria-label="删除规则"
-                  disabled={busy}
-                  onclick={() => ondelete(rule)}
-                >
-                  <Icon name="trash" />
-                </button>
-              </div>
-            </td>
+      {#if order.mounted.length}
+        <tbody>
+          <tr class="group">
+            <th colspan="6">按任务挂载：只在挂上它的任务里生效，优先级 +1000，排在所有全局规则前面</th>
           </tr>
-        {/each}
+          {#each order.mounted as rule (rule.id)}{@render row(rule, null)}{/each}
+        </tbody>
+      {/if}
+      <tbody>
+        <tr class="group"><th colspan="6">全局：从上往下判，先命中的生效</th></tr>
+        {#each order.global as rule, i (rule.id)}{@render row(rule, i + 1)}{/each}
+        <tr class="fallback" class:hit={hit?.decided_by === 'default'}>
+          <td class="num faint">—</td>
+          <td colspan="5">
+            <b>都没命中时走兜底</b>
+            <span class="faint">：只读工具放行；写类工具在带 <code>prod</code> 标签的主机上转人工确认，其余放行</span>
+          </td>
+        </tr>
       </tbody>
+      {#if order.disabled.length}
+        <tbody>
+          <tr class="group"><th colspan="6">已停用：不参与判决</th></tr>
+          {#each order.disabled as rule (rule.id)}{@render row(rule, null)}{/each}
+        </tbody>
+      {/if}
     </table>
   </div>
 {:else if !adding}
-  <Empty title="还没有硬策略" hint="现在模型的每一次工具调用都只受执行器默认白名单约束。至少给生产机加一条 deny。">
+  <Empty title="还没有硬策略" hint="现在所有工具调用都走兜底策略：只读放行，写类工具在 prod 主机上转人工确认。至少给生产机加一条 deny。">
     {#snippet action()}
       <button class="btn-primary" onclick={onnew}>新增策略</button>
     {/snippet}
@@ -294,13 +361,64 @@
   .name {
     font-weight: 500;
   }
+  .rule {
+    min-width: 24ch;
+    max-width: 56ch;
+  }
+  .title {
+    display: flex;
+    align-items: baseline;
+    gap: var(--s2);
+    flex-wrap: wrap;
+  }
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 4px;
+  }
+  .chip {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 4px;
+    max-width: 100%;
+    padding: 1px 6px;
+    border: 1px solid var(--line);
+    border-radius: var(--r1);
+    background: var(--surface-2);
+    font-size: var(--t-xs);
+  }
+  .chip .k {
+    color: var(--fg-faint);
+  }
+  .chip code {
+    overflow-wrap: anywhere;
+  }
   .reason {
-    max-width: 36ch;
+    margin-top: 4px;
+    font-size: var(--t-sm);
+    color: var(--fg-dim);
   }
   .scope {
     display: flex;
     gap: 4px;
     flex-wrap: wrap;
+  }
+  .policies tr.group th {
+    padding: var(--s3) var(--s4) var(--s2);
+    background: var(--surface-2);
+    font-weight: 500;
+    color: var(--fg-dim);
+    text-align: left;
+  }
+  .policies tr.hit td {
+    background: var(--accent-bg);
+  }
+  .policies tr.hit td:first-child {
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+  .fallback td {
+    font-size: var(--t-sm);
   }
   .patterns {
     display: flex;

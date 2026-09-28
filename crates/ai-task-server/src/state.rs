@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use ai_task_proto::WorkspaceId;
+use ai_task_proto::{HostId, WorkspaceId};
 use ai_task_runtime::RunEngine;
 
 use crate::bus::EventBus;
@@ -32,6 +32,47 @@ pub struct Inner {
     pub require_auth: bool,
     /// 口令最小长度。只有回环部署才允许低于默认值，由启动校验保证。
     pub min_password_len: usize,
+    /// 正在探测的主机。
+    pub probing: ProbeLocks,
+}
+
+type HostSet = Arc<std::sync::Mutex<std::collections::HashSet<HostId>>>;
+
+/// 正在探测的主机。同一台机器同时探两次会互相踩：投送 agent 的临时文件按进程号命名。
+///
+/// **锁在进程内**，只在单实例部署下成立。
+#[derive(Default)]
+pub struct ProbeLocks(HostSet);
+
+impl ProbeLocks {
+    /// 占住一台主机。`None` 表示已经有人在探这台了。
+    #[must_use]
+    pub fn begin(&self, host: HostId) -> Option<ProbeGuard> {
+        let fresh = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(host);
+        fresh.then(|| ProbeGuard {
+            set: Arc::clone(&self.0),
+            host,
+        })
+    }
+}
+
+/// 占着一台主机的探测。drop 时释放——请求被取消、探测超时都一样。
+pub struct ProbeGuard {
+    set: HostSet,
+    host: HostId,
+}
+
+impl Drop for ProbeGuard {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.host);
+    }
 }
 
 /// 从配置里来的那部分。收成一个结构体，让调用点能一眼看出谁是谁
@@ -71,6 +112,7 @@ impl AppState {
             host_exec,
             require_auth,
             min_password_len,
+            probing: ProbeLocks::default(),
         }))
     }
 
@@ -120,5 +162,21 @@ impl std::ops::Deref for AppState {
     type Target = Inner;
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_host_is_probed_once_at_a_time_and_released_on_drop() {
+        let locks = ProbeLocks::default();
+        let (a, b) = (HostId::new(), HostId::new());
+        let first = locks.begin(a).expect("第一次能占住");
+        assert!(locks.begin(a).is_none(), "同一台正在探");
+        assert!(locks.begin(b).is_some(), "别的主机不受影响");
+        drop(first);
+        assert!(locks.begin(a).is_some(), "上一次结束（或被取消）后就能再探");
     }
 }

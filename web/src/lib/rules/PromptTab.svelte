@@ -41,6 +41,7 @@
   let name = $state('');
   let text = $state('');
   let global = $state(false);
+  let priority = $state(0);
 
   const bodyText = (rule: Rule) => (rule.spec.text as string) ?? '';
 
@@ -51,10 +52,12 @@
       name = editing.name;
       text = bodyText(editing);
       global = editing.scope === 'global';
+      priority = editing.priority;
     } else if (!adding) {
       name = '';
       text = '';
       global = false;
+      priority = 0;
     }
   });
 
@@ -63,7 +66,7 @@
     kind: 'prompt',
     text,
     global,
-    priority: editing?.priority ?? 0
+    priority
   });
 
   const save = () =>
@@ -104,6 +107,11 @@
         </select>
       {/snippet}
     </Field>
+    <Field label="优先级" hint="数值大的排在提示词前面" error={fieldErr.priority}>
+      {#snippet control(p)}
+        <input {...p} type="number" bind:value={priority} />
+      {/snippet}
+    </Field>
     <Field label="规则文本" error={fieldErr.text} wide>
       {#snippet control(p)}
         <textarea {...p} bind:value={text} rows="4" class="prose" placeholder="不要重启任何服务。需要重启时先报告，等人确认。"></textarea>
@@ -124,11 +132,12 @@
   <div class="card flush">
     <table>
       <thead>
-        <tr><th>名称</th><th>规则文本</th><th>范围</th><th class="act"></th></tr>
+        <tr><th class="num">优先级</th><th>名称</th><th>规则文本</th><th>范围</th><th class="act"></th></tr>
       </thead>
       <tbody>
         {#each items as rule (rule.id)}
           <tr class:off={!rule.enabled} class:on={editing?.id === rule.id}>
+            <td class="num faint">{rule.priority}</td>
             <td class="mono name">{rule.name}</td>
             <td class="muted text">{bodyText(rule)}</td>
             <td>

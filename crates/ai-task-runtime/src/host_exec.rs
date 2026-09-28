@@ -260,6 +260,79 @@ pub(crate) async fn connect_remote(
     Ok(agent)
 }
 
+/// 一次主机探测拿到的东西。
+#[derive(Debug, Clone)]
+pub struct HostProbeReport {
+    /// agent 握手时自报的能力。
+    pub info: ai_task_agent::protocol::AgentInfo,
+    /// 这次是不是重新投送了 agent 二进制。
+    pub uploaded: bool,
+}
+
+/// 探测一台主机：连上、确认 agent 在、握手拿到能力，然后断开。
+///
+/// 步骤和 [`connect_remote`] 一样，但**自己持有会话、用完就关**。`connect_remote`
+/// 把会话泄漏给 agent 用，每调一次就留下一条 SSH 连接——不能拿来做一个会被人
+/// 反复点的按钮。探测成功会刷新主机上记着的能力快照和最近连接时间。
+///
+/// 调用方负责超时。超时取消时会话随 future 一起 drop，连接由 russh 收尾。
+pub async fn probe_host(
+    store: &Store,
+    config: &HostExecConfig,
+    workspace_id: ai_task_proto::WorkspaceId,
+    host_id: HostId,
+) -> Result<HostProbeReport, HostExecError> {
+    let binary_path = config
+        .remote_agent
+        .as_ref()
+        .ok_or(HostExecError::NoRemoteAgent)?;
+    let binary = tokio::fs::read(binary_path)
+        .await
+        .map_err(|err| HostExecError::AgentBinary {
+            path: binary_path.display().to_string(),
+            detail: err.to_string(),
+        })?;
+    let sha = sha256_hex(&binary);
+    let (host, private_key) = store.get_host(workspace_id, host_id).await?;
+
+    let key_path = write_private_key(&private_key).await?;
+    let session = SshSession::connect(&SshConfig {
+        host: host.address.clone(),
+        port: u16::try_from(host.port).unwrap_or(22),
+        user: host.username.clone(),
+        key_path: key_path.clone(),
+        key_passphrase: None,
+        known_hosts: config.known_hosts.clone(),
+        policy: config.host_key_policy,
+        connect_timeout: std::time::Duration::from_secs(15),
+    })
+    .await;
+    let _ = tokio::fs::remove_file(&key_path).await;
+    let session = session?;
+
+    // 中间任何一步失败，连接都要先关掉再把错误抛出去
+    let outcome = async {
+        let deployed = session
+            .ensure_agent(&binary, &sha, REMOTE_AGENT_DIR)
+            .await?;
+        let mut agent = RemoteAgent::start(&session, &deployed.path, &[]).await?;
+        let info = agent.info().clone();
+        let _ = agent.shutdown().await;
+        Ok::<_, HostExecError>(HostProbeReport {
+            info,
+            uploaded: deployed.uploaded,
+        })
+    }
+    .await;
+    session.close().await;
+    let report = outcome?;
+
+    let mode = format!("{:?}", report.info.cgroup_mode).to_lowercase();
+    let clis = serde_json::to_value(&report.info.ai_clis).unwrap_or_else(|_| serde_json::json!([]));
+    store.record_host_probe(host_id, &sha, &mode, &clis).await?;
+    Ok(report)
+}
+
 async fn write_private_key(key: &str) -> Result<PathBuf, HostExecError> {
     let path = std::env::temp_dir().join(format!("ai-task-key-{}", uuid::Uuid::now_v7()));
     tokio::fs::write(&path, key)

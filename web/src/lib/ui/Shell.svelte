@@ -68,10 +68,11 @@
     label: string;
     icon: IconName;
     badge?: () => { n: number; tone: 'alert' | 'info' } | null;
+    /** 只给管理员看。 */
+    admin?: boolean;
   }
   interface NavGroup {
     label: string | null;
-    admin?: boolean;
     items: NavItem[];
   }
 
@@ -97,23 +98,26 @@
     },
     {
       label: '配置',
-      admin: true,
       items: [
-        { href: '/hosts', label: '主机', icon: 'server' },
+        { href: '/hosts', label: '主机', icon: 'server', admin: true },
+        // 规则只有管理员能看；技能对所有人开放（operator 能改），同一个页面按角色给页签
         { href: '/rules', label: '规则与技能', icon: 'shield' }
       ]
     },
     {
       label: '管理',
-      admin: true,
       items: [
-        { href: '/users', label: '用户', icon: 'users' },
-        { href: '/audit', label: '审计', icon: 'file' }
+        { href: '/users', label: '用户', icon: 'users', admin: true },
+        { href: '/audit', label: '审计', icon: 'file', admin: true }
       ]
     }
   ];
 
-  const groups = $derived(GROUPS.filter((g) => !g.admin || session.can('admin')));
+  const groups = $derived(
+    GROUPS.map((g) => ({ ...g, items: g.items.filter((i) => !i.admin || session.can('admin')) })).filter(
+      (g) => g.items.length > 0
+    )
+  );
 
   function active(href: string): boolean {
     return href === '/' ? page.url.pathname === '/' : page.url.pathname.startsWith(href);

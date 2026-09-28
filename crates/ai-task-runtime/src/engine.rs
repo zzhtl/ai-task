@@ -245,8 +245,16 @@ impl RunEngine {
 
         // 指纹在**执行之前**算好：它描述的是输入条件，跟结果无关。
         // 放到结束时算的话，中途失败的 run 就没有指纹，也就无法当基线比较。
-        let fingerprint =
-            ai_task_core::drift::fingerprint(&version.spec, &version.rules_hash, &skill_names);
+        // 硬策略在每次工具调用时现读；这里读一遍只为把它的内容算进指纹。
+        let policy_rules = self
+            .store
+            .policy_rules_for(workspace_id, &version.rules)
+            .await?;
+        let fingerprint = ai_task_core::drift::fingerprint(
+            &version.spec,
+            &rule_conditions(&prompt_rules, &policy_rules),
+            &skill_conditions(&skill_names, &skills),
+        );
         self.store
             .start_run(
                 run_id,
@@ -1059,6 +1067,44 @@ fn compose_rules(rules: &[ai_task_store::PromptRule]) -> Option<String> {
 }
 
 /// 收集 DAG 里所有 AI 节点声明的 skill 名（含 map 模板内部）。
+/// 进漂移指纹的规则条件：这次执行实际拿到的每条规则的**内容**。
+///
+/// 规则 id 不进去：删掉重建一条一模一样的规则，行为条件没有变。
+fn rule_conditions(
+    prompt: &[ai_task_store::PromptRule],
+    policy: &[ai_task_core::PolicyRule],
+) -> Vec<String> {
+    let prompt = prompt
+        .iter()
+        .map(|r| format!("prompt\0{}\0{}\0{}", r.name, r.priority, r.text));
+    let policy = policy.iter().map(|r| {
+        let body = serde_json::json!({
+            "name": r.name,
+            "priority": r.priority,
+            "effect": r.effect,
+            "reason": r.reason,
+            "scope": r.scope,
+            "match": r.matcher,
+        });
+        format!("policy\0{body}")
+    });
+    prompt.chain(policy).collect()
+}
+
+/// 进漂移指纹的技能条件：名字、内容指纹和描述。
+///
+/// 描述不在内容指纹里，但渐进式披露时模型只看得到它，改了描述就是改了条件。
+fn skill_conditions(requested: &[String], loaded: &[ai_task_store::Skill]) -> Vec<String> {
+    requested
+        .iter()
+        .map(|name| match loaded.iter().find(|s| &s.name == name) {
+            Some(skill) => format!("{name}\0{}\0{}", skill.content_hash, skill.description),
+            // 挂了但库里没有，和"有这个技能"是不同的条件
+            None => format!("{name}\0missing"),
+        })
+        .collect()
+}
+
 fn collect_skill_names(dag: &ValidatedDag) -> Vec<String> {
     fn walk(node: &NodeSpec, out: &mut Vec<String>) {
         if let NodeConfig::Ai(ai) = &node.config {
@@ -1287,6 +1333,74 @@ fn needs_remote_tools(node: &ai_task_proto::NodeSpec) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn policy_rule(reason: &str) -> ai_task_core::PolicyRule {
+        ai_task_core::PolicyRule {
+            id: ai_task_proto::RuleId::new(),
+            name: "禁止删库".into(),
+            priority: 1000,
+            effect: ai_task_proto::PolicyEffect::Deny,
+            reason: reason.into(),
+            scope: ai_task_core::RuleScope::default(),
+            matcher: ai_task_core::ToolMatcher {
+                tool: Some("Bash".into()),
+                arg: Some("command".into()),
+                any_of: vec![ai_task_core::Pattern::Contains("drop database".into())],
+            },
+        }
+    }
+
+    fn skill(description: &str) -> ai_task_store::Skill {
+        ai_task_store::Skill {
+            id: ai_task_proto::SkillId::new(),
+            name: "triage".into(),
+            version: "1".into(),
+            description: description.into(),
+            body: "步骤".into(),
+            files: vec![],
+            content_hash: "h1".into(),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn fingerprint_conditions_follow_content_not_identity() {
+        // 删掉重建一条一模一样的规则：id 变了，条件不变
+        assert_eq!(
+            rule_conditions(&[], &[policy_rule("会删数据")]),
+            rule_conditions(&[], &[policy_rule("会删数据")])
+        );
+        // 拒绝原因会作为 tool_result 回给模型，改了它就是改了条件
+        assert_ne!(
+            rule_conditions(&[], &[policy_rule("会删数据")]),
+            rule_conditions(&[], &[policy_rule("先备份再说")])
+        );
+        let prompt = |text: &str| ai_task_store::PromptRule {
+            id: ai_task_proto::RuleId::new(),
+            name: "只读".into(),
+            text: text.into(),
+            priority: 0,
+            global: true,
+        };
+        assert_ne!(
+            rule_conditions(&[prompt("不许写文件")], &[]),
+            rule_conditions(&[prompt("可以写 /tmp")], &[])
+        );
+    }
+
+    #[test]
+    fn a_skill_description_or_a_missing_skill_is_a_different_condition() {
+        let requested = vec!["triage".to_owned()];
+        assert_ne!(
+            skill_conditions(&requested, &[skill("排查 nginx")]),
+            skill_conditions(&requested, &[skill("排查 nginx 和上游")]),
+            "描述不在内容指纹里，但模型靠它决定用不用这个技能"
+        );
+        assert_ne!(
+            skill_conditions(&requested, &[skill("排查 nginx")]),
+            skill_conditions(&requested, &[])
+        );
+    }
 
     #[test]
     fn nothing_that_only_exists_on_the_center_gets_shipped_to_the_target() {

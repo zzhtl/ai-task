@@ -205,7 +205,7 @@
             <StatusBadge status="awaiting_approval" variant="dot" />
             <span class="main ellipsis">{a.title}</span>
             <span class="spacer"></span>
-            <span class="faint ellipsis side">{live.find((r) => r.id === a.run_id)?.task_name ?? ''}</span>
+            <span class="faint ellipsis side">{a.task_name}</span>
             <span class="clock" class:soon={a.expires_in_s < 60}>剩余 {mmss(a.expires_in_s)}</span>
           </a>
         </li>

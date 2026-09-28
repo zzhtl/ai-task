@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import type { Rule } from '$api/models';
 import {
-  describeMatcher,
   emptyPolicyForm,
+  evaluationOrder,
+  patternRows,
   policyBody,
   policyFormFromRule,
   policyProblems
@@ -118,11 +119,43 @@ describe('保存前的检查', () => {
   });
 });
 
-describe('匹配条件的一行描述', () => {
-  test('不限工具时说"任意工具"，四种模式都认得', () => {
-    expect(describeMatcher(SPECS[0][1])).toBe(
-      '任意工具.command ~ 包含 rm -rf | 完全相等 reboot | 正则 \\bmkfs\\b'
-    );
-    expect(describeMatcher(SPECS[1][1])).toBe('Bash 的所有调用');
+describe('列表里的模式', () => {
+  test('服务端存的真实形状：几种模式都认得', () => {
+    expect(patternRows(SPECS[0][1]).map((r) => r.kind)).toEqual(['contains', 'equals', 'regex']);
+    expect(patternRows(SPECS[1][1])).toEqual([]);
+  });
+});
+
+describe('evaluationOrder', () => {
+  const named = (name: string, priority: number, extra: Partial<Rule> = {}) =>
+    rule({ effect: 'deny', reason: 'r', scope: {}, match: {} }, { id: name, name, priority, ...extra });
+
+  test('按服务端的判决顺序：优先级大的先判，同优先级按名字的码点序', () => {
+    // 中文环境下 localeCompare 按拼音把"禁"排在"删"前面，服务端按字节序是反过来的
+    const order = evaluationOrder([named('禁止删除', 10), named('删除要确认', 10), named('兜底', 1), named('b', 50)]);
+    expect(order.global.map((r) => r.name)).toEqual(['b', '删除要确认', '禁止删除', '兜底']);
+  });
+
+  test('按任务挂载的单独一组，停用的不参与判决', () => {
+    const order = evaluationOrder([
+      named('g', 100),
+      named('t', 1, { scope: 'task' }),
+      named('off', 999, { enabled: false })
+    ]);
+    expect(order.mounted.map((r) => r.name)).toEqual(['t']);
+    expect(order.global.map((r) => r.name)).toEqual(['g']);
+    expect(order.disabled.map((r) => r.name)).toEqual(['off']);
+  });
+});
+
+describe('patternRows', () => {
+  test('认得出的模式按条列出，认不出的丢掉而不是乱显示', () => {
+    expect(
+      patternRows({ match: { any_of: [{ regex: '^rm' }, { equals: 'reboot' }, { mystery: 'x' }] } })
+    ).toEqual([
+      { kind: 'regex', value: '^rm' },
+      { kind: 'equals', value: 'reboot' }
+    ]);
+    expect(patternRows({})).toEqual([]);
   });
 });

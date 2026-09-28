@@ -5,8 +5,13 @@
 // 同一个 Host 在四个文件里有四种定义，改一个字段要找四处。
 
 import { api } from './client';
+import type { EvaluatePolicy } from './types/EvaluatePolicy';
+import type { HostProbe } from './types/HostProbe';
 import type { Page } from './types/Page';
+import type { PolicyEvaluation } from './types/PolicyEvaluation';
 import type { SchedulePreview } from './types/SchedulePreview';
+import type { SkillDetail } from './types/SkillDetail';
+import type { UpdateSkill } from './types/UpdateSkill';
 
 export interface AiCli {
   name: string;
@@ -56,6 +61,11 @@ export interface Approval {
   expires_at: string;
   /** 服务端算好的剩余秒数。以它为准，别拿本地时钟去减 expires_at。 */
   expires_in_s: number;
+  /** 是哪个任务在等。 */
+  task_id: string;
+  task_name: string;
+  /** 动作的目标主机名。本机执行、审批节点、主机已删除时为 null。 */
+  host_name: string | null;
 }
 
 export interface Rule {
@@ -141,6 +151,35 @@ export const saveSchedule = (input: ScheduleInput, id?: string) =>
 export const listApprovals = () => items(api<Page<Approval>>('/api/v1/approvals'));
 export const listRules = () => items(api<Page<Rule>>('/api/v1/rules'));
 export const listSkills = () => items(api<Page<Skill>>('/api/v1/skills'));
+
+/** 拿一次假想的工具调用试算硬策略。和真实调用同一个判决函数，不写任何东西。 */
+export const evaluatePolicy = (body: EvaluatePolicy, signal?: AbortSignal) =>
+  api<PolicyEvaluation>('/api/v1/rules/evaluate', { method: 'POST', body, signal });
+
+export const getSkill = (name: string, signal?: AbortSignal) =>
+  api<SkillDetail>(`/api/v1/skills/${encodeURIComponent(name)}`, { signal });
+
+/**
+ * 改技能。`etag` 是打开时那一版的 `id`：期间别人改过就是 412，
+ * 内容没变是 200 且不插新版本。
+ */
+export const updateSkill = (name: string, body: UpdateSkill, etag: string) =>
+  api<SkillDetail>(`/api/v1/skills/${encodeURIComponent(name)}`, {
+    method: 'PUT',
+    body,
+    ifMatch: `"${etag}"`
+  });
+
+/** 删掉技能的全部版本。还有任务在用时 409，消息里列出任务名。 */
+export const deleteSkill = (name: string) =>
+  api(`/api/v1/skills/${encodeURIComponent(name)}`, { method: 'DELETE' });
+
+/**
+ * 现在就连一下这台主机。服务端最多等 45 秒；这里给 60 秒，
+ * 免得前端先超时、把一个其实成功了的探测报成失败。
+ */
+export const probeHost = (id: string) =>
+  api<HostProbe>(`/api/v1/hosts/${id}/probe`, { method: 'POST', timeoutMs: 60_000 });
 export const listUsers = () => items(api<Page<User>>('/api/v1/users'));
 export interface AuditQuery {
   /** 文本搜索：动作、对象 id、操作人、变更前后的内容。 */

@@ -12,11 +12,7 @@
   import { toast, toastError } from '$lib/ui/toast.svelte';
   import { mmss } from '$lib/ui/format';
 
-  let {
-    approval,
-    taskName = null,
-    ondecided
-  }: { approval: Approval; taskName?: string | null; ondecided?: () => void } = $props();
+  let { approval, ondecided }: { approval: Approval; ondecided?: () => void } = $props();
 
   let reason = $state('');
   const canDecide = $derived(session.can('operator'));
@@ -61,50 +57,99 @@
     }
   }
 
-  /** 意图里最该被看见的几项，按重要性排。 */
-  const HIGHLIGHT = ['tool', 'host', 'host_id', 'command', 'path', 'policy_reason'] as const;
+  const show = (value: unknown) => (typeof value === 'string' ? value : JSON.stringify(value, null, 2));
 
-  const rows = $derived.by(() => {
-    const entries = Object.entries(approval.intent ?? {});
-    const rank = (k: string) => {
-      const i = HIGHLIGHT.indexOf(k as (typeof HIGHLIGHT)[number]);
-      return i === -1 ? HIGHLIGHT.length : i;
+  /**
+   * 策略要求确认的那次工具调用：intent 里带 `tool` 和 `input`。
+   * 最该被看见的是主参数——要跑的命令、要改的文件——放进醒目的代码块，其余参数收起来。
+   */
+  const call = $derived.by(() => {
+    const intent = approval.intent ?? {};
+    if (typeof intent.tool !== 'string') return null;
+    const input =
+      intent.input && typeof intent.input === 'object' && !Array.isArray(intent.input)
+        ? (intent.input as Record<string, unknown>)
+        : {};
+    const key = ['command', 'file_path', 'path', 'url', 'pattern'].find((k) => typeof input[k] === 'string') ?? null;
+    return {
+      tool: intent.tool.replace(/^mcp__ai_task_remote__/, ''),
+      key,
+      main: key ? String(input[key]) : null,
+      rest: Object.entries(input).filter(([k]) => k !== key)
     };
-    return entries
-      .sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b))
-      .map(([key, value]) => ({
-        key,
-        text: typeof value === 'string' ? value : JSON.stringify(value, null, 2),
-        long: typeof value !== 'string' || value.length > 60
-      }));
   });
+  const policyReason = $derived(
+    typeof approval.intent?.policy_reason === 'string' ? approval.intent.policy_reason : null
+  );
+  /** 不是工具调用的审批（审批步骤）：把意图里其余的东西原样列出来。节点已经在标题下面了。 */
+  const otherRows = $derived(
+    call
+      ? []
+      : Object.entries(approval.intent ?? {})
+          .filter(([k]) => k !== 'node')
+          .map(([key, value]) => ({ key, text: show(value) }))
+  );
+
+  /** 整个审批窗口有多长。两个时刻都是服务端给的，不受本地时钟影响。 */
+  const total = $derived(
+    Math.max(1, (Date.parse(approval.expires_at) - Date.parse(approval.requested_at)) / 1000)
+  );
 </script>
 
 <article class:expiring={remaining > 0 && remaining < 60} class:expired={remaining === 0}>
   <header>
     <div class="head-main">
       <h3>{approval.title}</h3>
-      <p class="meta faint">
-        {#if taskName}<span>{taskName}</span>{/if}
-        <a href="/runs/{approval.run_id}">run {approval.run_id.slice(0, 8)}</a>
-        {#if approval.node_key}<span class="mono">{approval.node_key}</span>{/if}
-        {#if approval.rule_id}<span>由策略 ask 触发</span>{:else}<span>审批节点</span>{/if}
+      <p class="meta">
+        <a href="/tasks/{approval.task_id}">{approval.task_name}</a>
+        {#if approval.node_key}<span>步骤 <code>{approval.node_key}</code></span>{/if}
+        {#if call}<span>{approval.host_name ? `目标机 ${approval.host_name}` : '中心节点本机'}</span>{/if}
+        <span class="faint">{approval.rule_id ? '策略要求确认' : '审批步骤'}</span>
+        <a class="faint" href="/runs/{approval.run_id}">看这次执行</a>
       </p>
     </div>
     <span class="clock" title="超时后自动拒绝">
       {remaining === 0 ? '已超时（自动拒绝）' : `剩余 ${mmss(remaining)}`}
     </span>
   </header>
+  <div
+    class="countdown"
+    role="progressbar"
+    aria-label="审批剩余时间"
+    aria-valuemin={0}
+    aria-valuemax={Math.round(total)}
+    aria-valuenow={remaining}
+  >
+    <span style="width: {Math.min(100, (remaining / total) * 100)}%"></span>
+  </div>
 
-  {#if rows.length}
+  {#if call}
+    <div class="call">
+      <div class="call-head">
+        <span class="tool mono">{call.tool}</span>
+        {#if call.key}<span class="faint small">{call.key}</span>{/if}
+      </div>
+      {#if call.main !== null}<pre class="main">{call.main}</pre>{/if}
+      {#if call.rest.length}
+        <details>
+          <summary class="small">其余参数（{call.rest.length}）</summary>
+          <dl class="intent">
+            {#each call.rest as [key, value] (key)}
+              <dt>{key}</dt>
+              <dd><code>{show(value)}</code></dd>
+            {/each}
+          </dl>
+        </details>
+      {/if}
+    </div>
+    {#if policyReason}<p class="why"><span class="faint">为什么要确认：</span>{policyReason}</p>{/if}
+  {:else if otherRows.length}
     <dl class="intent">
-      {#each rows as row (row.key)}
+      {#each otherRows as row (row.key)}
         <dt>{row.key}</dt>
-        <dd class:block={row.long}><code>{row.text}</code></dd>
+        <dd><code>{row.text}</code></dd>
       {/each}
     </dl>
-  {:else}
-    <p class="faint small">这次审批没有附带结构化意图。</p>
   {/if}
 
   {#if error}<div class="banner">{error}</div>{/if}
@@ -115,8 +160,10 @@
       placeholder={canDecide ? '理由（可留空；会作为 tool_result 回给模型）' : '需要 operator 权限才能审批'}
       disabled={busy || remaining === 0 || !canDecide}
     />
-    <button onclick={() => decide(false)} disabled={busy || remaining === 0 || !canDecide} class="btn-danger">拒绝</button>
-    <button onclick={() => decide(true)} disabled={busy || remaining === 0 || !canDecide} class="approve">批准</button>
+    <button onclick={() => decide(false)} disabled={busy || remaining === 0 || !canDecide} class="btn-ghost danger">
+      拒绝
+    </button>
+    <button onclick={() => decide(true)} disabled={busy || remaining === 0 || !canDecide} class="btn-primary">批准</button>
   </div>
 </article>
 
@@ -154,7 +201,63 @@
     font-size: var(--t-lg);
   }
   .meta {
-    margin: 2px 0 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px var(--s3);
+    margin: 4px 0 0;
+    font-size: var(--t-sm);
+    color: var(--fg-dim);
+  }
+  .countdown {
+    height: 3px;
+    border-radius: 2px;
+    background: var(--surface-2);
+    overflow: hidden;
+  }
+  .countdown span {
+    display: block;
+    height: 100%;
+    background: var(--warn-fg);
+    transition: width 1s linear;
+  }
+  article.expiring .countdown span {
+    background: var(--bad-fg);
+  }
+  .call {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s2);
+  }
+  .call-head {
+    display: flex;
+    align-items: baseline;
+    gap: var(--s2);
+  }
+  .tool {
+    font-weight: 600;
+  }
+  .main {
+    margin: 0;
+    padding: var(--s3);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r2);
+    background: var(--surface-2);
+    font-size: var(--t-base);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 14rem;
+    overflow: auto;
+  }
+  .why {
+    margin: 0;
+    font-size: var(--t-sm);
+  }
+  details summary {
+    cursor: pointer;
+    color: var(--fg-dim);
+  }
+  details .intent {
+    margin-top: var(--s2);
   }
   .clock {
     font-size: var(--t-base);
@@ -187,11 +290,9 @@
     min-width: 0;
   }
   dd code {
+    display: block;
     font-size: var(--t-sm);
     color: var(--fg);
-  }
-  dd.block code {
-    display: block;
     white-space: pre-wrap;
     max-height: 12rem;
     overflow: auto;
@@ -202,18 +303,6 @@
   }
   .actions input {
     flex: 1;
-  }
-  .approve,
-  :global(:root[data-theme='light']) .approve {
-    background: var(--ok-fg);
-    border-color: var(--ok-fg);
-    color: var(--surface-1);
-  }
-  .approve:hover:not(:disabled) {
-    background: var(--ok-fg);
-    border-color: var(--ok-fg);
-    color: var(--surface-1);
-    filter: brightness(1.08);
   }
   .banner {
     margin: 0;

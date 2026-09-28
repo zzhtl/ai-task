@@ -11,6 +11,7 @@
   import { toast, toastError } from '$lib/ui/toast.svelte';
   import { ago, stamp } from '$lib/ui/format';
   import Icon from '$lib/ui/Icon.svelte';
+  import Dropdown from '$lib/ui/Dropdown.svelte';
 
   const ROLES: Role[] = ['viewer', 'operator', 'admin'];
   /** 各档能做什么，写在界面上——不然"operator"是个没有含义的词。 */
@@ -109,11 +110,25 @@
     }
   }
 
-  const changeRole = (user: User, next: string) =>
+  const changeRole = (user: User, next: Role) =>
     act(
       () => api(`/api/v1/users/${user.id}/role`, { method: 'PUT', body: { role: next } }),
       `${user.display_name} 现在是 ${next}`
     );
+
+  /**
+   * 分段按钮比下拉框好点，也就更容易点错。把**自己**从管理员降下来要先确认：
+   * 点下去立刻生效，这个页面和规则、主机都会马上对你关上。
+   */
+  let pendingSelfDemote = $state<Role | null>(null);
+  function pickRole(user: User, next: Role) {
+    if (next === user.role) return;
+    if (isMe(user) && user.role === 'admin') {
+      pendingSelfDemote = next;
+      return;
+    }
+    void changeRole(user, next);
+  }
 
   const toggleDisabled = (user: User) =>
     act(
@@ -154,6 +169,23 @@
 >
   <p><span class="mono">{pendingDelete?.email}</span> 会立刻登不进来，已有的会话全部失效。</p>
   <p>他建过的任务、做过的审批和审计记录保留，只是不再关联到这个人。</p>
+</Confirm>
+
+<Confirm
+  open={pendingSelfDemote !== null}
+  onclose={() => (pendingSelfDemote = null)}
+  title="把自己改成 {pendingSelfDemote ?? ''}？"
+  danger
+  confirmText="改"
+  {busy}
+  onconfirm={() => {
+    const next = pendingSelfDemote;
+    const me = users.find(isMe);
+    pendingSelfDemote = null;
+    if (next && me) void changeRole(me, next);
+  }}
+>
+  <p>立刻生效：用户、主机、规则和审计这几页会马上对你关上，要改回来得找另一个管理员。</p>
 </Confirm>
 
 <PageHeader title="用户" help="改角色立刻生效，不用重新登录；停用会连带吊销这个人的所有会话。口令泄漏时用「踢下线」让已发出的会话立刻失效。">
@@ -223,7 +255,7 @@
           <tr>
             <th>用户</th>
             <th>角色</th>
-            <th>会话</th>
+            <th class="num">会话</th>
             <th>状态</th>
             <th>创建</th>
             <th class="act"></th>
@@ -251,24 +283,26 @@
                 </div>
               </td>
               <td>
-                <select
-                  value={user.role}
-                  disabled={busy || user.system}
-                  title={user.system ? '内置管理员不能改角色' : WHAT_EACH_ROLE_CAN_DO[user.role]}
-                  onchange={(e) => changeRole(user, e.currentTarget.value)}
+                <div
+                  class="seg"
+                  role="group"
+                  aria-label="{user.display_name} 的角色"
+                  title={user.system ? '内置管理员不能改角色' : undefined}
                 >
-                  {#each ROLES as r (r)}<option value={r}>{r}</option>{/each}
-                </select>
+                  {#each ROLES as r (r)}
+                    <button
+                      class:on={user.role === r}
+                      aria-pressed={user.role === r}
+                      disabled={busy || user.system}
+                      onclick={() => pickRole(user, r)}
+                    >
+                      {r}
+                    </button>
+                  {/each}
+                </div>
+                <div class="faint small role-hint">{WHAT_EACH_ROLE_CAN_DO[user.role]}</div>
               </td>
-              <td>
-                <span class="row">
-                  <span>{user.active_sessions}</span>
-                  {#if user.active_sessions > 0}
-                    <!-- 改口令不会让已发出的 token 失效，泄漏时要能主动踢下线 -->
-                    <button class="btn-ghost btn-sm" disabled={busy} onclick={() => revoke(user)}>踢下线</button>
-                  {/if}
-                </span>
-              </td>
+              <td class="num">{user.active_sessions}</td>
               <td>
                 {#if user.disabled}<span class="tag danger">已停用</span>{:else}<span class="tag ok">正常</span>{/if}
               </td>
@@ -276,25 +310,34 @@
               <td class="act">
                 <div class="row">
                   {#if !user.system || me || session.authDisabled}
-                    <button class="btn-ghost btn-sm btn-icon" title="编辑资料" aria-label="编辑" disabled={busy} onclick={() => openEdit(user)}>
+                    <button class="btn-ghost btn-sm btn-icon" title="编辑资料和口令" aria-label="编辑 {user.display_name}" disabled={busy} onclick={() => openEdit(user)}>
                       <Icon name="pencil" />
                     </button>
                   {/if}
-                  {#if !user.system}
-                    <button class="btn-sm" class:btn-danger={!user.disabled} disabled={busy} onclick={() => toggleDisabled(user)}>
-                      {user.disabled ? '恢复' : '停用'}
-                    </button>
-                  {/if}
-                  {#if !user.system && !me}
-                    <button
-                      class="btn-ghost btn-sm btn-icon danger"
-                      title="删除用户"
-                      aria-label="删除用户"
-                      disabled={busy}
-                      onclick={() => (pendingDelete = user)}
-                    >
-                      <Icon name="trash" />
-                    </button>
+                  {#if !user.system || user.active_sessions > 0}
+                    <Dropdown label="{user.display_name} 的更多操作" triggerClass="btn-ghost btn-sm btn-icon" disabled={busy}>
+                      {#snippet trigger()}<Icon name="more" />{/snippet}
+                      {#if user.active_sessions > 0}
+                        <!-- 改口令不会让已发出的会话失效，泄漏时要能主动踢下线 -->
+                        <button onclick={() => revoke(user)}>
+                          踢下线
+                          <span class="hint">{user.active_sessions} 个会话立刻失效，口令不变</span>
+                        </button>
+                      {/if}
+                      {#if !user.system}
+                        <button class:danger={!user.disabled} onclick={() => toggleDisabled(user)}>
+                          {user.disabled ? '恢复' : '停用'}
+                          <span class="hint">{user.disabled ? '恢复之后能重新登录' : '登不进来，已有会话全部吊销'}</span>
+                        </button>
+                      {/if}
+                      {#if !user.system && !me}
+                        <hr />
+                        <button class="danger" onclick={() => (pendingDelete = user)}>
+                          删除
+                          <span class="hint">建过的任务和审计记录保留</span>
+                        </button>
+                      {/if}
+                    </Dropdown>
                   {/if}
                 </div>
               </td>
@@ -344,8 +387,11 @@
     gap: var(--s1);
     flex-wrap: wrap;
   }
-  select {
-    padding-top: 0.25rem;
-    padding-bottom: 0.25rem;
+  .role-hint {
+    margin-top: 2px;
+  }
+  /* 内置管理员整组不可改，但当前是哪一档必须看得清：选中的那个不跟着变淡 */
+  .seg > button.on:disabled {
+    opacity: 1;
   }
 </style>

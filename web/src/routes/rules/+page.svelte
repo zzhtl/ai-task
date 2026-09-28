@@ -26,12 +26,16 @@
 
   type Tab = 'policy' | 'prompt' | 'skills';
 
+  /** 规则只有管理员能看；技能谁都能看，operator 能改。 */
+  const isAdmin = $derived(session.can('admin'));
+  const canEditSkills = $derived(session.can('operator'));
+
   let rules = $state<Rule[]>([]);
   let skills = $state<Skill[]>([]);
   let error = $state<string | null>(null);
   let loaded = $state(false);
   let busy = $state(false);
-  let tab = $state<Tab>('policy');
+  let tab = $state<Tab>(session.can('admin') ? 'policy' : 'skills');
   let adding = $state(false);
   /** 后端 422 里按字段拆出来的错误（正则写不通是最常见的一种）。 */
   let fieldErr = $state<Record<string, string>>({});
@@ -40,7 +44,8 @@
 
   async function load() {
     try {
-      const [s, r] = await Promise.all([listSkills(), listRules()]);
+      // 非管理员拉 /rules 是 403：不拉，而不是拉了再把错误吞掉
+      const [s, r] = await Promise.all([listSkills(), isAdmin ? listRules() : Promise.resolve([])]);
       skills = s;
       rules = r;
       error = null;
@@ -110,6 +115,10 @@
   $effect(() => {
     void load();
   });
+  // 规则页签只给管理员：登录信息晚到、或者从带 ?tab=policy 的链接进来时，落到技能上
+  $effect(() => {
+    if (!isAdmin && tab !== 'skills') tab = 'skills';
+  });
   // 换页签时把没提交的表单收掉：留着上一个页签的半成品没有意义
   $effect(() => {
     void tab;
@@ -150,12 +159,12 @@
   help="约束 AI 行为的两层强度不一样：软规则写进提示词，只影响模型的倾向；硬策略在工具调用边界强制拦截，模型绕不过去。技能是给 AI 的操作手册。"
 >
   {#snippet actions()}
-    {#if session.can('admin') && !adding}
+    {#if !adding && (tab === 'skills' ? canEditSkills : isAdmin)}
       <button class="btn-primary" onclick={openNew}>{NEW_LABEL[tab]}</button>
     {/if}
   {/snippet}
   {#snippet tabs()}
-    {#if session.can('admin')}
+    {#if isAdmin}
       <Tabs
         bind:value={tab}
         tabs={[
@@ -168,38 +177,35 @@
   {/snippet}
 </PageHeader>
 
-{#if !session.can('admin')}
-  <div class="callout danger">需要管理员权限：策略是这个系统的护栏本身。</div>
+{#if error}<div class="banner">{error}</div>{/if}
+
+{#if tab === 'policy'}
+  <PolicyTab
+    {...shared}
+    items={kindRules}
+    {loaded}
+    onedit={openEdit}
+    ondelete={(rule) => (pendingDelete = rule)}
+    ontoggle={toggle}
+    onnew={openNew}
+  />
+{:else if tab === 'prompt'}
+  <PromptTab
+    {...shared}
+    items={kindRules}
+    {loaded}
+    onedit={openEdit}
+    ondelete={(rule) => (pendingDelete = rule)}
+    ontoggle={toggle}
+    onnew={openNew}
+  />
 {:else}
-
-  {#if error}<div class="banner">{error}</div>{/if}
-
-  {#if tab === 'policy'}
-    <PolicyTab
-      {...shared}
-      items={kindRules}
-      {loaded}
-      onedit={openEdit}
-      ondelete={(rule) => (pendingDelete = rule)}
-      ontoggle={toggle}
-      onnew={openNew}
-    />
-  {:else if tab === 'prompt'}
-    <PromptTab
-      {...shared}
-      items={kindRules}
-      {loaded}
-      onedit={openEdit}
-      ondelete={(rule) => (pendingDelete = rule)}
-      ontoggle={toggle}
-      onnew={openNew}
-    />
-  {:else}
-    <SkillsTab
-      {...shared}
-      items={skills}
-      {loaded}
-      onnew={openNew}
-    />
-  {/if}
+  <SkillsTab
+    {...shared}
+    items={skills}
+    {loaded}
+    onnew={openNew}
+    canEdit={canEditSkills}
+    onchanged={() => void load()}
+  />
 {/if}

@@ -10,8 +10,9 @@
 //! 3. **不缓存规则。** 每次都从库里读——策略是活的护栏，改了就该立刻生效。
 //!    一次工具调用背后是几秒的模型时间，多一次查询是噪音。
 
-use ai_task_core::{DefaultPolicy, PolicySet, ToolCall};
-use ai_task_proto::{PolicyEffect, PolicyRequest, PolicyResponse, RunEventBody};
+use ai_task_core::policy::{PolicyError, is_write_tool};
+use ai_task_core::{DefaultPolicy, PolicyRule, PolicySet, ToolCall};
+use ai_task_proto::{PolicyEffect, PolicyRequest, PolicyResponse, RuleId, RunEventBody, TaskId};
 use ai_task_store::PendingEvent;
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -92,12 +93,6 @@ pub async fn evaluate(
         .policy_rules_for(state.workspace_id, &version.rules)
         .await?;
 
-    // 一条规则编译不了就整体拒绝——半装的策略集比没有策略更危险
-    let policy = PolicySet::compile(rules, DefaultPolicy::GuardProduction).map_err(|err| {
-        tracing::error!(error = %err, "策略集编译失败，本次调用按拒绝处理");
-        AppError::Internal(anyhow::anyhow!(err))
-    })?;
-
     // 目标主机的 tag。策略按 tag 生效（`prod` 机上写类操作一律 ask），
     // 所以取不到 tag 时**不能**当成"没有 tag"放行——那会让针对 prod 的
     // 规则在一次数据库抖动里失效。
@@ -122,30 +117,24 @@ pub async fn evaluate(
             }
         },
     };
-    let decision = policy.decide(&ToolCall {
-        tool: normalize_tool(&request.tool),
-        input: &request.input,
-        host_tags: &host_tags,
-        task_id: run.task_id,
-    });
-
-    // 影子执行：写类工具只记录意图，不真的做。
-    // 放在策略判决**之后**，这样审计里能同时看到"策略本来允许"和"因为影子执行被拦"。
-    let effect = if run.dry_run && ai_task_core::policy::is_write_tool(&request.tool) {
-        PolicyEffect::Deny
-    } else {
-        decision.effect
-    };
-    let reason = if effect != decision.effect {
-        format!(
-            "影子执行：`{}` 是写类工具，只记录意图不执行（策略本身是 {:?}）",
-            request.tool, decision.effect
-        )
-    } else if decision.reason.is_empty() {
-        "策略放行".to_string()
-    } else {
-        decision.reason.clone()
-    };
+    // 一条规则编译不了就整体拒绝——半装的策略集比没有策略更危险
+    let Judgement {
+        effect,
+        rule_id,
+        reason,
+        ..
+    } = judge(
+        rules,
+        &request.tool,
+        &request.input,
+        &host_tags,
+        run.task_id,
+        run.dry_run,
+    )
+    .map_err(|err| {
+        tracing::error!(error = %err, "策略集编译失败，本次调用按拒绝处理");
+        AppError::Internal(anyhow::anyhow!(err))
+    })?;
 
     // 判决先落库，再去等人。否则"这次调用为什么卡住了"在事件流里是看不到的
     // ——界面上只会看到一个不动的节点。
@@ -158,7 +147,7 @@ pub async fn evaluate(
                 RunEventBody::PolicyDecided {
                     tool_use_id: request.tool_use_id.clone(),
                     effect,
-                    rule_id: decision.rule_id,
+                    rule_id,
                     reason: reason.clone(),
                 },
             )],
@@ -173,7 +162,7 @@ pub async fn evaluate(
         PolicyEffect::Allow => (true, reason),
         PolicyEffect::Deny => (false, reason),
         PolicyEffect::Ask => {
-            let approval_id = open_approval(state, request, &reason, decision.rule_id).await?;
+            let approval_id = open_approval(state, request, &reason, rule_id).await?;
             match ask_mode {
                 AskMode::Wait => {
                     let verdict =
@@ -190,13 +179,13 @@ pub async fn evaluate(
 
     tracing::info!(
         run_id = %request.run_id, tool = %request.tool, %allowed,
-        rule = ?decision.rule_id, "策略判决"
+        rule = ?rule_id, "策略判决"
     );
 
     Ok(PolicyResponse {
         allowed,
         reason,
-        rule_id: decision.rule_id.map(|id| id.to_string()),
+        rule_id: rule_id.map(|id| id.to_string()),
         dry_run: run.dry_run,
         pending_approval_id,
     })
@@ -377,6 +366,73 @@ const ASK_TIMEOUT_S: i64 = 600;
 /// 单次长轮询的上限。要明显小于调用方的 HTTP 超时。
 const AWAIT_SLICE_S: u64 = 10;
 
+/// 一次判决的结论。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Judgement {
+    /// 最终结论：影子执行改写之后的。
+    pub effect: PolicyEffect,
+    /// 策略本身的结论。
+    pub policy_effect: PolicyEffect,
+    /// 命中的规则。走兜底策略时为 `None`。
+    pub rule_id: Option<RuleId>,
+    /// 回给模型的那句话。
+    pub reason: String,
+    /// 归一之后的工具名。
+    pub tool: String,
+}
+
+/// 判一次工具调用。**零 IO**：规则和主机 tag 由调用方取好。
+///
+/// hook、远端代理和规则页的试算共用这一个函数。两道关卡的口径必须逐字一致，
+/// 试算也必须——试算说放行、真跑时被拒，那个面板就是在误导人。
+///
+/// 一条规则编译不了就整体报错：半装的策略集比没有策略更危险。
+pub fn judge(
+    rules: Vec<PolicyRule>,
+    tool: &str,
+    input: &serde_json::Value,
+    host_tags: &[String],
+    task_id: TaskId,
+    dry_run: bool,
+) -> Result<Judgement, PolicyError> {
+    let policy = PolicySet::compile(rules, DefaultPolicy::GuardProduction)?;
+    // 影子执行的"是不是写类"也按归一后的名字判。按原名判的话，
+    // `mcp__ai_task_remote__remote_read` 不在只读表里，影子执行在 hook 那道被拒，
+    // 在代理那道（报的是 `remote_read`）却放行——同一个动作两种结论。
+    let tool = normalize_tool(tool);
+    let decision = policy.decide(&ToolCall {
+        tool,
+        input,
+        host_tags,
+        task_id,
+    });
+
+    // 影子执行：写类工具只记录意图，不真的做。
+    // 放在策略判决**之后**，这样审计里能同时看到"策略本来允许"和"因为影子执行被拦"。
+    let effect = if dry_run && is_write_tool(tool) {
+        PolicyEffect::Deny
+    } else {
+        decision.effect
+    };
+    let reason = if effect != decision.effect {
+        format!(
+            "影子执行：`{tool}` 是写类工具，只记录意图不执行（策略本身是 {:?}）",
+            decision.effect
+        )
+    } else if decision.reason.is_empty() {
+        "策略放行".to_string()
+    } else {
+        decision.reason
+    };
+    Ok(Judgement {
+        effect,
+        policy_effect: decision.effect,
+        rule_id: decision.rule_id,
+        reason,
+        tool: tool.to_owned(),
+    })
+}
+
 /// 把 MCP 工具名还原成规则里写的名字。
 ///
 /// Claude Code 把 MCP 工具报成 `mcp__<server>__<tool>`，而远端代理自己上报的是
@@ -384,7 +440,7 @@ const AWAIT_SLICE_S: u64 = 10;
 /// 写着 `tool: "remote_write"` 的策略在 hook 那道完全不命中，审计日志里就会
 ///出现「先 allow 后 deny」这种自相矛盾的记录。真正危险的是反过来的情形——
 /// 有人以为 hook 会拦住，于是没在别处设防。
-fn normalize_tool(tool: &str) -> &str {
+pub(crate) fn normalize_tool(tool: &str) -> &str {
     tool.strip_prefix(&format!("mcp__{}__", ai_task_exec::MCP_SERVER_NAME))
         .map_or(tool, |rest| {
             // strip_prefix 借的是 tool，返回的切片和它同生命周期
@@ -415,6 +471,169 @@ mod tests {
             "remote_write"
         );
         assert_eq!(normalize_tool("remote_write"), "remote_write");
+    }
+
+    fn rule(
+        name: &str,
+        priority: i32,
+        effect: PolicyEffect,
+        tool: &str,
+        contains: Option<&str>,
+    ) -> PolicyRule {
+        PolicyRule {
+            id: RuleId::new(),
+            name: name.into(),
+            priority,
+            effect,
+            reason: format!("规则 {name}"),
+            scope: ai_task_core::RuleScope::default(),
+            matcher: ai_task_core::ToolMatcher {
+                tool: Some(tool.into()),
+                arg: contains.map(|_| "command".into()),
+                any_of: contains
+                    .map(|c| vec![ai_task_core::Pattern::Contains(c.into())])
+                    .unwrap_or_default(),
+            },
+        }
+    }
+
+    #[test]
+    fn judge_matches_what_the_hook_would_decide() {
+        let task = TaskId::new();
+        let rules = || {
+            vec![
+                rule(
+                    "禁止删库",
+                    10,
+                    PolicyEffect::Deny,
+                    "Bash",
+                    Some("drop database"),
+                ),
+                rule("删除要确认", 5, PolicyEffect::Ask, "Bash", Some("rm ")),
+                rule("远端写要确认", 0, PolicyEffect::Ask, "remote_write", None),
+            ]
+        };
+        let prod = vec!["prod".to_owned()];
+        struct Case<'a> {
+            what: &'a str,
+            tool: &'a str,
+            command: &'a str,
+            tags: &'a [String],
+            dry_run: bool,
+            effect: PolicyEffect,
+            policy_effect: PolicyEffect,
+            rule: Option<&'a str>,
+        }
+        let cases = [
+            Case {
+                what: "命中 deny",
+                tool: "Bash",
+                command: "psql -c 'drop database x'",
+                tags: &[],
+                dry_run: false,
+                effect: PolicyEffect::Deny,
+                policy_effect: PolicyEffect::Deny,
+                rule: Some("禁止删库"),
+            },
+            Case {
+                what: "两条都命中时优先级高的生效",
+                tool: "Bash",
+                command: "rm -f a; drop database x",
+                tags: &[],
+                dry_run: false,
+                effect: PolicyEffect::Deny,
+                policy_effect: PolicyEffect::Deny,
+                rule: Some("禁止删库"),
+            },
+            Case {
+                what: "只读工具走兜底放行",
+                tool: "Read",
+                command: "",
+                tags: &prod,
+                dry_run: false,
+                effect: PolicyEffect::Allow,
+                policy_effect: PolicyEffect::Allow,
+                rule: None,
+            },
+            Case {
+                what: "写类工具在 prod 上走兜底转人工",
+                tool: "Write",
+                command: "",
+                tags: &prod,
+                dry_run: false,
+                effect: PolicyEffect::Ask,
+                policy_effect: PolicyEffect::Ask,
+                rule: None,
+            },
+            Case {
+                what: "写类工具不在 prod 上兜底放行",
+                tool: "Write",
+                command: "",
+                tags: &[],
+                dry_run: false,
+                effect: PolicyEffect::Allow,
+                policy_effect: PolicyEffect::Allow,
+                rule: None,
+            },
+            Case {
+                what: "影子执行把放行的写操作改成拒绝",
+                tool: "Bash",
+                command: "ls",
+                tags: &[],
+                dry_run: true,
+                effect: PolicyEffect::Deny,
+                policy_effect: PolicyEffect::Allow,
+                rule: None,
+            },
+            Case {
+                what: "MCP 前缀按规则里的名字匹配",
+                tool: "mcp__ai_task_remote__remote_write",
+                command: "",
+                tags: &[],
+                dry_run: false,
+                effect: PolicyEffect::Ask,
+                policy_effect: PolicyEffect::Ask,
+                rule: Some("远端写要确认"),
+            },
+            Case {
+                what: "影子执行下带前缀的远端读也是只读",
+                tool: "mcp__ai_task_remote__remote_read",
+                command: "",
+                tags: &[],
+                dry_run: true,
+                effect: PolicyEffect::Allow,
+                policy_effect: PolicyEffect::Allow,
+                rule: None,
+            },
+        ];
+        for c in cases {
+            let rules = rules();
+            let names: std::collections::HashMap<RuleId, String> =
+                rules.iter().map(|r| (r.id, r.name.clone())).collect();
+            let input = serde_json::json!({ "command": c.command });
+            let j = judge(rules, c.tool, &input, c.tags, task, c.dry_run).expect(c.what);
+            assert_eq!(j.effect, c.effect, "{}", c.what);
+            assert_eq!(j.policy_effect, c.policy_effect, "{}", c.what);
+            assert_eq!(
+                j.rule_id.map(|id| names[&id].as_str()),
+                c.rule,
+                "{}",
+                c.what
+            );
+            assert!(
+                !j.reason.is_empty(),
+                "{}：原因不能是空的，它要回给模型",
+                c.what
+            );
+        }
+    }
+
+    #[test]
+    fn judge_refuses_a_rule_set_that_does_not_compile() {
+        let mut bad = rule("坏正则", 0, PolicyEffect::Deny, "Bash", None);
+        bad.matcher.any_of = vec![ai_task_core::Pattern::Regex("(".into())];
+        let input = serde_json::json!({});
+        assert!(judge(vec![bad], "Bash", &input, &[], TaskId::new(), false).is_err());
     }
 
     #[test]

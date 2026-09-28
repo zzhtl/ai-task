@@ -14,9 +14,9 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::ids::{ApprovalId, HostId, RunId, ScheduleId, TaskId, TaskVersionId};
+use crate::ids::{ApprovalId, HostId, RuleId, RunId, ScheduleId, SkillId, TaskId, TaskVersionId};
 use crate::money::UsdMicros;
-use crate::spec::{DagSpec, MisfirePolicy, OverlapPolicy, RunStatus, TriggerKind};
+use crate::spec::{DagSpec, MisfirePolicy, OverlapPolicy, PolicyEffect, RunStatus, TriggerKind};
 
 /// 统一错误信封。
 ///
@@ -610,6 +610,150 @@ pub struct ApprovalDecision {
     pub approved: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+// ---------------------------------------------------------------- 规则试算
+
+/// `POST /api/v1/rules/evaluate` 的请求：拿一次假想的工具调用试算硬策略。
+///
+/// 和真正的工具调用走同一个判决函数，只是**不写事件、不建审批、不记审计**。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluatePolicy {
+    /// 工具名，如 `Bash`、`remote_write`。`mcp__ai_task_remote__` 前缀按真实判决的口径归一。
+    pub tool: String,
+    /// 工具参数，和模型发出的 `tool_input` 同形，必须是 JSON 对象。
+    pub input: serde_json::Value,
+    /// 目标主机的 tag。本机执行留空。
+    #[serde(default)]
+    pub host_tags: Vec<String>,
+    /// 按这个任务挂载的规则和范围来判；不给就只判全局规则。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<TaskId>,
+    /// 按影子执行来判：写类工具只记录意图、不执行。
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// 结论是谁给出的。客户端要容忍以后新增的取值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyDecidedBy {
+    /// 命中了一条规则，先命中先生效。
+    Rule,
+    /// 一条都没命中，走兜底策略：只读放行，写类工具在 prod 主机上转人工确认。
+    Default,
+    /// 有规则编译不了。真实调用时整套策略装不起来，所有工具调用都会被拒。
+    InvalidRules,
+}
+
+/// `POST /api/v1/rules/evaluate` 的响应。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PolicyEvaluation {
+    /// 最终结论。
+    pub effect: PolicyEffect,
+    /// 策略本身的结论。和 `effect` 不同，说明是影子执行把它改成了拒绝。
+    pub policy_effect: PolicyEffect,
+    pub decided_by: PolicyDecidedBy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<RuleId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_name: Option<String>,
+    /// 回给模型的那句话。
+    pub reason: String,
+    /// 实际拿去匹配的工具名（归一之后）。
+    pub tool: String,
+    /// 参与判决的规则条数：已启用的全局规则，加上任务挂载的。
+    pub considered: u32,
+}
+
+// ---------------------------------------------------------------- 技能
+
+/// `GET /api/v1/skills/{name}`：一个技能的最新版全文。
+///
+/// ETag 是这一版的 `id`：每次修改都会插一个新版本行，`id` 随之变化。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillDetail {
+    /// 这一版的 id，也是 `ETag`。
+    pub id: SkillId,
+    pub name: String,
+    pub version: String,
+    /// 渐进式披露时模型只看得到这一句。
+    pub description: String,
+    pub body: String,
+    /// 附带文件：相对路径 → 内容。
+    pub files: std::collections::BTreeMap<String, String>,
+    /// 正文和附件的指纹，不含描述。
+    pub content_hash: String,
+    pub created_at: DateTime<Utc>,
+    /// 一共有几个版本。
+    pub versions: u32,
+    /// 当前版本引用了它的任务名（含 map 节点的模板）。删除前要先摘掉。
+    pub used_by: Vec<String>,
+}
+
+/// `PUT /api/v1/skills/{name}`：改一个技能。
+///
+/// 内容（描述、正文、附件）变了才插新版本行；和最新版一模一样时什么都不做。
+/// 带 `If-Match` 就能挡住并发修改（412）；不带按"不在乎并发"处理，和任务一致。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateSkill {
+    /// 新版本号，不能和这个技能用过的任何版本重复。
+    pub version: String,
+    pub description: String,
+    pub body: String,
+    #[serde(default)]
+    pub files: std::collections::BTreeMap<String, String>,
+}
+
+// ---------------------------------------------------------------- 主机探测
+
+/// `POST /api/v1/hosts/{id}/probe` 的响应。
+///
+/// **连不上是探测的结论，不是接口错误**：`ok` 为 false、`error` 说明原因，状态码仍是 200。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct HostProbe {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub elapsed_ms: u64,
+    /// 握手拿到的能力快照。`ok` 为 true 时才有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<ProbedAgent>,
+}
+
+/// 目标机上 agent 自报的能力。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProbedAgent {
+    pub hostname: String,
+    pub arch: String,
+    pub agent_version: String,
+    /// 这次是不是重新投送了 agent 二进制。
+    pub uploaded: bool,
+    /// 资源归因档位：`systemd`（能设上限）/ `proc`（只能记账）/ `none`。
+    pub cgroup_mode: String,
+    /// 没到 `systemd` 档的原因。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgroup_detail: Option<String>,
+    pub ai_clis: Vec<HostCli>,
+}
+
+/// 目标机上找到的一个 AI CLI。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct HostCli {
+    pub name: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 // ---------------------------------------------------------------- 内部：策略判决

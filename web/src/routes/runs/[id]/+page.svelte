@@ -506,11 +506,7 @@
 {#if pending.length}
   <section class="gates">
     {#each pending as approval (approval.id)}
-      <ApprovalCard
-        {approval}
-        taskName={detail?.task_name ?? null}
-        ondecided={() => invalidate('approvals', 'overview')}
-      />
+      <ApprovalCard {approval} ondecided={() => invalidate('approvals', 'overview')} />
     {/each}
   </section>
 {/if}

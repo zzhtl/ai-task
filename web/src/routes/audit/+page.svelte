@@ -38,7 +38,10 @@
     'rule.delete': '删除规则',
     'rule.enabled': '切换规则启停',
     'skill.create': '导入技能',
+    'skill.update': '修改技能',
+    'skill.delete': '删除技能',
     'host.create': '添加主机',
+    'host.probe': '探测主机',
     'host.update': '修改主机',
     'host.delete': '删除主机',
     'user.create': '创建用户',
@@ -46,7 +49,9 @@
     'user.delete': '删除用户',
     'user.set_role': '改角色',
     'user.set_disabled': '停用/恢复用户',
-    'user.revoke_sessions': '踢下线'
+    'user.revoke_sessions': '踢下线',
+    'auth.login': '登录',
+    'auth.bootstrap': '初始化管理员'
   };
   const KIND: Record<string, string> = {
     task: '任务',
@@ -138,11 +143,43 @@
   const actorName = (id: string | null) =>
     id === null ? '系统' : (userNames.get(id) ?? id.slice(0, 8));
 
-  const href = (item: AuditItem): string | null => {
-    if (item.target_kind === 'run') return `/runs/${item.target_id}`;
-    if (item.target_kind === 'task') return `/tasks/${item.target_id}`;
+  /** 审计记录前后内容里的某个字段。结构随动作不同，拿不到就是 null。 */
+  const field = (item: AuditItem, key: string): string | null => {
+    for (const side of [item.after, item.before]) {
+      if (side && typeof side === 'object' && !Array.isArray(side)) {
+        const value = (side as Record<string, unknown>)[key];
+        if (typeof value === 'string' && value) return value;
+      }
+    }
     return null;
   };
+
+  /** 对象能跳到哪里。删掉的东西点进去是 404，但知道它原来在哪一页也有用。 */
+  const href = (item: AuditItem): string | null => {
+    switch (item.target_kind) {
+      case 'run':
+        return `/runs/${item.target_id}`;
+      case 'task':
+        return `/tasks/${item.target_id}`;
+      case 'schedule': {
+        const task = field(item, 'task_id');
+        return task ? `/tasks/${task}` : null;
+      }
+      case 'rule':
+        return '/rules';
+      case 'skill':
+        return '/rules?tab=skills';
+      case 'host':
+        return '/hosts';
+      case 'user':
+        return '/users';
+      default:
+        return null;
+    }
+  };
+
+  /** 对象的称呼：有名字用名字，没有就用 id 的前 8 位。 */
+  const label = (item: AuditItem): string => field(item, 'name') ?? item.target_id.slice(0, 8);
 
   /** 可选的对象类型。取自 KIND 表而不是当前这一页——
       按类型筛选的选项不该因为这一页里恰好没有主机就消失。 */
@@ -195,9 +232,9 @@
               <td class="nowrap">
                 <span class="tag">{KIND[item.target_kind] ?? item.target_kind}</span>
                 {#if href(item)}
-                  <a class="mono" href={href(item)}>{item.target_id.slice(0, 8)}</a>
+                  <a class:mono={!field(item, 'name')} href={href(item)} title={item.target_id}>{label(item)}</a>
                 {:else}
-                  <span class="mono faint" title={item.target_id}>{item.target_id.slice(0, 8)}</span>
+                  <span class="faint" class:mono={!field(item, 'name')} title={item.target_id}>{label(item)}</span>
                 {/if}
               </td>
               <td class="detail">
@@ -270,8 +307,6 @@
     margin-top: var(--s2);
     font-size: var(--t-2xs);
     color: var(--fg-faint);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
   }
   pre {
     margin: 2px 0 0;

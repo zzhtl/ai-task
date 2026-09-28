@@ -19,21 +19,26 @@ use ai_task_proto::{DagSpec, NodeConfig};
 /// - `name` / 描述文本：纯展示
 ///
 /// 排除得太少会让指纹每次都变（漂移检测退化成噪音），排除得太多会漏报。
+///
+/// `rules` / `skills` 是这次执行**实际拿到的**每条规则、每个技能各一段内容文本，
+/// 由调用方生成，顺序无关。v1 只哈希了规则名和技能名：改了规则正文或技能内容，
+/// 指纹不变，输出一变就被误报成"行为漂移"。换成 v2 的代价是每个任务的基线重置一次
+/// ——升级后第一次执行找不到同指纹的前例。
 #[must_use]
-pub fn fingerprint(spec: &DagSpec, rules_hash: &str, skills: &[String]) -> String {
+pub fn fingerprint(spec: &DagSpec, rules: &[String], skills: &[String]) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"ai-task-fingerprint-v1\n");
-    hasher.update(rules_hash.as_bytes());
-    hasher.update(b"\n");
+    hasher.update(b"ai-task-fingerprint-v2\n");
 
-    // skills 排序后再进哈希：勾选顺序不同不该算作不同的条件
-    let mut skills: Vec<&str> = skills.iter().map(String::as_str).collect();
-    skills.sort_unstable();
-    for skill in skills {
-        hasher.update(skill.as_bytes());
-        hasher.update(b"\0");
+    // 排序后再进哈希：规则的加载顺序、技能的勾选顺序都不该算作不同的条件
+    for items in [rules, skills] {
+        let mut sorted: Vec<&str> = items.iter().map(String::as_str).collect();
+        sorted.sort_unstable();
+        for item in sorted {
+            hasher.update(item.as_bytes());
+            hasher.update(b"\0");
+        }
+        hasher.update(b"\n");
     }
-    hasher.update(b"\n");
 
     // 节点按 key 排序：DAG 里节点的书写顺序不影响执行
     let mut nodes: Vec<_> = spec.nodes.iter().collect();
@@ -287,17 +292,29 @@ mod tests {
         }
     }
 
+    fn rules(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_owned()).collect()
+    }
+
     #[test]
     fn changing_the_prompt_changes_the_fingerprint() {
-        let a = fingerprint(&spec_with("巡检", None), "r1", &[]);
-        let b = fingerprint(&spec_with("巡检并汇总", None), "r1", &[]);
+        let a = fingerprint(&spec_with("巡检", None), &rules(&["r1"]), &[]);
+        let b = fingerprint(&spec_with("巡检并汇总", None), &rules(&["r1"]), &[]);
         assert_ne!(a, b);
     }
 
     #[test]
     fn changing_the_model_changes_the_fingerprint() {
-        let a = fingerprint(&spec_with("巡检", Some("claude-sonnet-5")), "r1", &[]);
-        let b = fingerprint(&spec_with("巡检", Some("claude-opus-5")), "r1", &[]);
+        let a = fingerprint(
+            &spec_with("巡检", Some("claude-sonnet-5")),
+            &rules(&["r1"]),
+            &[],
+        );
+        let b = fingerprint(
+            &spec_with("巡检", Some("claude-opus-5")),
+            &rules(&["r1"]),
+            &[],
+        );
         assert_ne!(
             a, b,
             "换模型必须换指纹，否则模型升级导致的漂移会被当成行为异常"
@@ -305,22 +322,31 @@ mod tests {
     }
 
     #[test]
-    fn changing_the_rules_changes_the_fingerprint() {
+    fn changing_a_rule_body_changes_the_fingerprint() {
+        // v1 只看规则名：改了规则正文指纹不变，输出一变就被误报成漂移
         let spec = spec_with("巡检", None);
-        assert_ne!(fingerprint(&spec, "r1", &[]), fingerprint(&spec, "r2", &[]));
+        assert_ne!(
+            fingerprint(&spec, &rules(&["只读：不许写文件"]), &[]),
+            fingerprint(&spec, &rules(&["只读：可以写 /tmp"]), &[])
+        );
     }
 
     #[test]
-    fn skill_selection_order_does_not_change_the_fingerprint() {
-        // 勾选顺序不同不该算作不同的执行条件
+    fn rule_and_skill_order_does_not_change_the_fingerprint() {
+        // 加载顺序、勾选顺序不同不该算作不同的执行条件
         let spec = spec_with("巡检", None);
         assert_eq!(
-            fingerprint(&spec, "r", &["b".into(), "a".into()]),
-            fingerprint(&spec, "r", &["a".into(), "b".into()])
+            fingerprint(&spec, &rules(&["x", "y"]), &rules(&["b", "a"])),
+            fingerprint(&spec, &rules(&["y", "x"]), &rules(&["a", "b"]))
         );
         assert_ne!(
-            fingerprint(&spec, "r", &["a".into()]),
-            fingerprint(&spec, "r", &["a".into(), "b".into()])
+            fingerprint(&spec, &[], &rules(&["a"])),
+            fingerprint(&spec, &[], &rules(&["a", "b"]))
+        );
+        // 规则和技能是两组，同一段文本挪到另一组也是不同的条件
+        assert_ne!(
+            fingerprint(&spec, &rules(&["a"]), &[]),
+            fingerprint(&spec, &[], &rules(&["a"]))
         );
     }
 
@@ -334,7 +360,10 @@ mod tests {
         b.nodes[0].host = Some(ai_task_proto::HostSelector::Host {
             host_id: ai_task_proto::HostId::new(),
         });
-        assert_eq!(fingerprint(&a, "r", &[]), fingerprint(&b, "r", &[]));
+        assert_eq!(
+            fingerprint(&a, &rules(&["r"]), &[]),
+            fingerprint(&b, &rules(&["r"]), &[])
+        );
     }
 
     #[test]

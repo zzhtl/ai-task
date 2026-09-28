@@ -16,6 +16,9 @@ pub use approval::Verdict;
 pub use cron::{CronError, CronSchedule, DueSet};
 pub use dag::{DagOutcome, NodeResult, NodeRunContext, NodeRunner, run_dag};
 pub use engine::{EngineError, HookSettings, RunEngine, reap_orphaned_runs};
-pub use host_exec::{Command, HostExecConfig, HostExecError, HostExecOutcome, run_command};
+pub use host_exec::{
+    Command, HostExecConfig, HostExecError, HostExecOutcome, HostProbeReport, probe_host,
+    run_command,
+};
 pub use scheduler::{Scheduler, SchedulerError, Tick};
 pub use sink::EventSink;

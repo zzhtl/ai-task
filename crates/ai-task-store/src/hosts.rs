@@ -316,6 +316,27 @@ impl Store {
             .transpose()
     }
 
+    /// 一批主机的名字。给只拿得到 id 的地方（审批卡）显示用；不在这个 workspace 的不返回。
+    pub async fn host_names(
+        &self,
+        workspace_id: WorkspaceId,
+        ids: &[HostId],
+    ) -> Result<std::collections::HashMap<HostId, String>, StoreError> {
+        if ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let ids: Vec<uuid::Uuid> = ids.iter().map(|id| uuid::Uuid::from(*id)).collect();
+        let rows =
+            sqlx::query("SELECT id, name FROM hosts WHERE workspace_id = $1 AND id = ANY($2)")
+                .bind(uuid::Uuid::from(workspace_id))
+                .bind(&ids)
+                .fetch_all(self.pool())
+                .await?;
+        rows.iter()
+            .map(|row| Ok((HostId(row.try_get("id")?), row.try_get("name")?)))
+            .collect()
+    }
+
     pub async fn list_hosts(&self, workspace_id: WorkspaceId) -> Result<Vec<Host>, StoreError> {
         let rows = sqlx::query(
             "SELECT id, name, address, port, username, tags, agent_sha256, ai_clis, cgroup_mode,

@@ -77,8 +77,8 @@ pub async fn compare(
             run_id: run_id.to_string(),
             baseline_run_id: None,
             no_baseline_reason: Some(
-                "同任务下没有更早的同指纹成功 run 可作基线。第一次跑、\
-                 或者刚改过任务定义时都是这样。"
+                "同任务下没有更早的同指纹成功 run 可作基线。第一次跑、刚改过任务定义、\
+                 挂的规则或技能内容改过之后都是这样。"
                     .to_owned(),
             ),
             same_fingerprint: false,

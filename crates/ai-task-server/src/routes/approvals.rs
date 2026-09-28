@@ -4,7 +4,7 @@
 //! 要让人在几秒内判断"这该不该做"，卡片上必须是具体的：
 //! 哪台机器、跑什么命令、改哪些文件。
 
-use ai_task_proto::{ApprovalId, Page};
+use ai_task_proto::{ApprovalId, HostId, Page};
 use ai_task_store::DecisionOutcome;
 use axum::extract::State;
 use axum::response::IntoResponse;
@@ -28,10 +28,17 @@ pub struct ApprovalCard {
     pub expires_at: chrono::DateTime<chrono::Utc>,
     /// 还剩多少秒。已过期为 0。前端不用自己算，也就不会因为时钟不同步而算错。
     pub expires_in_s: i64,
+    /// 是哪个任务在等。
+    pub task_id: String,
+    pub task_name: String,
+    /// 动作的目标主机名。`intent` 里只有 id，而审批人（operator）读不到主机列表。
+    /// 本机执行、审批节点、主机已删除时为 `None`。
+    pub host_name: Option<String>,
 }
 
-impl From<ai_task_store::Approval> for ApprovalCard {
-    fn from(a: ai_task_store::Approval) -> Self {
+impl ApprovalCard {
+    fn new(p: ai_task_store::PendingApproval, host_name: Option<String>) -> Self {
+        let a = p.approval;
         Self {
             id: a.id.to_string(),
             run_id: a.run_id.to_string(),
@@ -42,8 +49,21 @@ impl From<ai_task_store::Approval> for ApprovalCard {
             requested_at: a.requested_at,
             expires_in_s: (a.expires_at - chrono::Utc::now()).num_seconds().max(0),
             expires_at: a.expires_at,
+            task_id: p.task_id.to_string(),
+            task_name: p.task_name,
+            host_name,
         }
     }
+}
+
+/// intent 里的目标主机。策略 ask 会带，审批节点不带。
+fn intent_host(intent: &serde_json::Value) -> Option<HostId> {
+    intent
+        .get("host_id")?
+        .as_str()?
+        .parse::<uuid::Uuid>()
+        .ok()
+        .map(HostId)
 }
 
 /// `GET /api/v1/approvals`
@@ -54,8 +74,24 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<Page<ApprovalCar
     // 之前每次读都要先跑一遍全 workspace 的 UPDATE——而这个接口
     // 前端每 5 秒打一次。真正的过期收尾在审批等待循环和维护任务里。
     let pending = state.store.pending_approvals(state.workspace_id).await?;
+    // 主机名一次批量取，不按卡片逐条查
+    let host_ids: Vec<HostId> = pending
+        .iter()
+        .filter_map(|p| intent_host(&p.approval.intent))
+        .collect();
+    let host_names = state
+        .store
+        .host_names(state.workspace_id, &host_ids)
+        .await?;
     Ok(Json(Page {
-        items: pending.into_iter().map(ApprovalCard::from).collect(),
+        items: pending
+            .into_iter()
+            .map(|p| {
+                let host =
+                    intent_host(&p.approval.intent).and_then(|id| host_names.get(&id).cloned());
+                ApprovalCard::new(p, host)
+            })
+            .collect(),
         next_cursor: None,
     }))
 }
@@ -132,6 +168,25 @@ pub async fn decide(
 mod tests {
     use super::*;
 
+    fn pending(approval: ai_task_store::Approval) -> ai_task_store::PendingApproval {
+        ai_task_store::PendingApproval {
+            approval,
+            task_id: ai_task_proto::TaskId::new(),
+            task_name: "发布".into(),
+        }
+    }
+
+    #[test]
+    fn only_a_well_formed_host_id_in_the_intent_counts() {
+        let id = HostId::new();
+        assert_eq!(intent_host(&serde_json::json!({ "host_id": id })), Some(id));
+        assert_eq!(
+            intent_host(&serde_json::json!({ "host_id": "不是 uuid" })),
+            None
+        );
+        assert_eq!(intent_host(&serde_json::json!({ "node": "gate" })), None);
+    }
+
     #[test]
     fn a_card_reports_the_remaining_time_so_the_client_never_computes_it() {
         // 前端自己算剩余时间的话，客户端时钟偏几分钟就会把还能点的卡片
@@ -150,7 +205,7 @@ mod tests {
             approved: None,
             reason: None,
         };
-        let card = ApprovalCard::from(approval);
+        let card = ApprovalCard::new(pending(approval), None);
         assert!(
             (115..=120).contains(&card.expires_in_s),
             "{}",
@@ -174,6 +229,6 @@ mod tests {
             approved: None,
             reason: None,
         };
-        assert_eq!(ApprovalCard::from(approval).expires_in_s, 0);
+        assert_eq!(ApprovalCard::new(pending(approval), None).expires_in_s, 0);
     }
 }

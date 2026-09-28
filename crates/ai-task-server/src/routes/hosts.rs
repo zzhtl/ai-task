@@ -1,6 +1,6 @@
 //! 主机与资源采样接口。
 
-use ai_task_proto::{FieldError, HostId, Page, RunId};
+use ai_task_proto::{FieldError, HostCli, HostId, HostProbe, Page, ProbedAgent, RunId};
 use ai_task_store::{HostUpdate, NewHost};
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -222,6 +222,113 @@ pub async fn delete(
         .audit("host.delete", "host", id.to_string(), None, None)
         .await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// 探测的总时限。SSH 建连自己有 15 秒上限，剩下的留给投送 agent
+/// （第一次要传几百 KB）和握手。前端的请求超时要比它长。
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// `POST /api/v1/hosts/{id}/probe` —— 现在就连一下这台机器，看它能做什么。
+///
+/// **连不上是探测的结论，不是接口错误**：回 200，`ok: false` 加原因。
+/// 同一台主机同时只探一次，撞上了回 409。探测成功会刷新主机的能力快照。
+pub async fn probe(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<HostProbe>, AppError> {
+    let host_id = HostId(id);
+    // 先确认主机在这个 workspace 里：不存在的 id 不该占锁，也不该去解密凭据
+    if state
+        .store
+        .host_tags(state.workspace_id, host_id)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::NotFound(format!("主机 {id} 不存在")));
+    }
+    let Some(_guard) = state.probing.begin(host_id) else {
+        return Err(AppError::Conflict(
+            "这台主机正在探测，等这一次结束再试".into(),
+        ));
+    };
+
+    let started = std::time::Instant::now();
+    let outcome = match &state.host_exec {
+        None => Ok(Err(ai_task_runtime::HostExecError::NoRemoteAgent)),
+        Some(config) => {
+            tokio::time::timeout(
+                PROBE_TIMEOUT,
+                ai_task_runtime::probe_host(&state.store, config, state.workspace_id, host_id),
+            )
+            .await
+        }
+    };
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let result = match outcome {
+        Ok(Ok(report)) => HostProbe {
+            ok: true,
+            error: None,
+            elapsed_ms,
+            agent: Some(ProbedAgent {
+                hostname: report.info.hostname,
+                arch: report.info.arch,
+                agent_version: report.info.agent_version,
+                uploaded: report.uploaded,
+                cgroup_mode: format!("{:?}", report.info.cgroup_mode).to_lowercase(),
+                cgroup_detail: report.info.cgroup_detail,
+                ai_clis: report
+                    .info
+                    .ai_clis
+                    .into_iter()
+                    .map(|cli| HostCli {
+                        name: cli.name,
+                        path: cli.path,
+                        version: cli.version,
+                    })
+                    .collect(),
+            }),
+        },
+        // 库出了问题是服务端的事，不是这台主机的探测结论
+        Ok(Err(ai_task_runtime::HostExecError::Store(err))) => return Err(err.into()),
+        Ok(Err(err)) => HostProbe {
+            ok: false,
+            error: Some(err.to_string()),
+            elapsed_ms,
+            agent: None,
+        },
+        Err(_) => HostProbe {
+            ok: false,
+            error: Some(format!(
+                "{} 秒内没有完成探测：网络不通、主机卡住，或者投送 agent 太慢",
+                PROBE_TIMEOUT.as_secs()
+            )),
+            elapsed_ms,
+            agent: None,
+        },
+    };
+
+    // 审计列表按名字显示对象；id 对人没有意义
+    let name = state
+        .store
+        .host_names(state.workspace_id, &[host_id])
+        .await?
+        .remove(&host_id);
+    state
+        .audit(
+            "host.probe",
+            "host",
+            id.to_string(),
+            None,
+            Some(serde_json::json!({
+                "name": name,
+                "ok": result.ok,
+                "error": result.error,
+                "cgroup_mode": result.agent.as_ref().map(|a| &a.cgroup_mode),
+                "uploaded": result.agent.as_ref().map(|a| a.uploaded),
+            })),
+        )
+        .await;
+    Ok(Json(result))
 }
 
 /// 主机的对外形状。**没有凭据字段，且不会有。**

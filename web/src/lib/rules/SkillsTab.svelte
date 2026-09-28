@@ -12,6 +12,7 @@
   import Modal from '$lib/ui/Modal.svelte';
   import Field from '$lib/ui/Field.svelte';
   import HelpTip from '$lib/ui/HelpTip.svelte';
+  import SkillSheet from './SkillSheet.svelte';
   import type { Act } from './types';
 
   let {
@@ -22,7 +23,9 @@
     fieldErr,
     act,
     onclose,
-    onnew
+    onnew,
+    canEdit,
+    onchanged
   }: {
     items: Skill[];
     loaded: boolean;
@@ -32,7 +35,14 @@
     act: Act;
     onclose: () => void;
     onnew: () => void;
+    /** operator 及以上能导入、改、删。 */
+    canEdit: boolean;
+    /** 详情里改了或删了。 */
+    onchanged: () => void;
   } = $props();
+
+  /** 正在看的技能。 */
+  let viewing = $state<string | null>(null);
 
   let name = $state('');
   let description = $state('');
@@ -94,16 +104,21 @@
   {/snippet}
 </Modal>
 
+<SkillSheet name={viewing} {canEdit} onclose={() => (viewing = null)} {onchanged} />
+
 {#if !loaded}
   <div class="card"><Loading rows={3} /></div>
 {:else if items.length}
   <div class="card flush">
     <table>
-      <thead><tr><th>名称</th><th>描述</th><th>版本</th><th>内容哈希</th></tr></thead>
+      <thead><tr><th>名称</th><th>描述</th><th>版本</th><th>内容指纹</th></tr></thead>
       <tbody>
         {#each items as s (s.name)}
-          <tr>
-            <td class="mono name">{s.name}</td>
+          <tr class="clickable" onclick={() => (viewing = s.name)}>
+            <td class="nowrap">
+              <!-- 行可点，名字再做成按钮：键盘也能打开 -->
+              <button class="name-btn mono" onclick={(e) => { e.stopPropagation(); viewing = s.name; }}>{s.name}</button>
+            </td>
             <td class="muted text">{s.description}</td>
             <td class="faint">{s.version}</td>
             <td class="mono faint">{s.content_hash.slice(0, 12)}</td>
@@ -118,14 +133,25 @@
     hint="技能是一份写给 AI 的操作手册：这类问题怎么查、公司内部的命令怎么敲。导入之后在任务的 AI 步骤里勾选。"
   >
     {#snippet action()}
-      <button class="btn-primary" onclick={onnew}>导入技能</button>
+      {#if canEdit}<button class="btn-primary" onclick={onnew}>导入技能</button>{/if}
     {/snippet}
   </Empty>
 {/if}
 
 <style>
-  .name {
+  .name-btn {
+    height: auto;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--fg);
     font-weight: 500;
+    cursor: pointer;
+  }
+  .name-btn:hover {
+    color: var(--accent-fg);
+    text-decoration: underline;
+    text-underline-offset: 2px;
   }
   .text {
     max-width: 60ch;

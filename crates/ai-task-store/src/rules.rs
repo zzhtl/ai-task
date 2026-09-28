@@ -35,6 +35,16 @@ pub struct Skill {
     /// 附带文件：相对路径 → 内容。
     pub files: Vec<(String, String)>,
     pub content_hash: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// 改一个技能的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillUpdate {
+    /// 内容和最新版一模一样，什么都没做。
+    Unchanged(Skill),
+    /// 插了一个新版本。
+    Created { previous: Skill, current: Skill },
 }
 
 /// 规则列表里的一行。软规则和硬策略共用一张表，`kind` 区分。
@@ -320,34 +330,141 @@ impl Store {
     }
 
     pub async fn create_skill(&self, new: NewSkill) -> Result<SkillId, StoreError> {
-        let id = SkillId::new();
-        let files = serde_json::Value::Object(
-            new.files
-                .iter()
-                .map(|(path, content)| (path.clone(), serde_json::Value::String(content.clone())))
-                .collect(),
-        );
-        let content_hash = skill_hash(&new.body, &new.files);
-
-        sqlx::query(
-            "INSERT INTO skills (id, workspace_id, name, version, description, body, files, content_hash)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
-        )
-        .bind(uuid::Uuid::from(id))
-        .bind(uuid::Uuid::from(new.workspace_id))
-        .bind(&new.name)
-        .bind(&new.version)
-        .bind(&new.description)
-        .bind(&new.body)
-        .bind(&files)
-        .bind(&content_hash)
-        .execute(self.pool())
-        .await
-        .map_err(|err| duplicate(err, "skill", &format!("{}@{}", new.name, new.version)))?;
-        Ok(id)
+        let skill = insert_skill(self.pool(), &new)
+            .await
+            .map_err(|err| duplicate(err, "skill", &format!("{}@{}", new.name, new.version)))?;
+        Ok(skill.id)
     }
 
-    /// 按名字取 skill，取每个名字下版本号最大的那个。
+    /// 一个技能的最新版，和它一共有几个版本。`None` 表示没有这个技能。
+    pub async fn latest_skill(
+        &self,
+        workspace_id: WorkspaceId,
+        name: &str,
+    ) -> Result<Option<(Skill, i64)>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, name, version, description, body, files, content_hash, created_at,
+                    count(*) OVER () AS versions
+             FROM skills WHERE workspace_id = $1 AND name = $2
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1",
+        )
+        .bind(uuid::Uuid::from(workspace_id))
+        .bind(name)
+        .fetch_optional(self.pool())
+        .await?;
+        row.map(|row| {
+            let versions: i64 = row.try_get("versions")?;
+            Ok((skill_from_row(row)?, versions))
+        })
+        .transpose()
+    }
+
+    /// 当前版本引用了这个技能的任务名，按名字排。
+    ///
+    /// 递归找任意层级的 `skills` 数组：map 节点的模板里也可能挂技能。
+    pub async fn tasks_using_skill(
+        &self,
+        workspace_id: WorkspaceId,
+        name: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT t.name FROM tasks t
+             JOIN task_versions v ON v.id = t.current_version_id
+             WHERE t.workspace_id = $1
+               AND jsonb_path_exists(v.dag_spec, '$.**.skills[*] ? (@ == $name)',
+                                     jsonb_build_object('name', $2::text))
+             ORDER BY t.name",
+        )
+        .bind(uuid::Uuid::from(workspace_id))
+        .bind(name)
+        .fetch_all(self.pool())
+        .await?;
+        rows.iter()
+            .map(|row| row.try_get("name").map_err(StoreError::from))
+            .collect()
+    }
+
+    /// 改一个技能：内容（描述、正文、附件）变了才插一个新版本行。
+    ///
+    /// `expected` 是调用方看到的最新版 id（`If-Match`）；对不上返回
+    /// `Conflict { what: "skill" }`。版本号用过了返回 `Conflict { what: "skill version" }`。
+    pub async fn update_skill(
+        &self,
+        new: NewSkill,
+        expected: Option<SkillId>,
+    ) -> Result<SkillUpdate, StoreError> {
+        let mut tx = self.pool().begin().await?;
+        // 同一个技能的修改串行化。只靠"读最新版再比 ETag"挡不住并发：
+        // 两个人拿着同一个 ETag 同时改，都会通过校验、各插一版，
+        // 后插的那版悄悄盖掉先插的。行锁也不行——排队拿到锁的那个事务
+        // 读到的仍是旧的"最新版"。锁随事务结束释放。
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text || '/' || $2, 0))")
+            .bind(uuid::Uuid::from(new.workspace_id))
+            .bind(&new.name)
+            .execute(&mut *tx)
+            .await?;
+
+        let row = sqlx::query(
+            "SELECT id, name, version, description, body, files, content_hash, created_at
+             FROM skills WHERE workspace_id = $1 AND name = $2
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1",
+        )
+        .bind(uuid::Uuid::from(new.workspace_id))
+        .bind(&new.name)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else {
+            return Err(StoreError::NotFound {
+                what: "skill",
+                id: new.name,
+            });
+        };
+        let previous = skill_from_row(row)?;
+
+        // 先看内容再看 ETag：响应丢了、客户端原样重试时，拿到的是"没变"而不是 412
+        if files_map(&previous.files) == files_map(&new.files)
+            && previous.description == new.description
+            && previous.body == new.body
+        {
+            return Ok(SkillUpdate::Unchanged(previous));
+        }
+        if expected.is_some_and(|id| id != previous.id) {
+            return Err(StoreError::Conflict {
+                what: "skill",
+                id: previous.id.to_string(),
+            });
+        }
+
+        let current = insert_skill(&mut *tx, &new).await.map_err(|err| {
+            duplicate(
+                err,
+                "skill version",
+                &format!("{}@{}", new.name, new.version),
+            )
+        })?;
+        tx.commit().await?;
+        Ok(SkillUpdate::Created { previous, current })
+    }
+
+    /// 删掉一个技能的全部版本。返回删了几行，0 表示没有这个技能。
+    pub async fn delete_skill(
+        &self,
+        workspace_id: WorkspaceId,
+        name: &str,
+    ) -> Result<u64, StoreError> {
+        let done = sqlx::query("DELETE FROM skills WHERE workspace_id = $1 AND name = $2")
+            .bind(uuid::Uuid::from(workspace_id))
+            .bind(name)
+            .execute(self.pool())
+            .await?;
+        Ok(done.rows_affected())
+    }
+
+    /// 按名字取 skill，每个名字取最新的一版。
+    ///
+    /// "最新"按创建时间，不按版本号：版本号是自由文本，按文本排 "9" 会排在 "10" 前面。
     pub async fn skills_by_name(
         &self,
         workspace_id: WorkspaceId,
@@ -357,10 +474,11 @@ impl Store {
             return Ok(Vec::new());
         }
         let rows = sqlx::query(
-            "SELECT DISTINCT ON (name) id, name, version, description, body, files, content_hash
+            "SELECT DISTINCT ON (name) id, name, version, description, body, files, content_hash,
+                    created_at
              FROM skills
              WHERE workspace_id = $1 AND name = ANY($2)
-             ORDER BY name, version DESC",
+             ORDER BY name, created_at DESC, id DESC",
         )
         .bind(uuid::Uuid::from(workspace_id))
         .bind(names)
@@ -372,8 +490,9 @@ impl Store {
 
     pub async fn list_skills(&self, workspace_id: WorkspaceId) -> Result<Vec<Skill>, StoreError> {
         let rows = sqlx::query(
-            "SELECT DISTINCT ON (name) id, name, version, description, body, files, content_hash
-             FROM skills WHERE workspace_id = $1 ORDER BY name, version DESC
+            "SELECT DISTINCT ON (name) id, name, version, description, body, files, content_hash,
+                    created_at
+             FROM skills WHERE workspace_id = $1 ORDER BY name, created_at DESC, id DESC
              LIMIT $2",
         )
         .bind(uuid::Uuid::from(workspace_id))
@@ -414,6 +533,55 @@ fn skill_from_row(row: sqlx::postgres::PgRow) -> Result<Skill, StoreError> {
             })
             .unwrap_or_default(),
         content_hash: row.try_get("content_hash")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+/// 附件按路径比较，和存储顺序无关。
+fn files_map(files: &[(String, String)]) -> std::collections::BTreeMap<&str, &str> {
+    files
+        .iter()
+        .map(|(path, content)| (path.as_str(), content.as_str()))
+        .collect()
+}
+
+/// 插一个技能版本行。建技能和改技能共用。
+async fn insert_skill<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    new: &NewSkill,
+) -> Result<Skill, sqlx::Error> {
+    let id = SkillId::new();
+    let files = serde_json::Value::Object(
+        new.files
+            .iter()
+            .map(|(path, content)| (path.clone(), serde_json::Value::String(content.clone())))
+            .collect(),
+    );
+    let content_hash = skill_hash(&new.body, &new.files);
+    let created_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "INSERT INTO skills (id, workspace_id, name, version, description, body, files, content_hash)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         RETURNING created_at",
+    )
+    .bind(uuid::Uuid::from(id))
+    .bind(uuid::Uuid::from(new.workspace_id))
+    .bind(&new.name)
+    .bind(&new.version)
+    .bind(&new.description)
+    .bind(&new.body)
+    .bind(&files)
+    .bind(&content_hash)
+    .fetch_one(executor)
+    .await?;
+    Ok(Skill {
+        id,
+        name: new.name.clone(),
+        version: new.version.clone(),
+        description: new.description.clone(),
+        body: new.body.clone(),
+        files: new.files.clone(),
+        content_hash,
+        created_at,
     })
 }
 

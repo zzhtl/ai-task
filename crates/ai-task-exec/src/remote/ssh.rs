@@ -144,6 +144,17 @@ impl SshSession {
         &self.description
     }
 
+    /// 主动断开。
+    ///
+    /// 只 drop 的话，要等 russh 的会话循环发现所有句柄和通道都没了才收尾；
+    /// 显式发 disconnect，对端立刻释放这条连接。断开失败说明连接已经没了，不用管。
+    pub async fn close(self) {
+        let _ = self
+            .handle
+            .disconnect(russh::Disconnect::ByApplication, "", "")
+            .await;
+    }
+
     /// 跑一条命令，把 stdout/stderr 和退出码收回来。
     ///
     /// 只用于投送流程里的小命令（算哈希、建目录）。真正的任务执行走 agent，

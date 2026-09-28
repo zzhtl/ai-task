@@ -6,7 +6,8 @@
    * ——所以编辑时私钥框留空的意思是"不换"，不是"清掉"。
    */
   import { api, describeError, fieldErrors } from '$api/client';
-  import { listHosts, type Host } from '$api/models';
+  import { listHosts, probeHost, type Host } from '$api/models';
+  import type { HostProbe } from '$api/types/HostProbe';
   import { session } from '$lib/auth/session.svelte';
   import PageHeader from '$lib/ui/PageHeader.svelte';
   import Empty from '$lib/ui/Empty.svelte';
@@ -120,6 +121,41 @@
   $effect(() => {
     void load();
   });
+
+  /**
+   * 探测：现在就连一下，确认连得上、agent 在、有哪些能力。
+   * 失败的原因留在那一行里而不只是弹一下——SSH 的报错通常得对着改配置。
+   */
+  let probing = $state<string[]>([]);
+  let probes = $state<Record<string, HostProbe>>({});
+  async function probe(host: Host) {
+    probing = [...probing, host.id];
+    try {
+      const result = await probeHost(host.id);
+      probes = { ...probes, [host.id]: result };
+      if (result.ok) {
+        toast(`「${host.name}」连上了（${(result.elapsed_ms / 1000).toFixed(1)}s）`);
+        await load();
+      } else {
+        toastError(`「${host.name}」探测失败`);
+      }
+    } catch (e) {
+      // 409：这台正在探测
+      toastError(describeError(e));
+    } finally {
+      probing = probing.filter((id) => id !== host.id);
+    }
+  }
+
+  /** 最近连上的时间有多新：一天内算新，一周以上没连过要留意。 */
+  const DAY = 86_400_000;
+  function freshness(iso: string | null): string {
+    if (!iso) return 'faint';
+    const age = Date.now() - Date.parse(iso);
+    if (age < DAY) return 'fresh';
+    if (age > 7 * DAY) return 'stale';
+    return '';
+  }
 
   const CGROUP: Record<string, string> = {
     systemd: 'cgroup 上限已强制',
@@ -274,15 +310,32 @@
                   <span class="faint">未探测</span>
                 {:else if host.degraded}
                   <!-- 这一档下 limits 根本没被强制，不标出来用户会以为限额生效了 -->
-                  <span class="tag warn" title={CGROUP[host.cgroup_mode] ?? ''}>{host.cgroup_mode} · 上限未强制</span>
+                  <span class="tag warn" title={probes[host.id]?.agent?.cgroup_detail ?? CGROUP[host.cgroup_mode] ?? ''}>
+                    {host.cgroup_mode} · 上限未强制
+                  </span>
                 {:else}
                   <span class="tag ok" title={CGROUP[host.cgroup_mode] ?? ''}>{host.cgroup_mode}</span>
                 {/if}
               </td>
               <td class="mono faint">{host.agent_version?.slice(0, 8) ?? '—'}</td>
-              <td class="faint" title={stamp(host.last_seen_at)}>{ago(host.last_seen_at)}</td>
+              <td class="seen">
+                <span class={freshness(host.last_seen_at)} title="最近一次连上（执行或探测）：{stamp(host.last_seen_at)}">
+                  {host.last_seen_at ? ago(host.last_seen_at) : '从没连上过'}
+                </span>
+                {#if probes[host.id] && !probes[host.id].ok}
+                  <div class="err ellipsis" title={probes[host.id].error}>{probes[host.id].error}</div>
+                {/if}
+              </td>
               <td class="act">
                 <div class="row">
+                  <button
+                    class="btn-ghost btn-sm"
+                    title="现在连一下：确认连得上、agent 在、有哪些能力"
+                    disabled={probing.includes(host.id)}
+                    onclick={() => probe(host)}
+                  >
+                    {probing.includes(host.id) ? '探测中…' : '探测'}
+                  </button>
                   <button class="btn-ghost btn-sm btn-icon" title="编辑" aria-label="编辑" disabled={busy} onclick={() => openEdit(host)}>
                     <Icon name="pencil" />
                   </button>
@@ -320,5 +373,14 @@
   }
   td .tag + .tag {
     margin-left: 4px;
+  }
+  .seen {
+    white-space: nowrap;
+  }
+  .fresh {
+    color: var(--ok-fg);
+  }
+  .stale {
+    color: var(--warn-fg);
   }
 </style>

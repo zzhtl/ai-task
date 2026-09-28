@@ -138,13 +138,37 @@ export function policyProblems(form: PolicyForm, creating: boolean): string[] {
   return out;
 }
 
-/** 匹配条件压成一行给人扫。 */
-export function describeMatcher(spec: Record<string, unknown>): string {
+/**
+ * 按真实判决的顺序排：数值大的先判，同优先级按名字。
+ *
+ * 名字用码点比，不用 `localeCompare`：服务端按字节序排，而中文环境下 `localeCompare`
+ * 按拼音排，先后会和实际判决对不上——这张表存在的意义就是"照着它从上往下读就是判决过程"。
+ */
+function byEvaluation(a: Rule, b: Rule): number {
+  if (a.priority !== b.priority) return b.priority - a.priority;
+  return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+}
+
+export interface PolicyOrder {
+  /** 按任务挂载的：只在挂上它的任务里生效，优先级再 +1000，排在所有全局规则前面。 */
+  mounted: Rule[];
+  /** 全局规则，按判决顺序。 */
+  global: Rule[];
+  /** 停用的不参与判决。 */
+  disabled: Rule[];
+}
+
+export function evaluationOrder(rules: Rule[]): PolicyOrder {
+  const enabled = rules.filter((r) => r.enabled).sort(byEvaluation);
+  return {
+    mounted: enabled.filter((r) => r.scope === 'task'),
+    global: enabled.filter((r) => r.scope === 'global'),
+    disabled: rules.filter((r) => !r.enabled).sort(byEvaluation)
+  };
+}
+
+/** 一条规则的模式，给表格按条列出来。 */
+export function patternRows(spec: Record<string, unknown>): PatternRow[] {
   const m = (spec.match ?? {}) as RawMatcher;
-  const head = m.tool ? m.tool : '任意工具';
-  const target = m.arg ? `${head}.${m.arg}` : head;
-  const rows = (m.any_of ?? []).map(toRow).filter((r): r is PatternRow => r !== null);
-  if (!rows.length) return `${head} 的所有调用`;
-  const label = (k: PatternKind) => PATTERN_KINDS.find((x) => x.id === k)?.label ?? k;
-  return `${target} ~ ${rows.map((r) => `${label(r.kind)} ${r.value}`).join(' | ')}`;
+  return (m.any_of ?? []).map(toRow).filter((r): r is PatternRow => r !== null);
 }
