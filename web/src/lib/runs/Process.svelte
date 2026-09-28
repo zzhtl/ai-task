@@ -15,6 +15,7 @@
   import Fold from '$lib/ui/Fold.svelte';
   import HelpTip from '$lib/ui/HelpTip.svelte';
   import ToolCall from './ToolCall.svelte';
+  import HostResults from './HostResults.svelte';
   import { duration, moneyMicros, toMicros } from '$lib/ui/format';
 
   let {
@@ -107,6 +108,8 @@
             <p class="say">{block.text}</p>
           {:else if block.kind === 'tool'}
             <ToolCall {block} />
+          {:else if block.kind === 'hosts'}
+            <HostResults {block} />
           {:else if block.kind === 'gate'}
             <div class="gate">
               <span class="lbl">审批</span>
@@ -144,7 +147,8 @@
         {#if node.error}
           <p class="node-error">{node.error}</p>
         {/if}
-        {#if node.output !== null && node.output !== undefined}
+        <!-- 在多台机器上跑的步骤，每台的结果上面的表里都有，这份汇总 JSON 不再重复摆一遍 -->
+        {#if node.output !== null && node.output !== undefined && !node.blocks.some((b) => b.kind === 'hosts')}
           <Fold label="这一步的结果">
             <div class="cmd">
               <span class="copy"><CopyButton text={JSON.stringify(node.output, null, 2)} label="复制结果" /></span>

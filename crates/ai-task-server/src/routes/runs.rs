@@ -100,6 +100,7 @@ pub async fn get(
         cli_version: run.cli_version,
         triggered_by: meta.triggered_by,
         schedule_id: meta.schedule_id,
+        task_kind: meta.task_kind,
     }))
 }
 

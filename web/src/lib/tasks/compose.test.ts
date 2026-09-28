@@ -333,3 +333,46 @@ describe('高级设置：重试、轮数、单步花费上限', () => {
     expect(nodesOf(comp)[1].config.max_turns).toBe(30);
   });
 });
+
+describe('执行位置：一台、勾选多台、按 tag', () => {
+  const withHost = (host: unknown, kind: 'shell' | 'ai' = 'shell'): DagSpec =>
+    ({
+      nodes: [
+        {
+          key: 'step-1',
+          name: '看磁盘',
+          config: kind === 'shell' ? { kind: 'shell', command: 'df -h /' } : { kind: 'ai', prompt: '看看', model: DEFAULT_MODEL },
+          host
+        }
+      ],
+      edges: []
+    }) as unknown as DagSpec;
+
+  test('四种执行位置打开再保存都原样回去', () => {
+    for (const host of [
+      undefined,
+      { on: 'host', host_id: 'h1' },
+      { on: 'hosts', host_ids: ['h1', 'h2'] },
+      { on: 'tag', tag: 'prod' }
+    ]) {
+      const comp = fromSpec(withHost(host));
+      expect(comp).not.toBeNull();
+      expect(toSpec(comp!).nodes[0].host as unknown).toEqual(host);
+    }
+  });
+
+  test('只有命令步骤能展开到多台：AI 步骤这样写，编辑器不接', () => {
+    expect(fromSpec(withHost({ on: 'tag', tag: 'prod' }, 'ai'))).toBeNull();
+    expect(fromSpec(withHost({ on: 'host', host_id: 'h1' }, 'ai'))).not.toBeNull();
+  });
+
+  test('选的 tag 前后空白去掉再存', () => {
+    const comp = fromSpec(withHost({ on: 'tag', tag: 'prod' }))!;
+    comp.steps[0].target = { kind: 'tag', tag: ' web ' };
+    expect(toSpec(comp).nodes[0].host as unknown).toEqual({ on: 'tag', tag: 'web' });
+  });
+
+  test('认不出的执行位置不硬凑', () => {
+    expect(fromSpec(withHost({ on: 'somewhere_else' }))).toBeNull();
+  });
+});

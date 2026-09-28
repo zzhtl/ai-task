@@ -9,7 +9,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use ai_task_proto::{DagSpec, EdgeCondition, InputRef, NodeConfig, NodeKey, NodeSpec};
+use ai_task_proto::{
+    DagSpec, EdgeCondition, HostSelector, InputRef, MAX_FANOUT_HOSTS, NodeConfig, NodeKey, NodeSpec,
+};
 use serde_json_path::JsonPath;
 
 /// 通过校验的 DAG。
@@ -35,6 +37,7 @@ impl ValidatedDag {
         check_edges_reference_known_nodes(&spec, &nodes, &mut errors);
         check_json_paths(&spec, &mut errors);
         check_map_item_scope(&spec, &mut errors);
+        check_host_selectors(&spec, &mut errors);
 
         // 有悬空的边就别再谈拓扑序了，只会产出误导性的二次错误。
         let has_dangling_edge = errors
@@ -136,6 +139,12 @@ pub enum DagError {
 
     #[error("节点 `{node}` 的输入 `{input}` 用了 map_item，但它不在任何 map 模板内部")]
     MapItemOutsideTemplate { node: String, input: String },
+
+    #[error("节点 `{node}` {why}，只能落在一台机器上；在多台机器上各跑一次只支持 shell 步骤")]
+    FanOutNotAllowed { node: String, why: &'static str },
+
+    #[error("节点 `{node}` 的执行位置不对：{reason}")]
+    InvalidHostSelector { node: String, reason: String },
 }
 
 /// 建立 key -> 节点索引，顺带查重。
@@ -228,6 +237,63 @@ fn path_error(input: &InputRef) -> Option<String> {
         InputRef::MapItem | InputRef::Literal { .. } => return None,
     };
     JsonPath::parse(path).err().map(|e| e.to_string())
+}
+
+/// 执行位置：勾选多台、按 tag 都是"在多台机器上各跑一次"，只对 shell 步骤有意义。
+///
+/// AI 步骤的远端工具只能对准一台机器；审批、断言不碰机器；map 模板已经在按元素展开，
+/// 再按主机展开一层会让实例数相乘，事件也分不清谁是谁。
+fn check_host_selectors(spec: &DagSpec, errors: &mut Vec<DagError>) {
+    for node in &spec.nodes {
+        check_node_host(node, false, errors);
+        if let NodeConfig::Map(map) = &node.config {
+            check_node_host(&map.template, true, errors);
+        }
+    }
+}
+
+fn check_node_host(node: &NodeSpec, in_map_template: bool, errors: &mut Vec<DagError>) {
+    let Some(selector) = &node.host else { return };
+    let invalid = |reason: String| DagError::InvalidHostSelector {
+        node: node.key.to_string(),
+        reason,
+    };
+    match selector {
+        HostSelector::Hosts { host_ids } => {
+            if host_ids.is_empty() {
+                errors.push(invalid("勾选多台主机，但一台都没选".into()));
+            }
+            if host_ids.len() > MAX_FANOUT_HOSTS {
+                errors.push(invalid(format!(
+                    "一次最多 {MAX_FANOUT_HOSTS} 台，选了 {} 台",
+                    host_ids.len()
+                )));
+            }
+            let unique: BTreeSet<_> = host_ids.iter().collect();
+            if unique.len() != host_ids.len() {
+                errors.push(invalid("同一台主机选了不止一次".into()));
+            }
+        }
+        HostSelector::Tag { tag } if tag.trim().is_empty() => {
+            errors.push(invalid("按 tag 选主机，但 tag 是空的".into()));
+        }
+        _ => {}
+    }
+    if !selector.fans_out() {
+        return;
+    }
+    let why = match &node.config {
+        NodeConfig::Shell(_) if !in_map_template => return,
+        NodeConfig::Shell(_) => "在 map 模板里",
+        NodeConfig::Ai(_) => "是 AI 步骤",
+        NodeConfig::Approval(_) => "是审批步骤",
+        NodeConfig::Assert(_) => "是断言步骤",
+        NodeConfig::Map(_) => "是 map 步骤",
+    };
+    errors.push(DagError::FanOutNotAllowed {
+        node: node.key.to_string(),
+        why,
+    });
 }
 
 /// `map_item` 只在 map 模板内部有意义。在顶层用它，取到的永远是空。
@@ -401,6 +467,100 @@ mod tests {
             timeout_s: None,
             host: None,
             limits: None,
+        }
+    }
+
+    fn shell(k: &str, host: Option<HostSelector>) -> NodeSpec {
+        NodeSpec {
+            config: NodeConfig::Shell(ai_task_proto::ShellNode {
+                command: "uptime".into(),
+                working_dir: None,
+            }),
+            host,
+            ..node(k)
+        }
+    }
+
+    #[test]
+    fn only_shell_steps_fan_out_to_many_hosts() {
+        let a = ai_task_proto::HostId::new();
+        let b = ai_task_proto::HostId::new();
+        let hosts = || {
+            Some(HostSelector::Hosts {
+                host_ids: vec![a, b],
+            })
+        };
+        let tag = || Some(HostSelector::Tag { tag: "prod".into() });
+
+        // shell 步骤：勾选多台、按 tag 都行
+        assert!(ValidatedDag::validate(spec(vec![shell("s", hosts())], vec![])).is_ok());
+        assert!(ValidatedDag::validate(spec(vec![shell("s", tag())], vec![])).is_ok());
+
+        // AI 步骤：只能一台
+        let mut ai = node("ai");
+        ai.host = tag();
+        let errs = ValidatedDag::validate(spec(vec![ai], vec![])).expect_err("AI 不能展开");
+        assert!(
+            matches!(
+                errs[0],
+                DagError::FanOutNotAllowed {
+                    why: "是 AI 步骤",
+                    ..
+                }
+            ),
+            "{errs:?}"
+        );
+
+        // map 模板里的 shell 也不行：实例数会相乘
+        let mut map = node("m");
+        map.config = NodeConfig::Map(ai_task_proto::MapNode {
+            over: ai_task_proto::InputRef::Literal {
+                value: serde_json::json!([1, 2]),
+            },
+            template: Box::new(shell("t", hosts())),
+            max_parallel: 2,
+            max_items: 10,
+        });
+        let errs = ValidatedDag::validate(spec(vec![map], vec![])).expect_err("map 模板不能展开");
+        assert!(
+            matches!(
+                errs[0],
+                DagError::FanOutNotAllowed {
+                    why: "在 map 模板里",
+                    ..
+                }
+            ),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn a_fan_out_selector_must_name_real_targets() {
+        let a = ai_task_proto::HostId::new();
+        for (selector, expect) in [
+            (HostSelector::Hosts { host_ids: vec![] }, "一台都没选"),
+            (
+                HostSelector::Hosts {
+                    host_ids: vec![a, a],
+                },
+                "不止一次",
+            ),
+            (
+                HostSelector::Hosts {
+                    host_ids: (0..=MAX_FANOUT_HOSTS)
+                        .map(|_| ai_task_proto::HostId::new())
+                        .collect(),
+                },
+                "一次最多",
+            ),
+            (HostSelector::Tag { tag: "  ".into() }, "tag 是空的"),
+        ] {
+            let errs = ValidatedDag::validate(spec(vec![shell("s", Some(selector))], vec![]))
+                .expect_err(expect);
+            assert!(
+                errs.iter().any(|e| e.to_string().contains(expect)),
+                "{expect}: {errs:?}"
+            );
         }
     }
 

@@ -5,7 +5,7 @@
    * 和编辑器共用同一套视觉语言（左侧序号 + 连线），这样"看"和"改"是同一件
    * 事的两个状态，而不是两套需要各自学习的东西。
    */
-  import { reachOf, type Composition, type Step } from './compose';
+  import { describeTarget, reachOf, type Composition, type Step } from './compose';
   import StepRail from '$lib/ui/StepRail.svelte';
 
   let {
@@ -32,8 +32,7 @@
   };
 
   // 主机是 admin 才能读，读不到就退回短 id
-  const hostLabel = (id: string | null) =>
-    id ? (hosts.find((h) => h.id === id)?.name ?? id.slice(0, 8)) : '本机';
+  const hostName = (id: string) => hosts.find((h) => h.id === id)?.name ?? id.slice(0, 8);
 
   const runnerLabel = (step: Step) =>
     step.runner.kind === 'host_cli' ? `目标机上的 ${step.runner.cli}` : '中心的 Claude Code';
@@ -69,7 +68,7 @@
         {/if}
 
         <div class="facts">
-          <span>在 <b>{hostLabel(step.hostId)}</b></span>
+          <span>在 <b>{describeTarget(step.target, hostName)}</b></span>
           {#if step.kind === 'ai'}
             <span>{runnerLabel(step)}</span>
             <!-- title 里放真实清单：档位只是概括，真正生效的是这几个工具名 -->

@@ -244,6 +244,17 @@ async fn validate(state: &AppState, body: &CreateSchedule) -> Result<NewSchedule
         .get_task(state.workspace_id, body.task_id)
         .await
         .map_err(|_| invalid("task_id", &format!("任务 {} 不存在", body.task_id)))?;
+    if state
+        .store
+        .task_kind(state.workspace_id, body.task_id)
+        .await?
+        == Some(ai_task_proto::TaskKind::Adhoc)
+    {
+        return Err(invalid(
+            "task_id",
+            "「临时命令」不能加定时：要按时跑的命令，建成一个任务",
+        ));
+    }
 
     if body.jitter_s > MAX_JITTER_S {
         return Err(invalid(

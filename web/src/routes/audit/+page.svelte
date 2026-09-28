@@ -28,6 +28,7 @@
     'run.trigger': '触发执行',
     'run.cancel': '取消执行',
     'run.delete': '删除执行记录',
+    'command.run': '批量执行命令',
     'schedule.create': '添加定时',
     'schedule.update': '修改定时',
     'schedule.delete': '删除定时',

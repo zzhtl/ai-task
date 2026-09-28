@@ -123,6 +123,35 @@ pub enum RunEventBody {
     /// **这条必须显式发出来。**资源曲线在降级档位下是不完整的（`/proc` 采样
     /// 收不到已经退出的进程的峰值，`none` 档连数都没有），而且**上限根本没被强制**
     /// ——界面上不标出来的话，用户会以为 `MemoryMax` 生效了。
+    /// 按多台主机展开的 shell 步骤：这一次实际落到了哪些机器。
+    ///
+    /// 按 tag 选主机要到执行那一刻才知道落到了哪几台，这条事件就是那份名单——
+    /// 审计时要能回答"那天晚上到底在哪些机器上跑了"。
+    HostsResolved {
+        hosts: Vec<HostTarget>,
+    },
+    /// 按多台主机展开的 shell 步骤里，一台机器跑完了。
+    HostExecFinished {
+        host_id: HostId,
+        host_name: String,
+        attempt: u32,
+        ok: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+        duration_ms: u64,
+        /// 失败原因：退出码非零时的那一行、连不上、超时、被资源上限杀掉。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        /// 标准输出的末尾，最多 4 KiB。
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        stdout: String,
+        /// 标准错误的末尾，最多 4 KiB。
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        stderr: String,
+        /// 这台机器的资源归因档位：`systemd` / `proc` / `none`。没连上时没有。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cgroup_mode: Option<String>,
+    },
     ResourceDegraded {
         /// `proc` 或 `none`。`systemd` 不会发这条事件。
         mode: String,
@@ -240,6 +269,8 @@ impl RunEventBody {
             Self::NodeRetrying { .. } => "node_retrying",
             Self::NodeSkipped { .. } => "node_skipped",
             Self::DriftDetected { .. } => "drift_detected",
+            Self::HostsResolved { .. } => "hosts_resolved",
+            Self::HostExecFinished { .. } => "host_exec_finished",
             Self::ResourceDegraded { .. } => "resource_degraded",
             Self::MapExpanded { .. } => "map_expanded",
             Self::AgentInvoked { .. } => "agent_invoked",
@@ -264,6 +295,14 @@ impl RunEventBody {
     pub fn is_stream_delta(&self) -> bool {
         matches!(self, Self::AgentText { .. } | Self::AgentThinking { .. })
     }
+}
+
+/// 展开步骤落到的一台机器。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct HostTarget {
+    pub host_id: HostId,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]

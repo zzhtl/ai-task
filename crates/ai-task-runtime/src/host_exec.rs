@@ -46,8 +46,9 @@ pub enum HostExecError {
     )]
     NoRemoteAgent,
 
-    #[error("按 tag 选主机（tag={0}）在 M4 里还没实现，先用 host_id 指定")]
-    TagSelectorUnsupported(String),
+    /// 展开到多台机器的步骤由引擎按主机拆开后逐台调用；走到这里是调用方的 bug。
+    #[error("这个步骤要在多台机器上各跑一次，得先按主机拆开再下发")]
+    NotExpanded,
 
     #[error(transparent)]
     Agent(#[from] ai_task_exec::remote::AgentError),
@@ -116,8 +117,8 @@ pub async fn run_command(
             let agent = connect_remote(store, config, workspace_id, *host_id, roots).await?;
             (agent, Some(*host_id))
         }
-        Some(HostSelector::Tag { tag }) => {
-            return Err(HostExecError::TagSelectorUnsupported(tag.clone()));
+        Some(HostSelector::Hosts { .. } | HostSelector::Tag { .. }) => {
+            return Err(HostExecError::NotExpanded);
         }
     };
 
@@ -392,11 +393,13 @@ pub fn to_node_result(outcome: &HostExecOutcome) -> NodeResult {
             "stderr": outcome.stderr.trim(),
             "exit_code": 0,
         }))),
-        Some(code) => NodeResult::failed(format!(
-            "命令退出码 {code}：{}",
-            first_line(&outcome.stderr)
-                .unwrap_or_else(|| first_line(&outcome.stdout).unwrap_or_default())
-        )),
+        // 命令什么都没输出时就只报退出码，不留一个悬空的冒号
+        Some(code) => NodeResult::failed(
+            match first_line(&outcome.stderr).or_else(|| first_line(&outcome.stdout)) {
+                Some(line) => format!("命令退出码 {code}：{line}"),
+                None => format!("命令退出码 {code}"),
+            },
+        ),
         None => NodeResult::failed(format!(
             "命令被信号 {} 终止",
             exec.killed_by_signal.unwrap_or(0)

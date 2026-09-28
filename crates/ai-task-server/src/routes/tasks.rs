@@ -3,7 +3,7 @@
 use ai_task_core::ValidatedDag;
 use ai_task_proto::{
     CreateTask, FieldError, Page, PageQuery, RecentRun, RunEventBody, RunSummary, TaskDetail,
-    TaskId, TaskSummary, TriggerKind, TriggerRun,
+    TaskId, TaskKind, TaskSummary, TriggerKind, TriggerRun,
 };
 use ai_task_store::idempotency::{IdempotentCreate, IdempotentRun};
 use ai_task_store::{NewRun, NewTask, PendingEvent};
@@ -70,6 +70,7 @@ pub async fn update(
     headers: HeaderMap,
     Json(body): Json<CreateTask>,
 ) -> Result<impl IntoResponse, AppError> {
+    ensure_regular_task(&state, id).await?;
     ValidatedDag::validate(body.spec.clone()).map_err(|errors| {
         AppError::Validation(
             errors
@@ -143,6 +144,7 @@ pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<TaskId>,
 ) -> Result<impl IntoResponse, AppError> {
+    ensure_regular_task(&state, id).await?;
     let task = state
         .store
         .get_task(state.workspace_id, id)
@@ -260,12 +262,24 @@ pub async fn get(
 ///
 /// 返回 **202 Accepted** 而不是 201：run 只是被接受了，还没跑完。
 /// 客户端拿 `Location` 里的 URL 去订阅事件流看进展。
+/// 临时命令的系统任务只是一串执行记录的挂靠点：不能改、不能删、不能手动触发。
+async fn ensure_regular_task(state: &AppState, id: TaskId) -> Result<(), AppError> {
+    if state.store.task_kind(state.workspace_id, id).await? == Some(TaskKind::Adhoc) {
+        return Err(AppError::Conflict(
+            "「临时命令」是记录临时执行用的系统任务，不能修改、删除或手动触发。要反复跑的命令，建成一个任务"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn trigger(
     State(state): State<AppState>,
     Path(id): Path<TaskId>,
     request: IdempotentJson<TriggerRun>,
 ) -> Result<Response, AppError> {
     let IdempotentJson { body, key, hash } = request;
+    ensure_regular_task(&state, id).await?;
     let task = state
         .store
         .get_task(state.workspace_id, id)

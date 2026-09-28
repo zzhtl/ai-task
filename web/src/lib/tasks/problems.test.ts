@@ -55,3 +55,19 @@ describe('保存前要说清楚的问题', () => {
     expect(problemsOf('', comp([step({})]))[0].stepUid).toBeNull();
   });
 });
+
+describe('执行位置', () => {
+  test('多台一台都没选、tag 没填、AI 步骤展开到多台，保存前就拦下', () => {
+    const texts2 = (c: Composition) => problemsOf('x', c).filter((p) => p.level === 'error').map((p) => p.text);
+    expect(texts2(comp([step({ kind: 'shell', body: 'uptime', target: { kind: 'hosts', hostIds: [] } })]))).toEqual([
+      '第 1 步还没选主机'
+    ]);
+    expect(texts2(comp([step({ kind: 'shell', body: 'uptime', target: { kind: 'tag', tag: ' ' } })]))).toEqual([
+      '第 1 步还没选 tag'
+    ]);
+    expect(texts2(comp([step({ kind: 'ai', body: '看看', target: { kind: 'tag', tag: 'prod' } })]))).toEqual([
+      '第 1 步只能在一台机器上执行：在多台机器上各跑一次只支持命令步骤'
+    ]);
+    expect(texts2(comp([step({ kind: 'shell', body: 'uptime', target: { kind: 'hosts', hostIds: ['h1'] } })]))).toEqual([]);
+  });
+});

@@ -4,4 +4,4 @@ import type { HostId } from "./HostId";
 /**
  * 节点在哪台机器上执行。
  */
-export type HostSelector = { "on": "local" } | { "on": "host", host_id: HostId, } | { "on": "tag", tag: string, };
+export type HostSelector = { "on": "local" } | { "on": "host", host_id: HostId, } | { "on": "hosts", host_ids: Array<HostId>, } | { "on": "tag", tag: string, };

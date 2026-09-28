@@ -44,6 +44,67 @@ export const REACH_TOOLS: Record<Reach, string[]> = {
   edit_files: ['Read', 'Glob', 'Grep', 'Bash', 'Write', 'Edit']
 };
 
+/**
+ * 步骤在哪儿执行。勾选多台、按 tag 是"每台各跑一次"，只有命令步骤能用：
+ * AI 步骤的远端工具只能对准一台机器，审批步骤不碰机器。
+ */
+export type StepTarget =
+  | { kind: 'local' }
+  | { kind: 'host'; hostId: string }
+  | { kind: 'hosts'; hostIds: string[] }
+  | { kind: 'tag'; tag: string };
+
+/** 单台主机时是它的 id；本机、多台、按 tag 都是 `null`。 */
+export function singleHost(target: StepTarget): string | null {
+  return target.kind === 'host' ? target.hostId : null;
+}
+
+/** 会不会在多台机器上各跑一次。 */
+export function fansOut(target: StepTarget): boolean {
+  return target.kind === 'hosts' || target.kind === 'tag';
+}
+
+/** 给人看的执行位置。`nameOf` 把主机 id 换成名字，找不到时调用方自己兜底。 */
+export function describeTarget(target: StepTarget, nameOf: (id: string) => string): string {
+  switch (target.kind) {
+    case 'local':
+      return '本机';
+    case 'host':
+      return nameOf(target.hostId);
+    case 'hosts': {
+      const names = target.hostIds.map(nameOf);
+      return names.length > 2 ? `${names.slice(0, 2).join('、')} 等 ${names.length} 台` : names.join('、') || '（还没选主机）';
+    }
+    case 'tag':
+      return target.tag.trim() ? `带 ${target.tag.trim()} 的全部主机` : '（还没填 tag）';
+  }
+}
+
+type RawSelector = { on?: string; host_id?: string; host_ids?: string[]; tag?: string };
+
+/** 编辑器的执行位置 → spec 里的 `host`。本机不写（和原来一样）。 */
+function selectorOf(target: StepTarget): Record<string, unknown> | null {
+  switch (target.kind) {
+    case 'local':
+      return null;
+    case 'host':
+      return { on: 'host', host_id: target.hostId };
+    case 'hosts':
+      return { on: 'hosts', host_ids: [...target.hostIds] };
+    case 'tag':
+      return { on: 'tag', tag: target.tag.trim() };
+  }
+}
+
+/** spec 里的 `host` → 编辑器的执行位置。认不出的返回 `null`。 */
+function targetOf(host: RawSelector | undefined): StepTarget | null {
+  if (!host || host.on === 'local') return { kind: 'local' };
+  if (host.on === 'host' && host.host_id) return { kind: 'host', hostId: host.host_id };
+  if (host.on === 'hosts' && Array.isArray(host.host_ids)) return { kind: 'hosts', hostIds: [...host.host_ids] };
+  if (host.on === 'tag' && typeof host.tag === 'string') return { kind: 'tag', tag: host.tag };
+  return null;
+}
+
 export interface Step {
   /** 仅用于列表渲染的稳定 key，不进 spec。 */
   uid: string;
@@ -59,8 +120,8 @@ export interface Step {
   title: string;
   /** AI 步骤是提示词；shell 步骤是命令行；审批步骤忽略。 */
   body: string;
-  /** 在哪台机器上。`null` = 本机（中心）。 */
-  hostId: string | null;
+  /** 在哪儿执行。 */
+  target: StepTarget;
   /** 只对 AI 步骤有意义。 */
   runner: Runner;
   /**
@@ -143,7 +204,7 @@ export function newStep(kind: StepKind = 'ai'): Step {
     kind,
     title: kind === 'ai' ? '让 AI 做一件事' : kind === 'shell' ? '运行一条命令' : '人工确认',
     body: '',
-    hostId: null,
+    target: { kind: 'local' },
     runner: { kind: 'center' },
     model: DEFAULT_MODEL,
     tools: [...REACH_TOOLS.read_only],
@@ -262,7 +323,8 @@ export function toSpec(comp: Composition): DagSpec {
       node.config = config;
     }
 
-    if (step.hostId) node.host = { on: 'host', host_id: step.hostId };
+    const host = selectorOf(step.target);
+    if (host) node.host = host;
     else delete node.host;
 
     // 把选中的那几步的结果喂给这一步。**不串起来的话，"按顺序"就没有意义**
@@ -339,12 +401,13 @@ export function fromSpec(spec: DagSpec): Composition | null {
   for (const node of nodes) {
     const config = node.config as Record<string, unknown> | undefined;
     if (!config) return null;
-    const host = node.host as { on?: string; host_id?: string } | undefined;
-    // 按 tag 选主机在步骤列表里表示不了
-    if (host && host.on !== 'host') return null;
+    const target = targetOf(node.host as RawSelector | undefined);
+    if (target === null) return null;
 
     const kind = config.kind as string;
     if (kind !== 'ai' && kind !== 'shell' && kind !== 'approval') return null;
+    // 只有命令步骤能在多台机器上各跑一次；别的步骤这样写，编辑器表示不了（后端也不收）
+    if (fansOut(target) && kind !== 'shell') return null;
     // api executor 是另一回事（自建 Messages 循环），步骤列表不覆盖
     if (kind === 'ai' && config.executor === 'api') return null;
 
@@ -363,7 +426,7 @@ export function fromSpec(spec: DagSpec): Composition | null {
         (config.title as string) ??
         (node.key as string),
       body: kind === 'shell' ? ((config.command as string) ?? '') : ((config.prompt as string) ?? ''),
-      hostId: host?.host_id ?? null,
+      target,
       runner:
         config.executor === 'host_cli'
           ? { kind: 'host_cli', cli: (config.cli as string) ?? 'claude' }

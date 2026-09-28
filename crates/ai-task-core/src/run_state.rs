@@ -303,6 +303,9 @@ impl RunState {
             | RunEventBody::AgentThinking { .. }
             | RunEventBody::AgentText { .. }
             | RunEventBody::ToolCompleted { .. }
+            // 展开到多台机器时每台的明细：节点的结论由 NodeFinished 给出
+            | RunEventBody::HostsResolved { .. }
+            | RunEventBody::HostExecFinished { .. }
             | RunEventBody::Log { .. } => {}
         }
         Ok(())

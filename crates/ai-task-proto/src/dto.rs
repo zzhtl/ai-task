@@ -16,7 +16,9 @@ use ts_rs::TS;
 
 use crate::ids::{ApprovalId, HostId, RuleId, RunId, ScheduleId, SkillId, TaskId, TaskVersionId};
 use crate::money::UsdMicros;
-use crate::spec::{DagSpec, MisfirePolicy, OverlapPolicy, PolicyEffect, RunStatus, TriggerKind};
+use crate::spec::{
+    DagSpec, HostSelector, MisfirePolicy, OverlapPolicy, PolicyEffect, RunStatus, TriggerKind,
+};
 
 /// 统一错误信封。
 ///
@@ -347,6 +349,22 @@ pub struct RunDetail {
     /// 定时触发时是哪条定时。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule_id: Option<ScheduleId>,
+    /// 临时命令的执行没有任务页可去，也不能按任务重跑。
+    #[serde(default)]
+    pub task_kind: TaskKind,
+}
+
+/// 任务的种类。客户端要容忍以后新增的取值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskKind {
+    /// 普通任务。
+    #[default]
+    Task,
+    /// 临时批量执行命令挂在它下面：每个 workspace 一个，不在任务列表里，
+    /// 不能改、不能删、不能手动触发、不能加定时。
+    Adhoc,
 }
 
 /// `GET /api/v1/tasks/{id}/versions/{no}` —— 一个版本的编排快照。版本不可变。
@@ -754,6 +772,61 @@ pub struct HostCli {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+}
+
+// ---------------------------------------------------------------- 临时批量执行
+
+/// `POST /api/v1/commands/check`：先看这条命令在每台机器上会被策略怎么判，不执行。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(deny_unknown_fields)]
+pub struct CheckCommand {
+    /// 交给目标机上的 `sh -c`。
+    pub command: String,
+    /// 在哪些机器上跑：一台、勾选的几台、或者某个 tag 下的全部。不支持中心本机。
+    pub targets: HostSelector,
+}
+
+/// `POST /api/v1/commands`：在几台机器上各跑一次，返回新建的 run。需要 `Idempotency-Key`。
+///
+/// 和 check 同一套判法，执行时会再判一次：有任何一台被策略拒绝就整体不执行；
+/// 有需要人工确认的，必须带 `confirm: true`。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(deny_unknown_fields)]
+pub struct RunCommand {
+    pub command: String,
+    pub targets: HostSelector,
+    /// 单台机器上的超时，1–3600 秒，默认 300。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_s: Option<u32>,
+    /// 看过需要人工确认的那些机器，确认要跑。
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+/// 一台机器上的策略判决。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct HostVerdict {
+    pub host_id: HostId,
+    pub host_name: String,
+    pub effect: PolicyEffect,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_name: Option<String>,
+}
+
+/// `POST /api/v1/commands/check` 的响应。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CommandCheck {
+    /// 按主机名排。
+    pub hosts: Vec<HostVerdict>,
+    /// 被策略拒绝的台数。大于 0 时这条命令不能执行。
+    pub denied: u32,
+    /// 需要人工确认的台数。执行时要带 `confirm: true`。
+    pub needs_confirmation: u32,
 }
 
 // ---------------------------------------------------------------- 内部：策略判决

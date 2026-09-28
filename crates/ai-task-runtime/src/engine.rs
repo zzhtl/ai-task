@@ -273,6 +273,7 @@ impl RunEngine {
             executor: Arc::clone(&self.executor),
             sink: writer,
             resource_exceeded: std::sync::atomic::AtomicBool::new(false),
+            fanout: Mutex::new(std::collections::HashMap::new()),
             env: NodeEnv {
                 workdir: workdir.path(),
                 system_append: system_append.as_deref(),
@@ -471,6 +472,14 @@ struct ClaudeNodeRunner<'a> {
     env: NodeEnv<'a>,
     /// 任一节点被 cgroup 限额打死过。整个 run 因此落 `resource_exceeded`。
     resource_exceeded: std::sync::atomic::AtomicBool,
+    /// 展开到多台机器的步骤：目标名单和每台的结局，跨重试保留——重试只重跑失败的那几台。
+    fanout: Mutex<std::collections::HashMap<NodeKey, FanoutMemo>>,
+}
+
+/// 一个展开步骤跑到哪了。
+struct FanoutMemo {
+    targets: Vec<crate::fanout::Target>,
+    done: BTreeMap<ai_task_proto::HostId, crate::fanout::HostOutcome>,
 }
 
 #[async_trait::async_trait]
@@ -734,6 +743,14 @@ impl ClaudeNodeRunner<'_> {
             })));
         }
 
+        if node
+            .host
+            .as_ref()
+            .is_some_and(ai_task_proto::HostSelector::fans_out)
+        {
+            return self.run_shell_fanout(shell, ctx, config).await;
+        }
+
         // 默认工作目录取决于落在哪台机器上。**中心的 run workdir 在远端不存在**，
         // 拿它当远端的 cwd 会让每个远端 shell 节点都以 ENOENT 起手。
         // 远端默认 "."：SSH exec channel 的 cwd 就是登录用户的家目录。
@@ -816,6 +833,215 @@ impl ClaudeNodeRunner<'_> {
             "shell 节点执行结束"
         );
         crate::host_exec::to_node_result(&outcome)
+    }
+
+    /// shell 节点在多台机器上各跑一次（勾选的几台，或某个 tag 下的全部）。
+    ///
+    /// 名单在第一次执行时解析并写进事件日志，重试沿用同一份——按 tag 解析的话，
+    /// 两次重试之间有人给主机加了 tag，名单不该跟着变。编排逻辑在 [`crate::fanout`]。
+    async fn run_shell_fanout(
+        &self,
+        shell: &ai_task_proto::ShellNode,
+        ctx: &NodeRunContext<'_>,
+        config: &crate::host_exec::HostExecConfig,
+    ) -> NodeResult {
+        use crate::fanout::{self, HostOutcome};
+
+        let node = ctx.node;
+        let saved = self.fanout.lock().await.remove(&node.key);
+        let mut memo = match saved {
+            Some(memo) => memo,
+            None => {
+                let targets = match self.resolve_targets(node.host.as_ref()).await {
+                    Ok(targets) => targets,
+                    Err(reason) => return NodeResult::failed(reason),
+                };
+                let _ = self
+                    .sink
+                    .lock()
+                    .await
+                    .node(
+                        &node.key,
+                        RunEventBody::HostsResolved {
+                            hosts: targets
+                                .iter()
+                                .map(|t| ai_task_proto::HostTarget {
+                                    host_id: t.host_id,
+                                    name: t.name.clone(),
+                                })
+                                .collect(),
+                        },
+                    )
+                    .await;
+                FanoutMemo {
+                    targets,
+                    done: BTreeMap::new(),
+                }
+            }
+        };
+
+        // 远端默认 "."：SSH exec channel 的 cwd 就是登录用户的家目录
+        let cwd = shell.working_dir.clone().unwrap_or_else(|| ".".to_owned());
+        let roots = vec![cwd.clone()];
+        let timeout_ms = node
+            .timeout_s
+            .map_or(30 * 60 * 1000, |s| u64::from(s).saturating_mul(1000));
+        let attempt = ctx.attempt;
+
+        let exec = |target: fanout::Target| {
+            let (cwd, roots) = (&cwd, &roots);
+            async move {
+                if target.missing {
+                    return HostOutcome::failed("主机已删除，或者不在这个工作区", 0);
+                }
+                let started = std::time::Instant::now();
+                let selector = ai_task_proto::HostSelector::Host {
+                    host_id: target.host_id,
+                };
+                let result = crate::host_exec::run_command(
+                    self.env.store,
+                    config,
+                    crate::host_exec::Command {
+                        workspace_id: self.env.workspace_id,
+                        run_id: self.env.run_id,
+                        node_key: node.key.as_str(),
+                        selector: Some(&selector),
+                        command: &shell.command,
+                        cwd,
+                        timeout_ms,
+                        limits: node.limits,
+                        roots,
+                    },
+                )
+                .await;
+                let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                match result {
+                    Ok(outcome) => {
+                        // 单台怎么判成败（退出码、超时、被信号杀、内存超限）和单机节点完全一样
+                        let verdict = crate::host_exec::to_node_result(&outcome);
+                        HostOutcome {
+                            ok: verdict.status == NodeStatus::Succeeded,
+                            exit_code: outcome.result.exit_code,
+                            duration_ms,
+                            error: verdict.error,
+                            stdout: fanout::tail(&outcome.stdout, fanout::OUTPUT_TAIL_BYTES),
+                            stderr: fanout::tail(&outcome.stderr, fanout::OUTPUT_TAIL_BYTES),
+                            cgroup_mode: Some(format!("{:?}", outcome.cgroup_mode).to_lowercase()),
+                            resource_exceeded: crate::host_exec::is_resource_exceeded(&outcome),
+                        }
+                    }
+                    Err(err) => HostOutcome::failed(format!("目标机执行失败：{err}"), duration_ms),
+                }
+            }
+        };
+        // 每台跑完就写一条事件：界面上一台台亮起来，而不是等最慢的那台
+        let on_done = |target: fanout::Target, outcome: HostOutcome| async move {
+            let _ = self
+                .sink
+                .lock()
+                .await
+                .node(
+                    &node.key,
+                    RunEventBody::HostExecFinished {
+                        host_id: target.host_id,
+                        host_name: target.name,
+                        attempt,
+                        ok: outcome.ok,
+                        exit_code: outcome.exit_code,
+                        duration_ms: outcome.duration_ms,
+                        error: outcome.error.clone(),
+                        stdout: outcome.stdout.clone(),
+                        stderr: outcome.stderr.clone(),
+                        cgroup_mode: outcome.cgroup_mode.clone(),
+                    },
+                )
+                .await;
+            outcome
+        };
+
+        let todo = fanout::pending(&memo.targets, &memo.done);
+        let results = tokio::select! {
+            () = ctx.cancel.cancelled() => {
+                return NodeResult {
+                    status: NodeStatus::Cancelled,
+                    output: None,
+                    error: Some("run 已取消".into()),
+                    cost: UsdMicros::ZERO,
+                    cli_version: None,
+                };
+            }
+            results = fanout::execute(todo, fanout::CONCURRENCY, exec, on_done) => results,
+        };
+        memo.done.extend(results);
+
+        if memo.done.values().any(|o| o.resource_exceeded) {
+            self.resource_exceeded
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        let result = fanout::summarize(&memo.targets, &memo.done);
+        self.fanout.lock().await.insert(node.key.clone(), memo);
+        result
+    }
+
+    /// 展开步骤落到哪些机器上。
+    async fn resolve_targets(
+        &self,
+        selector: Option<&ai_task_proto::HostSelector>,
+    ) -> Result<Vec<crate::fanout::Target>, String> {
+        use ai_task_proto::{HostSelector, MAX_FANOUT_HOSTS};
+        let workspace_id = self.env.workspace_id;
+        match selector {
+            Some(HostSelector::Hosts { host_ids }) => {
+                let names = self
+                    .env
+                    .store
+                    .host_names(workspace_id, host_ids)
+                    .await
+                    .map_err(|err| format!("读主机列表失败：{err}"))?;
+                // 保存之后被删掉的主机照样列出来，记成失败：悄悄少跑一台比报错糟
+                Ok(host_ids
+                    .iter()
+                    .map(|id| match names.get(id) {
+                        Some(name) => crate::fanout::Target {
+                            host_id: *id,
+                            name: name.clone(),
+                            missing: false,
+                        },
+                        None => crate::fanout::Target {
+                            host_id: *id,
+                            name: format!("已删除的主机 {}", &id.to_string()[..8]),
+                            missing: true,
+                        },
+                    })
+                    .collect())
+            }
+            Some(HostSelector::Tag { tag }) => {
+                let hosts = self
+                    .env
+                    .store
+                    .hosts_with_tag(workspace_id, tag)
+                    .await
+                    .map_err(|err| format!("读主机列表失败：{err}"))?;
+                if hosts.is_empty() {
+                    return Err(format!("按 tag `{tag}` 没有匹配到任何主机"));
+                }
+                if hosts.len() > MAX_FANOUT_HOSTS {
+                    return Err(format!(
+                        "tag `{tag}` 下有 {} 台主机，超过一次最多 {MAX_FANOUT_HOSTS} 台。拆成几个 tag 分批跑",
+                        hosts.len()
+                    ));
+                }
+                Ok(hosts
+                    .into_iter()
+                    .map(|(host_id, name)| crate::fanout::Target {
+                        host_id,
+                        name,
+                        missing: false,
+                    })
+                    .collect())
+            }
+            _ => Err("这个步骤没有展开到多台机器".into()),
+        }
     }
 
     async fn run_ai(&self, ai: &ai_task_proto::AiNode, ctx: &NodeRunContext<'_>) -> NodeResult {

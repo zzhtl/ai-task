@@ -5,10 +5,14 @@
 // 同一个 Host 在四个文件里有四种定义，改一个字段要找四处。
 
 import { api } from './client';
+import type { CheckCommand } from './types/CheckCommand';
+import type { CommandCheck } from './types/CommandCheck';
 import type { EvaluatePolicy } from './types/EvaluatePolicy';
 import type { HostProbe } from './types/HostProbe';
 import type { Page } from './types/Page';
 import type { PolicyEvaluation } from './types/PolicyEvaluation';
+import type { RunCommand } from './types/RunCommand';
+import type { RunSummary } from './types/RunSummary';
 import type { SchedulePreview } from './types/SchedulePreview';
 import type { SkillDetail } from './types/SkillDetail';
 import type { UpdateSkill } from './types/UpdateSkill';
@@ -202,3 +206,14 @@ export function listAudit(query: AuditQuery = {}): Promise<Page<AuditItem>> {
   if (query.cursor) params.set('cursor', query.cursor);
   return api(`/api/v1/audit?${params}`);
 }
+
+/** 这条命令在每台机器上会被策略怎么判。不执行。 */
+export const checkCommand = (body: CheckCommand, signal?: AbortSignal) =>
+  api<CommandCheck>('/api/v1/commands/check', { method: 'POST', body, signal });
+
+/**
+ * 在几台机器上各跑一次，返回新建的 run。有被策略拒绝的是 409；
+ * 有需要确认的必须带 `confirm: true`，否则也是 409。
+ */
+export const runCommand = (body: RunCommand, idempotencyKey: string) =>
+  api<RunSummary>('/api/v1/commands', { method: 'POST', body, idempotencyKey });

@@ -7,6 +7,7 @@ pub mod approval;
 pub mod cron;
 pub mod dag;
 pub mod engine;
+mod fanout;
 pub mod host_exec;
 pub mod maintenance;
 pub mod scheduler;

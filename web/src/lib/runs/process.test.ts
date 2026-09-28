@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { groupProcess, isOpen, ProcessBuilder, RunTally, toolSummary, type Block } from './process';
+import { groupProcess, hostsBlockFromOutput, isOpen, ProcessBuilder, RunTally, toolSummary, type Block } from './process';
 import type { RunEvent } from '$api/types/RunEvent';
 
 let seq = 0;
@@ -302,5 +302,64 @@ describe('工具调用的一行摘要', () => {
     ['Unknown', { a: 1 }, '{"a":1}']
   ])('%s', (tool, input, expected) => {
     expect(toolSummary(tool, input)).toBe(expected);
+  });
+});
+
+describe('在多台机器上各跑一次', () => {
+  const hostsOf = (nodes: ReturnType<typeof groupProcess>) =>
+    nodes[0].blocks.filter((b): b is Extract<Block, { kind: 'hosts' }> => b.kind === 'hosts');
+
+  test('名单先到，每台跑完就填进同一块；重试覆盖上一次的结局', () => {
+    const nodes = groupProcess(
+      [
+        ev('c', { kind: 'node_started', attempt: 1 }),
+        ev('c', {
+          kind: 'hosts_resolved',
+          hosts: [
+            { host_id: 'h1', name: 'web-1' },
+            { host_id: 'h2', name: 'web-2' }
+          ]
+        }),
+        ev('c', { kind: 'host_exec_finished', host_id: 'h2', host_name: 'web-2', attempt: 1, ok: false, exit_code: 1, duration_ms: 30, error: '命令退出码 1', stderr: 'no space' }),
+        ev('c', { kind: 'host_exec_finished', host_id: 'h1', host_name: 'web-1', attempt: 1, ok: true, exit_code: 0, duration_ms: 20, stdout: 'ok' }),
+        ev('c', { kind: 'host_exec_finished', host_id: 'h2', host_name: 'web-2', attempt: 2, ok: true, exit_code: 0, duration_ms: 25, stdout: 'ok' })
+      ],
+      {}
+    );
+    const blocks = hostsOf(nodes);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].targets.map((t) => t.name)).toEqual(['web-1', 'web-2']);
+    expect(blocks[0].results.h1).toMatchObject({ ok: true, stdout: 'ok' });
+    expect(blocks[0].results.h2).toMatchObject({ ok: true, attempt: 2 });
+    expect(blocks[0].ended).toBe(false);
+  });
+
+  test('run 结束时还有机器没跑完，要说出来，不能一直显示"进行中"', () => {
+    const nodes = groupProcess(
+      [
+        ev('c', { kind: 'hosts_resolved', hosts: [{ host_id: 'h1', name: 'web-1' }, { host_id: 'h2', name: 'web-2' }] }),
+        ev('c', { kind: 'host_exec_finished', host_id: 'h1', host_name: 'web-1', attempt: 1, ok: true, duration_ms: 5 }),
+        ev(null, { kind: 'run_finished', status: 'cancelled', cost_usd: '0' })
+      ],
+      {}
+    );
+    expect(hostsOf(nodes)[0].ended).toBe(true);
+  });
+});
+
+describe('从步骤输出还原主机结果', () => {
+  test('多台展开的汇总按台还原；别的输出不认', () => {
+    const block = hostsBlockFromOutput({
+      total: 2,
+      failed: 1,
+      hosts: [
+        { host_id: 'h1', host: 'web-1', ok: true, exit_code: 0, stdout: 'ok', stderr: '', error: null },
+        { host_id: 'h2', host: 'web-2', ok: false, exit_code: 1, stdout: '', stderr: 'no space', error: '命令退出码 1' }
+      ]
+    });
+    expect(block?.targets.map((t) => t.name)).toEqual(['web-1', 'web-2']);
+    expect(block?.results.h2).toMatchObject({ ok: false, exitCode: 1, error: '命令退出码 1', durationMs: null });
+    expect(hostsBlockFromOutput({ stdout: 'x', exit_code: 0 })).toBeNull();
+    expect(hostsBlockFromOutput('文本')).toBeNull();
   });
 });

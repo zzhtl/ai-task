@@ -235,12 +235,14 @@ impl Store {
         id: HostId,
     ) -> Result<Vec<String>, StoreError> {
         let rows = sqlx::query(
+            // 单台（host_id）和勾选多台（host_ids 里任一个）都算钉在这台机器上。
+            // 临时命令不算：它的每一版都是已经跑完的一次性记录，不该挡住删主机。
             r#"SELECT t.name FROM tasks t
                JOIN task_versions v ON v.id = t.current_version_id
-               WHERE t.workspace_id = $1
+               WHERE t.workspace_id = $1 AND t.kind = 'task'
                  AND jsonb_path_exists(
                        v.dag_spec,
-                       '$.nodes[*].host ? (@.on == "host" && @.host_id == $id)',
+                       '$.nodes[*].host ? ((@.on == "host" && @.host_id == $id) || (@.on == "hosts" && @.host_ids[*] == $id))',
                        jsonb_build_object('id', $2::text))
                ORDER BY t.name"#,
         )
@@ -314,6 +316,56 @@ impl Store {
             .await?;
         row.map(|row| row.try_get("tags").map_err(StoreError::from))
             .transpose()
+    }
+
+    /// 一批主机的名字和 tag，按名字排。临时命令判策略要看每台机器的 tag。
+    /// 不在这个 workspace 里的不返回。
+    pub async fn host_briefs(
+        &self,
+        workspace_id: WorkspaceId,
+        ids: &[HostId],
+    ) -> Result<Vec<(HostId, String, Vec<String>)>, StoreError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids: Vec<uuid::Uuid> = ids.iter().map(|id| uuid::Uuid::from(*id)).collect();
+        let rows = sqlx::query(
+            "SELECT id, name, tags FROM hosts WHERE workspace_id = $1 AND id = ANY($2) ORDER BY name",
+        )
+        .bind(uuid::Uuid::from(workspace_id))
+        .bind(&ids)
+        .fetch_all(self.pool())
+        .await?;
+        rows.iter()
+            .map(|row| {
+                Ok((
+                    HostId(row.try_get("id")?),
+                    row.try_get("name")?,
+                    row.try_get("tags")?,
+                ))
+            })
+            .collect()
+    }
+
+    /// 带某个 tag 的主机，按名字排。按 tag 下发时在执行那一刻解析。
+    ///
+    /// 写成 `tags @> ARRAY[$2]` 而不是 `$2 = ANY(tags)`：前者用得上 tags 上的 GIN 索引。
+    pub async fn hosts_with_tag(
+        &self,
+        workspace_id: WorkspaceId,
+        tag: &str,
+    ) -> Result<Vec<(HostId, String)>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, name FROM hosts WHERE workspace_id = $1 AND tags @> ARRAY[$2]::text[]
+             ORDER BY name",
+        )
+        .bind(uuid::Uuid::from(workspace_id))
+        .bind(tag)
+        .fetch_all(self.pool())
+        .await?;
+        rows.iter()
+            .map(|row| Ok((HostId(row.try_get("id")?), row.try_get("name")?)))
+            .collect()
     }
 
     /// 一批主机的名字。给只拿得到 id 的地方（审批卡）显示用；不在这个 workspace 的不返回。

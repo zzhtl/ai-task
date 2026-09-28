@@ -32,6 +32,8 @@
   import Process from '$lib/runs/Process.svelte';
   import StepNav from '$lib/runs/StepNav.svelte';
   import RunOutput from '$lib/runs/RunOutput.svelte';
+  import HostResults from '$lib/runs/HostResults.svelte';
+  import { hostsBlockFromOutput } from '$lib/runs/process';
   import RawEvents from '$lib/runs/RawEvents.svelte';
   import ResourceChart from '$lib/metrics/ResourceChart.svelte';
   import DriftPanel from '$lib/drift/DriftPanel.svelte';
@@ -242,6 +244,16 @@
   /** 事件比接口更新：执行中以事件推出来的状态为准。 */
   const status = $derived(live.status ?? detail?.status ?? null);
   const terminal = $derived(status !== null && isTerminal(status));
+  /** 临时命令：没有任务页，也不能按任务重跑。 */
+  const adhoc = $derived(detail?.task_kind === 'adhoc');
+  /** 临时命令跑的是哪条命令：它没有任务页可看，只能在这里写出来。 */
+  const adhocCommand = $derived.by(() => {
+    if (!adhoc) return null;
+    const config = version?.spec.nodes[0]?.config as { kind?: string; command?: string } | undefined;
+    return config?.kind === 'shell' ? (config.command ?? null) : null;
+  });
+  /** 多台展开的步骤的输出，按台摆出来。 */
+  const outputHosts = $derived(detail ? hostsBlockFromOutput(detail.output) : null);
   const failedLike = $derived(
     status !== null && (FAILED_STATUSES.includes(status) || status === 'cancelled')
   );
@@ -431,17 +443,28 @@
   {/if}
   {#snippet sub()}
     {#if detail}
-      <span>
-        <a class="link" href="/tasks/{detail.task_id}">v{detail.version_no}</a>
-        {#if detail.current_version_no !== detail.version_no}
-          <span class="faint">（任务现在是 v{detail.current_version_no}）</span>
-        {/if}
-      </span>
+      {#if adhoc}
+        <!-- 临时命令没有任务页可去：它挂在一个不对外的系统任务下 -->
+        <span class="tag">临时命令</span>
+      {:else}
+        <span>
+          <a class="link" href="/tasks/{detail.task_id}">v{detail.version_no}</a>
+          {#if detail.current_version_no !== detail.version_no}
+            <span class="faint">（任务现在是 v{detail.current_version_no}）</span>
+          {/if}
+        </span>
+      {/if}
       <span>{triggerLabel(detail.trigger)}触发{detail.triggered_by ? ` · ${detail.triggered_by}` : ''}</span>
       <span title="入队 {stamp(detail.created_at)}（{DISPLAY_TIMEZONE}）">开始 {startedAt ? stamp(startedAt) : '—'}</span>
       <span>耗时 {elapsed}</span>
       <span>花费 {moneyMicros(costMicros)}</span>
       <span><CopyButton text={runId} display={runId.slice(0, 8)} label="复制执行 id" /></span>
+      {#if adhocCommand}
+        <span class="adhoc-command">
+          <code>{adhocCommand}</code>
+          <CopyButton text={adhocCommand} label="复制命令" />
+        </span>
+      {/if}
     {/if}
   {/snippet}
   {#snippet actions()}
@@ -450,28 +473,35 @@
         {#if canOperate}
           <button class="btn-danger" onclick={() => (confirmingCancel = true)} disabled={busy}>取消执行</button>
         {/if}
-      {:else if canOperate}
+      {:else if canOperate && !adhoc}
         <button class:btn-primary={failedLike} onclick={() => rerun(false)} disabled={busy}>
           {detail.dry_run ? '再影子跑一次' : '重跑'}
         </button>
       {/if}
+      <!-- 临时命令没跑完时菜单里一项都没有，空菜单不如不给 -->
+      {#if !adhoc || (canOperate && terminal)}
       <Dropdown label="更多" disabled={busy}>
-        <a href="/tasks/{detail.task_id}" role="menuitem">
-          查看任务
-          <span class="hint">当前是 v{detail.current_version_no}</span>
-        </a>
-        {#if canOperate && terminal}
+        {#if !adhoc}
+          <a href="/tasks/{detail.task_id}" role="menuitem">
+            查看任务
+            <span class="hint">当前是 v{detail.current_version_no}</span>
+          </a>
+        {/if}
+        {#if canOperate && terminal && !adhoc}
           <button onclick={() => rerun(true)}>
             影子重跑并对比
             <span class="hint">副作用只记录不落地，跑完和这一次逐字段比较</span>
           </button>
           <hr />
+        {/if}
+        {#if canOperate && terminal}
           <button class="danger" onclick={() => (confirmingDelete = true)}>
             删除这条记录
             <span class="hint">连同事件流和资源采样</span>
           </button>
         {/if}
       </Dropdown>
+      {/if}
     {/if}
   {/snippet}
 </PageHeader>
@@ -534,7 +564,11 @@
       <h2>结果</h2>
       <span class="sub">最后一个成功步骤的输出</span>
     </header>
-    <RunOutput output={detail.output} />
+    {#if outputHosts}
+      <HostResults block={outputHosts} />
+    {:else}
+      <RunOutput output={detail.output} />
+    {/if}
   </section>
 {/if}
 
@@ -683,5 +717,18 @@
     .nav {
       display: none;
     }
+  }
+  .adhoc-command {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s1);
+    max-width: 100%;
+  }
+  .adhoc-command code {
+    padding: 1px 6px;
+    border-radius: var(--r1);
+    background: var(--surface-2);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 </style>

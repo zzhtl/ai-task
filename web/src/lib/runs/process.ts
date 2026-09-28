@@ -55,6 +55,30 @@ export type GateBlock = {
   ended: boolean;
 };
 
+/** 一台机器上的结局。 */
+export interface HostResult {
+  ok: boolean;
+  exitCode: number | null;
+  /** 从节点输出的汇总里还原时没有耗时。 */
+  durationMs: number | null;
+  error: string | null;
+  stdout: string;
+  stderr: string;
+  cgroupMode: string | null;
+  attempt: number;
+}
+
+/** 在多台机器上各跑一次的命令步骤：名单加每台的结局。 */
+export type HostsBlock = {
+  kind: 'hosts';
+  seq: number;
+  targets: Array<{ hostId: string; name: string }>;
+  /** host_id → 最近一次的结局。重试会覆盖上一次的。还没跑完的不在里面。 */
+  results: Record<string, HostResult>;
+  /** run 已经结束而有的机器始终没有结局（被取消、被中断）。 */
+  ended: boolean;
+};
+
 export type Block =
   /** 拉起 AI 的命令行。 */
   | { kind: 'command'; seq: number; command: string; ranOn: string | null }
@@ -63,6 +87,7 @@ export type Block =
   | { kind: 'say'; seq: number; text: string }
   | ToolBlock
   | GateBlock
+  | HostsBlock
   | { kind: 'note'; seq: number; level: string; text: string; detail?: string }
   | { kind: 'retry'; seq: number; attempt: number; delayMs: number; reason: string; fedBack: boolean }
   | {
@@ -128,6 +153,8 @@ export class ProcessBuilder {
   private readonly tools = new Map<string, Slot>();
   /** approval_id → 那张审批卡。 */
   private readonly gates = new Map<string, Slot>();
+  /** 节点 key → 它的主机结果块。每台跑完就往里填。 */
+  private readonly hosts = new Map<string, Slot>();
   private readonly dirty = new Set<string>();
   private readonly snapshots = new Map<string, NodeRun>();
 
@@ -178,6 +205,10 @@ export class ProcessBuilder {
         if ((slot.node.blocks[slot.index] as ToolBlock).ok === null) {
           this.patch<ToolBlock>(slot, { ended: true });
         }
+      }
+      for (const slot of this.hosts.values()) {
+        const block = slot.node.blocks[slot.index] as HostsBlock;
+        if (block.targets.some((t) => !block.results[t.hostId])) this.patch<HostsBlock>(slot, { ended: true });
       }
       // 不收口的话这一步一直转圈，耗时一直往上涨
       for (const node of this.nodes.values()) {
@@ -353,6 +384,39 @@ export class ProcessBuilder {
           text: `行为漂移：输入条件没变，${b.changed_paths.join('、')} 变了`
         });
         break;
+      case 'hosts_resolved': {
+        const block: HostsBlock = {
+          kind: 'hosts',
+          seq,
+          targets: b.hosts.map((h) => ({ hostId: h.host_id, name: h.name })),
+          results: {},
+          ended: false
+        };
+        this.append(node, block);
+        this.hosts.set(node.key, { node, index: node.blocks.length - 1 });
+        break;
+      }
+      case 'host_exec_finished': {
+        const slot = this.hosts.get(node.key);
+        if (!slot) break;
+        const block = slot.node.blocks[slot.index] as HostsBlock;
+        this.patch<HostsBlock>(slot, {
+          results: {
+            ...block.results,
+            [b.host_id]: {
+              ok: b.ok,
+              exitCode: b.exit_code ?? null,
+              durationMs: b.duration_ms,
+              error: b.error ?? null,
+              stdout: b.stdout ?? '',
+              stderr: b.stderr ?? '',
+              cgroupMode: b.cgroup_mode ?? null,
+              attempt: b.attempt
+            }
+          }
+        });
+        break;
+      }
       case 'map_expanded':
         this.append(node, {
           kind: 'note',
@@ -423,6 +487,34 @@ export class ProcessBuilder {
     slot.node.blocks[slot.index] = { ...(slot.node.blocks[slot.index] as T), ...changes };
     this.dirty.add(slot.node.key);
   }
+}
+
+/**
+ * 多台展开的步骤的输出（`{ total, failed, hosts: [...] }`）→ 主机结果块。
+ * 执行详情的"结果"卡片用它，免得把一大段汇总 JSON 直接摆给人看。认不出的返回 `null`。
+ */
+export function hostsBlockFromOutput(output: unknown): HostsBlock | null {
+  if (!output || typeof output !== 'object') return null;
+  const o = output as { total?: unknown; hosts?: unknown };
+  if (typeof o.total !== 'number' || !Array.isArray(o.hosts)) return null;
+  const rows = o.hosts as Array<Record<string, unknown>>;
+  const targets: HostsBlock['targets'] = [];
+  const results: HostsBlock['results'] = {};
+  for (const h of rows) {
+    if (typeof h.host_id !== 'string') return null;
+    targets.push({ hostId: h.host_id, name: String(h.host ?? h.host_id) });
+    results[h.host_id] = {
+      ok: h.ok === true,
+      exitCode: typeof h.exit_code === 'number' ? h.exit_code : null,
+      durationMs: null,
+      error: typeof h.error === 'string' ? h.error : null,
+      stdout: typeof h.stdout === 'string' ? h.stdout : '',
+      stderr: typeof h.stderr === 'string' ? h.stderr : '',
+      cgroupMode: null,
+      attempt: 1
+    };
+  }
+  return { kind: 'hosts', seq: 0, targets, results, ended: false };
 }
 
 /**

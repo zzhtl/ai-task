@@ -71,10 +71,12 @@ impl Store {
         .fetch_one(self.pool())
         .await?;
 
-        let tasks: i64 = sqlx::query_scalar("SELECT count(*) FROM tasks WHERE workspace_id = $1")
-            .bind(uuid::Uuid::from(workspace_id))
-            .fetch_one(self.pool())
-            .await?;
+        let tasks: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM tasks WHERE workspace_id = $1 AND kind = 'task'",
+        )
+        .bind(uuid::Uuid::from(workspace_id))
+        .fetch_one(self.pool())
+        .await?;
 
         Ok(OverviewStats {
             window_hours,
@@ -176,7 +178,8 @@ impl Store {
             "))[1] AS last_error
              FROM runs r
              JOIN tasks t ON t.id = r.task_id
-             WHERE r.workspace_id = $1 AND r.created_at >= $2 AND NOT r.dry_run
+             -- 临时命令不是任务，不进「失败最多的任务」；它们的失败照样出现在「最近失败」里
+             WHERE r.workspace_id = $1 AND r.created_at >= $2 AND NOT r.dry_run AND t.kind = 'task'
              GROUP BY r.task_id, t.name
              HAVING count(*) FILTER (WHERE r.status IN ",
             failed_statuses!(),

@@ -2,7 +2,7 @@
 //
 // 拦不住的留给后端的 422，但那是保存之后的事；这里的每一条都是"现在就看得出来、
 // 不用等服务器"的，而且能指到具体哪一步。
-import type { Composition } from './compose';
+import { fansOut, type Composition } from './compose';
 
 export interface Problem {
   /** 属于哪一步；整个任务层面的问题是 `null`。 */
@@ -24,6 +24,12 @@ export function problemsOf(name: string, comp: Composition): Problem[] {
     const push = (level: Problem['level'], text: string) => out.push({ stepUid: step.uid, level, text });
 
     if (step.kind !== 'approval' && step.body.trim() === '') push('error', `${at}还没写要做什么`);
+
+    if (fansOut(step.target) && step.kind !== 'shell') {
+      push('error', `${at}只能在一台机器上执行：在多台机器上各跑一次只支持命令步骤`);
+    }
+    if (step.target.kind === 'hosts' && step.target.hostIds.length === 0) push('error', `${at}还没选主机`);
+    if (step.target.kind === 'tag' && step.target.tag.trim() === '') push('error', `${at}还没选 tag`);
 
     if (step.kind === 'ai') {
       if (step.budgetUsd !== null && !MONEY.test(step.budgetUsd.trim())) push('error', `${at}的花费上限不是金额`);

@@ -369,9 +369,22 @@ pub enum HostSelector {
     Local,
     /// 指定主机。
     Host { host_id: HostId },
-    /// 命中 tag 的所有主机各跑一次。
+    /// 勾选的几台主机各跑一次。只有 shell 步骤能用。
+    Hosts { host_ids: Vec<HostId> },
+    /// 命中 tag 的所有主机各跑一次，按执行那一刻的 tag 解析。只有 shell 步骤能用。
     Tag { tag: String },
 }
+
+impl HostSelector {
+    /// 会不会展开到多台机器上各跑一次。
+    #[must_use]
+    pub fn fans_out(&self) -> bool {
+        matches!(self, Self::Hosts { .. } | Self::Tag { .. })
+    }
+}
+
+/// 一个步骤最多展开到几台机器。再多就该分批，而不是一次把整个机房点一遍。
+pub const MAX_FANOUT_HOSTS: usize = 100;
 
 /// AI 执行内核。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]

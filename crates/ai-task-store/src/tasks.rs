@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use ai_task_proto::{DagSpec, TaskId, TaskVersionId, WorkspaceId};
+use ai_task_proto::{DagSpec, TaskId, TaskKind, TaskVersionId, WorkspaceId};
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 
@@ -326,7 +326,7 @@ impl Store {
         sqlx::query(
             "SELECT id, workspace_id, name, description, current_version_id, enabled,
                     version, created_at, updated_at
-             FROM tasks WHERE workspace_id = $1
+             FROM tasks WHERE workspace_id = $1 AND kind = 'task'
                AND ($2::timestamptz IS NULL OR (created_at, id) < ($2, $3))
              ORDER BY created_at DESC, id DESC LIMIT $4",
         )
@@ -440,6 +440,83 @@ impl Store {
         version_from_row(&row)
     }
 
+    /// 任务的种类。`None` 表示不在这个 workspace 里。
+    pub async fn task_kind(
+        &self,
+        workspace_id: WorkspaceId,
+        id: TaskId,
+    ) -> Result<Option<TaskKind>, StoreError> {
+        let kind: Option<String> =
+            sqlx::query_scalar("SELECT kind FROM tasks WHERE id = $1 AND workspace_id = $2")
+                .bind(uuid::Uuid::from(id))
+                .bind(uuid::Uuid::from(workspace_id))
+                .fetch_optional(self.pool())
+                .await?;
+        kind.as_deref().map(parse_task_kind).transpose()
+    }
+
+    /// 记下一次临时命令：取（没有就建）这个 workspace 的系统任务，给它插一个新版本。
+    ///
+    /// 返回的版本就是这次要跑的东西，调用方拿它建 run。系统任务第一次建的时候可能
+    /// 两个请求一起来，靠部分唯一索引 `ON CONFLICT DO NOTHING`；版本号靠锁住任务行
+    /// 再取最大值——和 `update_task` 一样，不加锁两个并发请求会拿到同一个版本号。
+    pub async fn record_adhoc_command(
+        &self,
+        workspace_id: WorkspaceId,
+        spec: &DagSpec,
+    ) -> Result<(TaskId, TaskVersionId), StoreError> {
+        let spec_json = serde_json::to_value(spec).map_err(|err| StoreError::Corrupt {
+            what: "DagSpec",
+            detail: err.to_string(),
+        })?;
+        let mut tx = self.pool().begin().await?;
+
+        sqlx::query(
+            "INSERT INTO tasks (id, workspace_id, name, description, kind, enabled)
+             VALUES ($1, $2, '临时命令', '在主机页批量执行的命令都记在这里', 'adhoc', true)
+             ON CONFLICT (workspace_id) WHERE kind = 'adhoc' DO NOTHING",
+        )
+        .bind(uuid::Uuid::from(TaskId::new()))
+        .bind(uuid::Uuid::from(workspace_id))
+        .execute(&mut *tx)
+        .await?;
+        let task_id: uuid::Uuid = sqlx::query_scalar(
+            "SELECT id FROM tasks WHERE workspace_id = $1 AND kind = 'adhoc' FOR UPDATE",
+        )
+        .bind(uuid::Uuid::from(workspace_id))
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let next_no: i32 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(version_no), 0) + 1 FROM task_versions WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let version_id = TaskVersionId::new();
+        sqlx::query(
+            "INSERT INTO task_versions (id, task_id, version_no, dag_spec, rules, rules_hash)
+             VALUES ($1, $2, $3, $4, '{}', '')",
+        )
+        .bind(uuid::Uuid::from(version_id))
+        .bind(task_id)
+        .bind(next_no)
+        .bind(&spec_json)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE tasks SET current_version_id = $2, version = version + 1, updated_at = now()
+             WHERE id = $1",
+        )
+        .bind(task_id)
+        .bind(uuid::Uuid::from(version_id))
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok((TaskId(task_id), version_id))
+    }
+
     /// 一批任务的名字。列表页补任务名用：一页一次查询，不按行查。
     pub async fn task_names(
         &self,
@@ -459,6 +536,17 @@ impl Store {
         rows.into_iter()
             .map(|row| Ok((TaskId(row.try_get("id")?), row.try_get("name")?)))
             .collect()
+    }
+}
+
+pub(crate) fn parse_task_kind(kind: &str) -> Result<TaskKind, StoreError> {
+    match kind {
+        "task" => Ok(TaskKind::Task),
+        "adhoc" => Ok(TaskKind::Adhoc),
+        other => Err(StoreError::Corrupt {
+            what: "tasks.kind",
+            detail: format!("认不出的任务种类 `{other}`"),
+        }),
     }
 }
 

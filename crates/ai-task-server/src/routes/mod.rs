@@ -3,6 +3,7 @@
 pub mod approvals;
 pub mod audit;
 pub mod auth;
+pub mod commands;
 pub mod drift;
 pub mod health;
 pub mod hosts;
@@ -65,6 +66,8 @@ fn build_router(state: AppState) -> Router {
         .route("/hosts", get(hosts::list).post(hosts::create))
         .route("/hosts/{id}", put(hosts::update).delete(hosts::delete))
         .route("/hosts/{id}/probe", post(hosts::probe))
+        .route("/commands", post(commands::run))
+        .route("/commands/check", post(commands::check))
         .route("/schedules", get(schedules::list).post(schedules::create))
         // 静态段优先于 `{id}`：preview 不会被当成一个定时的 id
         .route("/schedules/preview", get(schedules::preview))

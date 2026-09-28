@@ -3,6 +3,7 @@ import type { RunId } from "./RunId";
 import type { RunStatus } from "./RunStatus";
 import type { ScheduleId } from "./ScheduleId";
 import type { TaskId } from "./TaskId";
+import type { TaskKind } from "./TaskKind";
 import type { TaskVersionId } from "./TaskVersionId";
 import type { TriggerKind } from "./TriggerKind";
 import type { UsdMicros } from "./UsdMicros";
@@ -39,7 +40,11 @@ triggered_by?: string | null,
 /**
  * 定时触发时是哪条定时。
  */
-schedule_id?: ScheduleId | null, id: RunId, task_id: TaskId, task_version_id: TaskVersionId, status: RunStatus, trigger: TriggerKind, dry_run: boolean, created_at: string, started_at?: string | null, finished_at?: string | null, cost_usd: UsdMicros, 
+schedule_id?: ScheduleId | null, 
+/**
+ * 临时命令的执行没有任务页可去，也不能按任务重跑。
+ */
+task_kind: TaskKind, id: RunId, task_id: TaskId, task_version_id: TaskVersionId, status: RunStatus, trigger: TriggerKind, dry_run: boolean, created_at: string, started_at?: string | null, finished_at?: string | null, cost_usd: UsdMicros, 
 /**
  * 失败原因。只在终态且非成功时有值。
  *

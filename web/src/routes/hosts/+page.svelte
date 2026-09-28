@@ -8,6 +8,7 @@
   import { api, describeError, fieldErrors } from '$api/client';
   import { listHosts, probeHost, type Host } from '$api/models';
   import type { HostProbe } from '$api/types/HostProbe';
+  import BatchCommand from '$lib/hosts/BatchCommand.svelte';
   import { session } from '$lib/auth/session.svelte';
   import PageHeader from '$lib/ui/PageHeader.svelte';
   import Empty from '$lib/ui/Empty.svelte';
@@ -147,6 +148,19 @@
     }
   }
 
+  /** 勾选的主机：批量执行命令的对象。 */
+  let picked = $state<string[]>([]);
+  let batchOpen = $state(false);
+  const allPicked = $derived(hosts.length > 0 && hosts.every((h) => picked.includes(h.id)));
+  function togglePick(id: string) {
+    picked = picked.includes(id) ? picked.filter((x) => x !== id) : [...picked, id];
+  }
+  // 删掉的主机不能还留在勾选里
+  $effect(() => {
+    const ids = new Set(hosts.map((h) => h.id));
+    if (picked.some((id) => !ids.has(id))) picked = picked.filter((id) => ids.has(id));
+  });
+
   /** 最近连上的时间有多新：一天内算新，一周以上没连过要留意。 */
   const DAY = 86_400_000;
   function freshness(iso: string | null): string {
@@ -193,10 +207,17 @@
   {/snippet}
   {#snippet actions()}
     {#if session.can('admin')}
+      {#if hosts.length}
+        <button onclick={() => (batchOpen = true)} title="在勾选的主机、或某个 tag 下的全部主机上各跑一次">
+          执行命令{picked.length ? `（${picked.length} 台）` : ''}
+        </button>
+      {/if}
       <button class="btn-primary" onclick={openNew}>添加主机</button>
     {/if}
   {/snippet}
 </PageHeader>
+
+<BatchCommand open={batchOpen} {hosts} selected={picked} onclose={() => (batchOpen = false)} />
 
 {#if !session.can('admin')}
   <div class="callout danger">需要管理员权限：这里存的是 SSH 私钥。</div>
@@ -270,6 +291,14 @@
       <table>
         <thead>
           <tr>
+            <th class="pick">
+              <input
+                type="checkbox"
+                aria-label="全选"
+                checked={allPicked}
+                onchange={() => (picked = allPicked ? [] : hosts.map((h) => h.id))}
+              />
+            </th>
             <th>名称</th>
             <th>地址</th>
             <th>tag</th>
@@ -283,6 +312,14 @@
         <tbody>
           {#each hosts as host (host.id)}
             <tr class:on={editing?.id === host.id}>
+              <td class="pick">
+                <input
+                  type="checkbox"
+                  aria-label="选中 {host.name}"
+                  checked={picked.includes(host.id)}
+                  onchange={() => togglePick(host.id)}
+                />
+              </td>
               <td class="name">{host.name}</td>
               <td class="mono">{host.username}@{host.address}:{host.port}</td>
               <td>
@@ -376,6 +413,13 @@
   }
   .seen {
     white-space: nowrap;
+  }
+  .pick {
+    width: 1%;
+  }
+  .pick input {
+    width: auto;
+    height: auto;
   }
   .fresh {
     color: var(--ok-fg);

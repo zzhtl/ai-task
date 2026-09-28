@@ -51,9 +51,10 @@ pub async fn call(
         .and_then(|n| n.host.clone());
     let host_id = match &selector {
         Some(HostSelector::Host { host_id }) => Some(*host_id),
-        Some(HostSelector::Tag { tag }) => {
+        // 保存时就不允许 AI 步骤展开到多台机器；这里是第二道：远端工具只能对准一台
+        Some(HostSelector::Hosts { .. } | HostSelector::Tag { .. }) => {
             return Ok(Json(refused(format!(
-                "节点 `{}` 按 tag `{tag}` 选主机，这条路径还没实现",
+                "节点 `{}` 要在多台机器上各跑一次，AI 步骤的远端工具只能对准一台机器",
                 request.node_key
             ))));
         }

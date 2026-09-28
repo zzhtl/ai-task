@@ -9,7 +9,17 @@
    * 卡片之间能插入、能复制，顺序用按钮或 Alt+↑/↓ 调（拖拽对键盘和触屏都不友好）。
    */
   import { tick } from 'svelte';
-  import { newStep, reachOf, REACH_TOOLS, type Composition, type Reach, type Step } from './compose';
+  import {
+    describeTarget,
+    fansOut,
+    newStep,
+    reachOf,
+    REACH_TOOLS,
+    singleHost,
+    type Composition,
+    type Reach,
+    type Step
+  } from './compose';
   import type { Problem } from './problems';
   import Icon from '$lib/ui/Icon.svelte';
   import StepRail from '$lib/ui/StepRail.svelte';
@@ -58,8 +68,40 @@
 
   const clisOf = (hostId: string | null) =>
     hostId ? (hosts.find((h) => h.id === hostId)?.ai_clis ?? []) : [];
-  const hostLabel = (id: string | null) =>
-    id ? (hosts.find((h) => h.id === id)?.name ?? id.slice(0, 8)) : '本机';
+  const hostName = (id: string) => hosts.find((h) => h.id === id)?.name ?? id.slice(0, 8);
+
+  /** 主机上出现过的所有 tag，连同现在有几台。按 tag 下发时在执行那一刻解析。 */
+  const tagCounts = $derived.by(() => {
+    const counts = new Map<string, number>();
+    for (const h of hosts) for (const t of h.tags) counts.set(t, (counts.get(t) ?? 0) + 1);
+    return [...counts.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  });
+
+  /**
+   * 执行位置的下拉框。常见的"本机 / 某一台"一次点完；多台和按 tag 放在最后，
+   * 选中后下面再展开勾选框或 tag 选择。只有命令步骤能用这两种。
+   */
+  const MANY = '__hosts';
+  const BY_TAG = '__tag';
+  function targetValue(step: Step): string {
+    const t = step.target;
+    return t.kind === 'local' ? '' : t.kind === 'host' ? t.hostId : t.kind === 'hosts' ? MANY : BY_TAG;
+  }
+  function setTarget(step: Step, value: string) {
+    const current = step.target;
+    if (value === '') step.target = { kind: 'local' };
+    else if (value === MANY)
+      // 从单台切过来时把那一台带上，免得重新勾
+      step.target = { kind: 'hosts', hostIds: current.kind === 'host' ? [current.hostId] : [] };
+    else if (value === BY_TAG) step.target = { kind: 'tag', tag: tagCounts[0]?.[0] ?? '' };
+    else step.target = { kind: 'host', hostId: value };
+    onHostChange(step);
+  }
+  function toggleHost(step: Step, id: string) {
+    if (step.target.kind !== 'hosts') return;
+    const ids = step.target.hostIds;
+    step.target = { kind: 'hosts', hostIds: ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id] };
+  }
 
   // ---------------------------------------------------------------- 收起 / 定位
 
@@ -84,7 +126,7 @@
 
   /** 收起时的一行摘要：够认出是哪一步就行。 */
   function summaryOf(step: Step): string {
-    const where = hostLabel(step.hostId);
+    const where = describeTarget(step.target, hostName);
     if (step.kind === 'approval') return `在${where}停下来等人确认，${step.timeoutS ?? 900} 秒没人管按拒绝`;
     const first = step.body.trim().split('\n')[0] || '（还没写）';
     return `${where} · ${first}`;
@@ -158,7 +200,7 @@
     if (step.runner.kind !== 'host_cli') return;
     const wanted = step.runner.cli;
     // 新机器上没有原来那个 CLI 就退回中心执行，别留一个必然失败的配置
-    if (!clisOf(step.hostId).some((c) => c.name === wanted)) step.runner = { kind: 'center' };
+    if (!clisOf(singleHost(step.target)).some((c) => c.name === wanted)) step.runner = { kind: 'center' };
   }
 
   const placeholder = (kind: Step['kind']) =>
@@ -330,11 +372,36 @@
           <div class="opts">
             <label class="field">
               在哪台机器
-              <select bind:value={step.hostId} onchange={() => onHostChange(step)}>
-                <option value={null}>本机</option>
+              <select value={targetValue(step)} onchange={(e) => setTarget(step, e.currentTarget.value)}>
+                <option value="">本机</option>
                 {#each hosts as h (h.id)}<option value={h.id}>{h.name}</option>{/each}
+                <!-- 列表里没有（operator 读不到主机列表、主机被删了）也要显示当前值，不能悄悄变成本机 -->
+                {#if step.target.kind === 'host' && !hosts.some((h) => step.target.kind === 'host' && h.id === step.target.hostId)}
+                  <option value={step.target.hostId}>主机 {step.target.hostId.slice(0, 8)}</option>
+                {/if}
+                {#if step.kind === 'shell' || fansOut(step.target)}
+                  <option disabled>──────</option>
+                  <option value={MANY}>勾选多台，每台各跑一次</option>
+                  <option value={BY_TAG}>按 tag，每台各跑一次</option>
+                {/if}
               </select>
             </label>
+
+            {#if step.target.kind === 'tag'}
+              {@const current = step.target.tag}
+              <label class="field">
+                tag
+                <select
+                  value={current}
+                  onchange={(e) => (step.target = { kind: 'tag', tag: e.currentTarget.value })}
+                >
+                  {#if !tagCounts.some(([t]) => t === current)}
+                    <option value={current}>{current || '选一个 tag'}</option>
+                  {/if}
+                  {#each tagCounts as [tag, n] (tag)}<option value={tag}>{tag}（现在 {n} 台）</option>{/each}
+                </select>
+              </label>
+            {/if}
 
             {#if step.kind === 'ai'}
               <label class="field">
@@ -347,7 +414,7 @@
                   }}
                 >
                   <option value="center">中心的 Claude Code</option>
-                  {#each clisOf(step.hostId) as cli (cli.name)}
+                  {#each clisOf(singleHost(step.target)) as cli (cli.name)}
                     <option value={cli.name}>目标机上的 {cli.name}</option>
                   {/each}
                 </select>
@@ -381,6 +448,29 @@
               <input type="number" bind:value={step.timeoutS} min="30" max="86400" placeholder="默认" />
             </label>
           </div>
+
+          {#if step.target.kind === 'hosts'}
+            {@const picked = step.target.hostIds}
+            <fieldset class="hosts">
+              <legend>在哪几台上跑 <span class="faint">已选 {picked.length} 台，每台各跑一次、互不影响</span></legend>
+              {#each hosts as h (h.id)}
+                <label class="host">
+                  <input type="checkbox" checked={picked.includes(h.id)} onchange={() => toggleHost(step, h.id)} />
+                  <span>{h.name}</span>
+                  {#each h.tags as t (t)}<span class="tag">{t}</span>{/each}
+                </label>
+              {/each}
+              {#each picked.filter((id) => !hosts.some((h) => h.id === id)) as id (id)}
+                <label class="host">
+                  <input type="checkbox" checked onchange={() => toggleHost(step, id)} />
+                  <span class="faint">主机 {id.slice(0, 8)}（不在列表里）</span>
+                </label>
+              {/each}
+            </fieldset>
+          {/if}
+          {#if fansOut(step.target)}
+            <p class="hint">任一台失败这一步就算失败，其余照常跑完；重试只重跑失败的那几台。</p>
+          {/if}
 
           {#if step.kind === 'ai'}
             <p class="hint">
@@ -614,6 +704,31 @@
     font-size: var(--t-xs);
     color: var(--fg-faint);
     line-height: 1.5;
+  }
+  .hosts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s1) var(--s3);
+    margin: 0;
+    padding: var(--s2) var(--s3);
+    border: 1px solid var(--line);
+    border-radius: var(--r2);
+  }
+  .hosts legend {
+    padding: 0 var(--s1);
+    font-size: var(--t-xs);
+    color: var(--fg-dim);
+  }
+  .host {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s1);
+    font-size: var(--t-sm);
+  }
+  /* 全局的 input 有固定高度和宽度，勾选框要还原 */
+  .host input {
+    width: auto;
+    height: auto;
   }
   .sees {
     display: flex;

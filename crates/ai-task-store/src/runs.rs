@@ -5,7 +5,7 @@
 //! 因此它们的更新永远和对应的事件写在同一个事务里。
 
 use ai_task_proto::{
-    RunId, RunStatus, ScheduleId, TaskId, TaskVersionId, TriggerKind, UsdMicros, UserId,
+    RunId, RunStatus, ScheduleId, TaskId, TaskKind, TaskVersionId, TriggerKind, UsdMicros, UserId,
     WorkspaceId,
 };
 use chrono::{DateTime, Utc};
@@ -116,6 +116,7 @@ pub struct RunMeta {
     /// 触发人的显示名。
     pub triggered_by: Option<String>,
     pub schedule_id: Option<ScheduleId>,
+    pub task_kind: TaskKind,
 }
 
 impl Store {
@@ -417,7 +418,7 @@ impl Store {
         id: RunId,
     ) -> Result<RunMeta, StoreError> {
         let row = sqlx::query(
-            "SELECT t.name AS task_name, v.version_no,
+            "SELECT t.name AS task_name, t.kind AS task_kind, v.version_no,
                     COALESCE(cv.version_no, v.version_no) AS current_version_no,
                     u.display_name AS triggered_by, r.schedule_id
              FROM runs r
@@ -443,6 +444,7 @@ impl Store {
             schedule_id: row
                 .try_get::<Option<uuid::Uuid>, _>("schedule_id")?
                 .map(ScheduleId),
+            task_kind: crate::tasks::parse_task_kind(&row.try_get::<String, _>("task_kind")?)?,
         })
     }
 
