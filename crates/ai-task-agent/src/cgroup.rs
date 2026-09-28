@@ -452,12 +452,17 @@ mod tests {
 
     #[test]
     fn reaped_children_cpu_is_counted_in_proc_mode() {
-        // 起一堆快进快出的子进程，它们在采样间隙就死了。
+        // 起几个快进快出的子进程，它们在采样间隙就死了。
         // 只算树上活着的进程会把这些 CPU 全丢掉。
+        // 每个都得烧够几个时钟节拍：/proc 里的 CPU 按节拍（10ms）记，
+        // 以前起 30 个 `true`，在快的 CI 机器上加起来常常不到一格，读数纹丝不动。
         let mut scope = Scope::attach(CgroupMode::Proc, "unused", std::process::id());
         let before = scope.sample().cpu_usec;
-        for _ in 0..30 {
-            let _ = Command::new("true").status();
+        for _ in 0..3 {
+            Command::new("sh")
+                .args(["-c", "i=0; while [ $i -lt 20000 ]; do i=$((i+1)); done"])
+                .status()
+                .expect("起子进程");
         }
         let after = scope.sample().cpu_usec;
         assert!(
